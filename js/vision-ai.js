@@ -193,6 +193,7 @@
   function init() {
     const $ = (id) => document.getElementById(id);
     const panel = $('vision-panel');
+    const stage = $('vision-stage');
     const video = $('vision-video');
     const canvas = $('vision-canvas');
     const statusBox = $('vision-status');
@@ -333,6 +334,7 @@
       isProcessing = false;
       releaseStream();
       clearCanvas();
+      if (stage) stage.style.aspectRatio = '16 / 9';
       resetDetection();
       setUrgent(false);
       if (!keepStatus) setStatus('idle');
@@ -351,7 +353,7 @@
         return Promise.reject(err);
       }
       return navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: { ideal: 16 / 9 } },
         audio: false
       });
     }
@@ -471,8 +473,11 @@
         await waitForVideoReady();
         if (token !== sessionToken) return;
 
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
+        const vw = video.videoWidth || 1280;
+        const vh = video.videoHeight || 720;
+        canvas.width = vw;
+        canvas.height = vh;
+        if (stage) stage.style.aspectRatio = `${vw} / ${vh}`;
         running = true;
         lastVideoTime = -1;
         lastSendAt = 0;

@@ -1630,7 +1630,10 @@
         if (btnLabel) btnLabel.textContent = 'Escuchando…';
 
         const config = SIM_SECTORS[state.sector];
-        const sample = config ? config.dictationSample : 'Atención validada en ventanilla.';
+        let sample = config ? config.dictationSample : 'Atención validada en ventanilla.';
+        if (state.sector === 'Banco' && state.sensitiveFields[1] && state.sensitiveFields[1].value) {
+          sample = `Operación bancaria validada por ${state.sensitiveFields[1].value} en ventanilla.`;
+        }
         const words = sample.split(' ');
         let i = 0;
         chatInput.value = '';

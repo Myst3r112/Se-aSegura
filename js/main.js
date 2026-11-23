@@ -46,7 +46,11 @@
     Banco: {
       subtitle: 'Banco · Datos de ejemplo',
       prompt: 'Por favor, confirma tu DNI y el monto de la operación.',
-      dataLines: ['DNI: 00000000', 'Monto: S/ 150.00'],
+      editBtnLabel: 'Editar DNI y Monto',
+      dataFields: [
+        { label: 'DNI', value: '00000000' },
+        { label: 'Monto', value: 'S/ 150.00' }
+      ],
       procedures: [
         'Consulta de saldo y retiro',
         'Apertura de cuenta',
@@ -62,7 +66,11 @@
     Comisaría: {
       subtitle: 'Comisaría · Datos de ejemplo',
       prompt: 'Indícanos el motivo de tu denuncia o constancia policial.',
-      dataLines: ['DNI: 00000000', 'Referencia: Parte N.° 2026-041'],
+      editBtnLabel: 'Editar datos',
+      dataFields: [
+        { label: 'DNI', value: '00000000' },
+        { label: 'Referencia', value: 'Parte N.° 2026-041' }
+      ],
       procedures: [
         'Registro de denuncia policial',
         'Constancia por pérdida de documentos',
@@ -78,7 +86,11 @@
     Salud: {
       subtitle: 'Centro de Salud · Datos de ejemplo',
       prompt: 'Confirma tus síntomas principales y si presentas alergias.',
-      dataLines: ['DNI: 00000000', 'Área: Triaje · Prioridad II'],
+      editBtnLabel: 'Editar datos',
+      dataFields: [
+        { label: 'DNI', value: '00000000' },
+        { label: 'Área', value: 'Triaje · Prioridad II' }
+      ],
       procedures: [
         'Triaje y consulta médica general',
         'Explicación de receta y dosis',
@@ -94,7 +106,11 @@
     Municipal: {
       subtitle: 'Municipalidad · Datos de ejemplo',
       prompt: 'Indica el número de expediente o trámite municipal.',
-      dataLines: ['DNI: 00000000', 'Expediente: 00412-2026'],
+      editBtnLabel: 'Editar datos',
+      dataFields: [
+        { label: 'DNI', value: '00000000' },
+        { label: 'Expediente', value: '00412-2026' }
+      ],
       procedures: [
         'Mesa de partes y seguimiento',
         'Licencia de funcionamiento',
@@ -109,11 +125,51 @@
     }
   };
 
+  /* Términos del Glosario Técnico LSP (Figma P10) */
+  const GLOSSARY_TERMS = [
+    {
+      id: 'medida-cautelar',
+      term: 'Medida Cautelar',
+      category: 'Legal/Policial',
+      definition: 'Disposición urgente emitida para proteger a la persona denunciante o asegurar un derecho antes de la resolución final.'
+    },
+    {
+      id: 'denuncia',
+      term: 'Denuncia',
+      category: 'Legal/Policial',
+      definition: 'Declaración formal ante comisaría o fiscalía sobre un delito, agresión o pérdida de documentos para iniciar atención oficial.'
+    },
+    {
+      id: 'consentimiento',
+      term: 'Consentimiento',
+      category: 'Legal/Policial',
+      definition: 'Autorización libre e informada de la persona usuaria, explicada en LSP o texto claro, antes de ejecutar un trámite o acto médico.'
+    },
+    {
+      id: 'cci',
+      term: 'CCI',
+      category: 'Bancario/Financiero',
+      definition: 'Código de Cuenta Interbancario de 20 dígitos usado para enviar o recibir transferencias entre distintas entidades financieras del Perú.'
+    },
+    {
+      id: 'amortizacion',
+      term: 'Amortización',
+      category: 'Bancario/Financiero',
+      definition: 'Pago parcial o total destinado a reducir el capital pendiente de un crédito o préstamo bancario.'
+    },
+    {
+      id: 'bloqueo-tarjeta',
+      term: 'Bloqueo de Tarjeta',
+      category: 'Bancario/Financiero',
+      definition: 'Suspensión inmediata de una tarjeta de débito o crédito por pérdida, robo o consumo no reconocido.'
+    }
+  ];
+
   /* Canales de comunicación del simulador (HU-035) */
   const CHANNEL_INFO = {
     lsp: { badge: 'Intérprete LSP', meta: 'LSP HD', receipt: 'Lengua de Señas Peruana', oneTap: 'Lengua de Señas Peruana' },
     camara: { badge: 'Cámara IA (Gestos)', meta: 'Cámara IA', receipt: 'Cámara IA (Gestos)', oneTap: 'Cámara IA (Gestos)' },
-    texto: { badge: 'Texto / Lectura', meta: 'Texto/Lectura', receipt: 'Texto / Lectura', oneTap: 'Texto/Lectura' }
+    texto: { badge: 'Texto / Lectura', meta: 'Texto/Lectura', receipt: 'Texto / Lectura', oneTap: 'Texto / Lectura' }
   };
 
   /* Registro de comprobantes verificables en sesión + ejemplo oficial SEG-84920 */
@@ -140,10 +196,12 @@
     fontScale: '100',
     simView: 'ventanilla',
     sessionActive: false,
+    connecting: false,
     channel: 'lsp',
     sector: 'Banco',
     procedure: 'Consulta de saldo y retiro',
     emergencyActive: false,
+    emergencyType: null,
     selectedCrisis: null,
     turnDirection: 'lsp', // 'lsp' | 'funcionario'
     micMuted: false,
@@ -151,6 +209,16 @@
     cameraAngle: 'Frontal · Intérprete LSP',
     outageActive: false,
     dictating: false,
+    sensitiveFields: [
+      { label: 'DNI', value: '00000000' },
+      { label: 'Monto', value: 'S/ 150.00' }
+    ],
+    interpreterStatus: 'Disponible',
+    criticalAlertActive: false,
+    criticalAccepted: false,
+    glossaryCategory: 'Todos',
+    glossaryQuery: '',
+    glossaryFavorites: new Set(),
     chatMessages: [
       {
         sender: 'Personal de ventanilla',
@@ -496,21 +564,30 @@
     const viewConsola = document.getElementById('sim-view-consola');
     const btnConsoleBack = document.getElementById('btn-console-back');
 
+    const stepsGuide = document.getElementById('sim-steps-guide');
+    const stepItems = stepsGuide ? stepsGuide.querySelectorAll('.sim-step-item[data-sim-step]') : [];
+
     const sessionMeta = document.getElementById('sim-session-meta');
     const btnOneTap = document.getElementById('btn-one-tap-start');
     const btnEmergency = document.getElementById('btn-emergency-mode');
     const btnExitEmergency = document.getElementById('btn-exit-emergency');
     const emergencyPanel = document.getElementById('emergency-panel');
     const emergencyQueueTimer = document.getElementById('emergency-queue-timer');
+    const emergencyTypeBtns = document.querySelectorAll('.emergency-type-btn[data-emergency-type]');
     const crisisCards = document.querySelectorAll('.crisis-card[data-crisis]');
 
     const channelChips = document.querySelectorAll('.pref-chip[data-channel]');
     const sectorChips = document.querySelectorAll('.pref-chip[data-sim-sector]');
     const procedureSelect = document.getElementById('sim-procedure-select');
 
-    const textModeOverlay = document.getElementById('sim-textmode-overlay');
+    const textModeCard = document.getElementById('sim-textmode-card');
+    const textSwitchBtns = document.querySelectorAll('[data-switch-channel]');
     const videoStage = document.getElementById('sim-video-stage');
     const videoBadgesRow = document.getElementById('sim-video-badges');
+    const callControls = document.getElementById('sim-call-controls');
+    const connectingOverlay = document.getElementById('sim-connecting-overlay');
+    const btnCancelConnect = document.getElementById('btn-cancel-connect');
+    const btnEscalateConnect = document.getElementById('btn-escalate-connect');
     const visionPanel = document.getElementById('vision-panel');
     const channelBadge = document.getElementById('sim-channel-badge');
     const channelBadgeText = document.getElementById('sim-channel-badge-text');
@@ -549,11 +626,45 @@
     const chatMessagesBox = document.getElementById('sim-chat-messages');
     const quickTemplatesBox = document.getElementById('sim-quick-templates');
     const btnCopyData = document.getElementById('btn-copy-data');
+    const btnEditData = document.getElementById('btn-edit-data');
+    const sensitiveEditForm = document.getElementById('sensitive-edit-form');
+    const editLabel1 = document.getElementById('edit-label-1');
+    const editLabel2 = document.getElementById('edit-label-2');
+    const editField1 = document.getElementById('edit-field-1');
+    const editField2 = document.getElementById('edit-field-2');
+    const btnCancelEditData = document.getElementById('btn-cancel-edit-data');
     const chatForm = document.getElementById('sim-chat-form');
     const chatInput = document.getElementById('sim-chat-input');
     const btnVoiceDictation = document.getElementById('btn-voice-dictation');
 
+    // Consola del Intérprete (P8, P9, P10)
+    const interpreterStatusChips = document.querySelectorAll('.console-status-chip[data-interpreter-status]');
+    const consoleInterpreterState = document.getElementById('console-interpreter-state');
+    const btnConsoleSimAlert = document.getElementById('btn-console-sim-alert');
+    const consoleCriticalBanner = document.getElementById('console-critical-banner');
+    const consoleCriticalTitle = document.getElementById('console-critical-title');
+    const consoleCriticalSub = document.getElementById('console-critical-sub');
+    const btnAcceptCritical = document.getElementById('btn-accept-critical-emergency');
+    const consolePipBox = document.getElementById('console-pip-box');
+    const consolePipPreview = document.getElementById('console-pip-preview');
+    const btnTogglePip = document.getElementById('btn-toggle-pip');
+    const btnConsoleSupport = document.getElementById('btn-console-support');
+    const consoleSupportNotice = document.getElementById('console-support-notice');
+    const consolePrivateNotes = document.getElementById('console-private-notes');
+    const btnOpenGlossary = document.getElementById('btn-open-glossary');
+
+    // Glosario LSP (P10)
+    const glossarySearch = document.getElementById('glossary-search');
+    const glossaryFilterBtns = document.querySelectorAll('.glossary-filter-btn[data-glossary-filter]');
+    const glossaryList = document.getElementById('glossary-list');
+    const glossaryEmpty = document.getElementById('glossary-empty');
+
+    // Calificación de cierre (P6)
+    const closureRatingBtns = document.querySelectorAll('.closure-rating-btn[data-rating]');
+    const closureRatingFeedback = document.getElementById('closure-rating-feedback');
+
     let emergencyInterval = null;
+    let connectingTimer = null;
 
     function switchSimulatorView(viewName) {
       state.simView = viewName;
@@ -577,21 +688,57 @@
 
     function renderChat() {
       if (!chatMessagesBox) return;
-      chatMessagesBox.innerHTML = state.chatMessages
-        .map(
-          (msg) => `
-          <div class="chat-bubble ${msg.type === 'user' ? 'chat-bubble-user' : ''}">
-            <span class="chat-sender">${msg.sender}</span>
-            <p>${msg.text}</p>
-          </div>`
-        )
-        .join('');
+      chatMessagesBox.textContent = '';
+      state.chatMessages.forEach((msg) => {
+        const bubble = document.createElement('div');
+        bubble.className = `chat-bubble${msg.type === 'user' ? ' chat-bubble-user' : ''}`;
+
+        const senderEl = document.createElement('span');
+        senderEl.className = 'chat-sender';
+        senderEl.textContent = msg.sender;
+
+        const textEl = document.createElement('p');
+        textEl.textContent = msg.text;
+
+        bubble.append(senderEl, textEl);
+        chatMessagesBox.appendChild(bubble);
+      });
       chatMessagesBox.scrollTop = chatMessagesBox.scrollHeight;
     }
 
     function appendMessage(sender, text, type = 'staff') {
       state.chatMessages.push({ sender, text, type });
       renderChat();
+    }
+
+    function updateStepsGuide() {
+      if (!stepItems.length) return;
+      let currentStep = 1;
+      if (state.connecting) currentStep = 2;
+      else if (state.sessionActive || state.emergencyActive) currentStep = 3;
+
+      stepItems.forEach((item) => {
+        const num = Number(item.dataset.simStep);
+        item.classList.toggle('is-done', num < currentStep);
+        item.classList.toggle('is-current', num === currentStep);
+      });
+    }
+
+    function updateLiveBadge() {
+      if (!liveBadge) return;
+      liveBadge.classList.remove('is-emergency', 'is-ready', 'is-connecting');
+      if (state.emergencyActive) {
+        liveBadge.textContent = 'EMERGENCIA · HD';
+        liveBadge.classList.add('is-emergency');
+      } else if (state.connecting) {
+        liveBadge.textContent = 'CONECTANDO…';
+        liveBadge.classList.add('is-connecting');
+      } else if (state.sessionActive) {
+        liveBadge.textContent = 'EN VIVO · HD';
+      } else {
+        liveBadge.textContent = 'LISTO PARA INICIAR';
+        liveBadge.classList.add('is-ready');
+      }
     }
 
     function updateTurnLabels() {
@@ -606,10 +753,101 @@
       const channelLabel = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).meta;
       const statusLabel = state.emergencyActive
         ? 'EMERGENCIA PRIORITARIA (<30 s)'
-        : state.sessionActive
-          ? 'Atención en curso'
-          : 'Sesión lista para iniciar';
+        : state.connecting
+          ? 'Conectando intérprete LSP (<30 s)…'
+          : state.sessionActive
+            ? 'Atención en curso'
+            : 'Sesión lista para iniciar';
       sessionMeta.textContent = `Sin login · ${statusLabel} · ${state.sector} (${channelLabel})`;
+    }
+
+    function renderSensitiveData() {
+      const fields = state.sensitiveFields;
+      [sensitiveDataBox, consoleDataBox].forEach((container) => {
+        if (!container) return;
+        container.textContent = '';
+        fields.forEach((field) => {
+          const p = document.createElement('p');
+          p.textContent = `${field.label}: ${field.value}`;
+          container.appendChild(p);
+        });
+      });
+
+      const config = SIM_SECTORS[state.sector];
+      if (btnEditData && config) {
+        btnEditData.textContent = config.editBtnLabel || 'Editar datos';
+      }
+    }
+
+    function closeSensitiveEditForm(restoreFocus = false) {
+      if (!sensitiveEditForm) return;
+      sensitiveEditForm.hidden = true;
+      if (btnEditData) {
+        btnEditData.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) btnEditData.focus();
+      }
+    }
+
+    function updateConsolePriorityContext() {
+      if (!consolePriorityVal) return;
+      if (!state.emergencyActive) {
+        consolePriorityVal.textContent = 'Atención de prueba';
+        return;
+      }
+      const parts = [state.emergencyType, state.selectedCrisis].filter(Boolean);
+      consolePriorityVal.textContent = parts.length
+        ? `EMERGENCIA (<30 s) · ${parts.join(' / ')}`
+        : 'EMERGENCIA PRIORITARIA (<30 s)';
+    }
+
+    function updateCriticalBanner() {
+      if (!consoleCriticalBanner) return;
+      const active = state.criticalAlertActive || state.emergencyActive;
+      consoleCriticalBanner.hidden = !active;
+      if (!active) return;
+
+      const detail = [state.emergencyType, state.selectedCrisis].filter(Boolean).join(' · ');
+      if (state.criticalAccepted) {
+        consoleCriticalBanner.classList.add('is-accepted');
+        if (consoleCriticalTitle) {
+          consoleCriticalTitle.textContent = detail
+            ? `EMERGENCIA ACEPTADA · ${detail} (<30 s)`
+            : 'EMERGENCIA ACEPTADA · Comisaría Alfonso Ugarte — Denuncia Policial (<30 s)';
+        }
+        if (consoleCriticalSub) {
+          consoleCriticalSub.textContent = 'Intérprete en sala prioritaria · Atención en vivo sin grabación.';
+        }
+        if (btnAcceptCritical) {
+          btnAcceptCritical.textContent = 'Emergencia aceptada';
+          btnAcceptCritical.disabled = true;
+        }
+      } else {
+        consoleCriticalBanner.classList.remove('is-accepted');
+        if (consoleCriticalTitle) {
+          consoleCriticalTitle.textContent = detail
+            ? `EMERGENCIA CRÍTICA · ${detail} — Atención Prioritaria (<30 s)`
+            : 'EMERGENCIA CRÍTICA · Comisaría Alfonso Ugarte — Denuncia Policial (<30 s)';
+        }
+        if (consoleCriticalSub) {
+          consoleCriticalSub.textContent = 'Prioridad máxima en cola · Sin grabación de video';
+        }
+        if (btnAcceptCritical) {
+          btnAcceptCritical.textContent = 'Aceptar Emergencia Ahora';
+          btnAcceptCritical.disabled = false;
+        }
+      }
+    }
+
+    function setInterpreterStatus(statusLabel) {
+      state.interpreterStatus = statusLabel;
+      interpreterStatusChips.forEach((chip) => {
+        const active = chip.dataset.interpreterStatus === statusLabel;
+        chip.classList.toggle('is-active', active);
+        chip.setAttribute('aria-pressed', String(active));
+      });
+      if (consoleInterpreterState) {
+        consoleInterpreterState.textContent = statusLabel;
+      }
     }
 
     function updateSectorContext(sectorName) {
@@ -617,14 +855,12 @@
       const config = SIM_SECTORS[sectorName];
       if (!config) return;
 
+      state.sensitiveFields = config.dataFields.map((f) => ({ ...f }));
+      closeSensitiveEditForm(false);
+      renderSensitiveData();
+
       if (chatSectorLabel) chatSectorLabel.textContent = config.subtitle;
       if (consoleSectorLabel) consoleSectorLabel.textContent = config.subtitle;
-      if (sensitiveDataBox) {
-        sensitiveDataBox.innerHTML = config.dataLines.map((line) => `<p>${line}</p>`).join('');
-      }
-      if (consoleDataBox) {
-        consoleDataBox.innerHTML = config.dataLines.map((line) => `<p>${line}</p>`).join('');
-      }
       if (procedureSelect) {
         procedureSelect.innerHTML = config.procedures
           .map((proc) => `<option value="${proc}">${proc}</option>`)
@@ -635,7 +871,7 @@
       if (quickTemplatesBox) {
         quickTemplatesBox.innerHTML = config.templates
           .map(
-            (tpl, idx) =>
+            (tpl) =>
               `<button type="button" class="template-chip" data-template="${tpl}">${tpl.slice(0, 26)}${tpl.length > 26 ? '…' : ''}</button>`
           )
           .join('');
@@ -650,6 +886,8 @@
       ];
       renderChat();
       updateSessionMeta();
+      updateLiveBadge();
+      updateStepsGuide();
     }
 
     // Delegación para plantillas rápidas
@@ -660,6 +898,9 @@
         const text = chip.dataset.template;
         if (!text) return;
         state.sessionActive = true;
+        updateLiveBadge();
+        updateStepsGuide();
+        updateSessionMeta();
         appendMessage('Ciudadano (Plantilla)', text, 'user');
         setTimeout(() => {
           appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${state.procedure}. Continuamos con tu atención.`, 'staff');
@@ -667,30 +908,99 @@
       });
     }
 
-    // Inicio One-Tap (HU-001 a HU-005)
+    function cancelConnecting() {
+      if (connectingTimer) {
+        clearTimeout(connectingTimer);
+        connectingTimer = null;
+      }
+      state.connecting = false;
+      if (connectingOverlay) connectingOverlay.hidden = true;
+      updateLiveBadge();
+      updateStepsGuide();
+      updateSessionMeta();
+    }
+
+    // Inicio One-Tap (HU-001 a HU-005, transición Listo -> Conectando -> En vivo en LSP; inmediato en Cámara IA / Texto)
     if (btnOneTap) {
       btnOneTap.addEventListener('click', () => {
-        state.sessionActive = true;
+        if (state.connecting) return;
+
+        if (state.channel !== 'lsp') {
+          state.sessionActive = true;
+          updateLiveBadge();
+          updateStepsGuide();
+          updateSessionMeta();
+          appendMessage(
+            'Sistema SeñaSegura',
+            `Atención iniciada de forma inmediata (${state.sector} · ${state.procedure}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
+            'staff'
+          );
+          return;
+        }
+
+        if (state.sessionActive) {
+          appendMessage(
+            'Sistema SeñaSegura',
+            `Atención en curso (${state.sector} · ${state.procedure}). Canal: Intérprete LSP.`,
+            'staff'
+          );
+          return;
+        }
+
+        state.connecting = true;
+        if (connectingOverlay) connectingOverlay.hidden = false;
+        updateLiveBadge();
+        updateStepsGuide();
         updateSessionMeta();
-        appendMessage(
-          'Sistema SeñaSegura',
-          `Atención iniciada en 1 toque (${state.sector} · ${state.procedure}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
-          'staff'
-        );
+
+        connectingTimer = setTimeout(() => {
+          connectingTimer = null;
+          state.connecting = false;
+          state.sessionActive = true;
+          if (connectingOverlay) connectingOverlay.hidden = true;
+          updateLiveBadge();
+          updateStepsGuide();
+          updateSessionMeta();
+          appendMessage(
+            'Sistema SeñaSegura',
+            `Intérprete LSP en línea (${state.sector} · ${state.procedure}). Atención iniciada en 1 toque.`,
+            'staff'
+          );
+        }, 1200);
       });
     }
 
-    // Modo Emergencia <30 s (HU-009, HU-011, HU-014, HU-015)
+    if (btnCancelConnect) {
+      btnCancelConnect.addEventListener('click', () => {
+        cancelConnecting();
+        if (btnOneTap) btnOneTap.focus();
+      });
+    }
+
+    if (btnEscalateConnect) {
+      btnEscalateConnect.addEventListener('click', () => {
+        cancelConnecting();
+        activateEmergency();
+      });
+    }
+
+    // Modo Emergencia <30 s (HU-009, HU-011, HU-014, HU-015, Figma P2)
     function activateEmergency() {
+      if (state.connecting) cancelConnecting();
+      if (state.channel !== 'lsp') {
+        setChannel('lsp');
+      }
       state.emergencyActive = true;
       state.sessionActive = true;
+      state.criticalAlertActive = true;
+      state.criticalAccepted = false;
+
       if (emergencyPanel) emergencyPanel.hidden = false;
       if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
-      if (liveBadge) {
-        liveBadge.textContent = 'EMERGENCIA · HD';
-        liveBadge.classList.add('is-emergency');
-      }
-      if (consolePriorityVal) consolePriorityVal.textContent = 'EMERGENCIA PRIORITARIA (<30 s)';
+      updateLiveBadge();
+      updateStepsGuide();
+      updateConsolePriorityContext();
+      updateCriticalBanner();
       playEmergencyTone();
       updateSessionMeta();
 
@@ -714,7 +1024,7 @@
           }
           appendMessage(
             'Intérprete LSP (Emergencia)',
-            'Conexión prioritaria establecida en menos de 30 segundos. Indica tu emergencia o selecciona un pictograma.',
+            'Conexión prioritaria establecida en menos de 30 segundos. Indica el tipo de emergencia o toca un símbolo rápido.',
             'staff'
           );
         }
@@ -723,16 +1033,28 @@
 
     function deactivateEmergency() {
       state.emergencyActive = false;
+      state.emergencyType = null;
       state.selectedCrisis = null;
-      if (emergencyInterval) clearInterval(emergencyInterval);
+      state.criticalAlertActive = false;
+      state.criticalAccepted = false;
+      if (emergencyInterval) {
+        clearInterval(emergencyInterval);
+        emergencyInterval = null;
+      }
       if (emergencyPanel) emergencyPanel.hidden = true;
       if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'false');
-      if (liveBadge) {
-        liveBadge.textContent = 'EN VIVO · HD';
-        liveBadge.classList.remove('is-emergency');
-      }
-      if (consolePriorityVal) consolePriorityVal.textContent = 'Atención de prueba';
-      crisisCards.forEach((card) => card.classList.remove('is-selected'));
+      emergencyTypeBtns.forEach((btn) => {
+        btn.classList.remove('is-selected');
+        btn.setAttribute('aria-pressed', 'false');
+      });
+      crisisCards.forEach((card) => {
+        card.classList.remove('is-selected');
+        card.setAttribute('aria-pressed', 'false');
+      });
+      updateConsolePriorityContext();
+      updateCriticalBanner();
+      updateLiveBadge();
+      updateStepsGuide();
       updateSessionMeta();
     }
 
@@ -750,17 +1072,47 @@
       btnExitEmergency.addEventListener('click', deactivateEmergency);
     }
 
+    emergencyTypeBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        emergencyTypeBtns.forEach((b) => {
+          const active = b === btn;
+          b.classList.toggle('is-selected', active);
+          b.setAttribute('aria-pressed', String(active));
+        });
+        state.emergencyType = btn.dataset.emergencyType;
+        state.criticalAlertActive = true;
+        if (state.channel !== 'lsp') setChannel('lsp');
+
+        updateConsolePriorityContext();
+        updateCriticalBanner();
+        updateSessionMeta();
+
+        appendMessage(
+          'Alerta de Emergencia',
+          `Tipo seleccionado: ${state.emergencyType}. Prioridad máxima asignada en Consola del Intérprete (<30 s).`,
+          'user'
+        );
+      });
+    });
+
     crisisCards.forEach((card) => {
       card.addEventListener('click', () => {
-        crisisCards.forEach((c) => c.classList.remove('is-selected'));
-        card.classList.add('is-selected');
+        crisisCards.forEach((c) => {
+          const active = c === card;
+          c.classList.toggle('is-selected', active);
+          c.setAttribute('aria-pressed', String(active));
+        });
         state.selectedCrisis = card.dataset.crisis;
-        // Activar automáticamente canal LSP HD para enlace directo (detiene la Cámara IA si estaba activa)
-        setChannel('lsp');
+        state.criticalAlertActive = true;
+        if (state.channel !== 'lsp') setChannel('lsp');
+
+        updateConsolePriorityContext();
+        updateCriticalBanner();
+        updateSessionMeta();
 
         appendMessage(
           'Alerta de Crisis',
-          `Pictograma activado: ${state.selectedCrisis}. Videollamada HD >30 fps enlazada con prioridad.`,
+          `Símbolo rápido activado: ${state.selectedCrisis}. Videollamada HD >30 fps enlazada con prioridad.`,
           'user'
         );
       });
@@ -770,6 +1122,9 @@
     function setChannel(ch) {
       if (!CHANNEL_INFO[ch]) return;
       const previous = state.channel;
+      if (ch !== 'lsp' && state.connecting) {
+        cancelConnecting();
+      }
       state.channel = ch;
 
       channelChips.forEach((btn) => {
@@ -778,12 +1133,15 @@
         btn.setAttribute('aria-pressed', String(active));
       });
 
-      // Vistas según canal: video LSP / panel Cámara IA / overlay de texto
+      const isLsp = ch === 'lsp';
       const isCamera = ch === 'camara';
-      if (videoStage) videoStage.hidden = isCamera;
-      if (videoBadgesRow) videoBadgesRow.hidden = isCamera;
+      const isText = ch === 'texto';
+
+      if (videoStage) videoStage.hidden = !isLsp;
+      if (videoBadgesRow) videoBadgesRow.hidden = !isLsp;
+      if (callControls) callControls.hidden = !isLsp;
       if (visionPanel) visionPanel.hidden = !isCamera;
-      if (textModeOverlay) textModeOverlay.hidden = ch !== 'texto';
+      if (textModeCard) textModeCard.hidden = !isText;
 
       // Insignia visible de canal activo (color + ícono + texto)
       if (channelBadge) channelBadge.setAttribute('data-channel-active', ch);
@@ -799,6 +1157,13 @@
 
     channelChips.forEach((chip) => {
       chip.addEventListener('click', () => setChannel(chip.dataset.channel));
+    });
+
+    textSwitchBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const target = btn.dataset.switchChannel;
+        if (target) setChannel(target);
+      });
     });
 
     // Sectores del simulador
@@ -917,11 +1282,10 @@
       });
     }
 
-    // Copiar datos sensibles
+    // Copiar y Editar en vivo DNI / Monto (Figma P4 y P5)
     if (btnCopyData) {
       btnCopyData.addEventListener('click', () => {
-        const config = SIM_SECTORS[state.sector];
-        const textToCopy = config ? config.dataLines.join(' | ') : 'DNI: 00000000 | Monto: S/ 150.00';
+        const textToCopy = state.sensitiveFields.map((f) => `${f.label}: ${f.value}`).join(' | ');
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
           navigator.clipboard.writeText(textToCopy).catch(() => {});
         }
@@ -932,6 +1296,194 @@
         }, 1800);
       });
     }
+
+    if (btnEditData && sensitiveEditForm && editField1 && editField2) {
+      let editOpenedAt = 0;
+
+      btnEditData.addEventListener('click', () => {
+        const willOpen = sensitiveEditForm.hidden;
+        if (!willOpen) {
+          closeSensitiveEditForm(false);
+          return;
+        }
+        const [f1, f2] = state.sensitiveFields;
+        if (editLabel1 && f1) editLabel1.textContent = f1.label;
+        if (editLabel2 && f2) editLabel2.textContent = f2.label;
+        editField1.value = f1 ? f1.value : '';
+        editField2.value = f2 ? f2.value : '';
+        editOpenedAt = performance.now();
+        sensitiveEditForm.hidden = false;
+        btnEditData.setAttribute('aria-expanded', 'true');
+        setTimeout(() => {
+          if (!sensitiveEditForm.hidden) editField1.focus();
+        }, 60);
+      });
+
+      sensitiveEditForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (performance.now() - editOpenedAt < 150) return;
+        const v1 = editField1.value.trim();
+        const v2 = editField2.value.trim();
+        if (state.sensitiveFields[0] && v1) state.sensitiveFields[0].value = v1;
+        if (state.sensitiveFields[1] && v2) state.sensitiveFields[1].value = v2;
+        renderSensitiveData();
+        closeSensitiveEditForm(true);
+        state.sessionActive = true;
+        updateLiveBadge();
+        updateStepsGuide();
+        updateSessionMeta();
+        appendMessage('Sistema SeñaSegura', 'Datos actualizados para verificación visual.', 'staff');
+      });
+
+      sensitiveEditForm.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeSensitiveEditForm(true);
+        }
+      });
+    }
+
+    if (btnCancelEditData) {
+      btnCancelEditData.addEventListener('click', () => closeSensitiveEditForm(true));
+    }
+
+    // Consola del Intérprete: estado, alerta crítica, PiP, apoyo y bloc de notas (Figma P8, P9)
+    interpreterStatusChips.forEach((chip) => {
+      chip.addEventListener('click', () => setInterpreterStatus(chip.dataset.interpreterStatus));
+    });
+
+    if (btnConsoleSimAlert) {
+      btnConsoleSimAlert.addEventListener('click', () => {
+        state.criticalAlertActive = true;
+        state.criticalAccepted = false;
+        updateCriticalBanner();
+        if (btnAcceptCritical) btnAcceptCritical.focus();
+      });
+    }
+
+    if (btnAcceptCritical) {
+      btnAcceptCritical.addEventListener('click', () => {
+        state.criticalAccepted = true;
+        state.sessionActive = true;
+        setInterpreterStatus('Ocupado');
+        updateCriticalBanner();
+        updateLiveBadge();
+        updateStepsGuide();
+        updateSessionMeta();
+        appendMessage(
+          'Intérprete LSP (Consola)',
+          'Emergencia crítica aceptada en consola (<30 s). Atención prioritaria en curso.',
+          'staff'
+        );
+      });
+    }
+
+    if (btnTogglePip && consolePipBox && consolePipPreview) {
+      btnTogglePip.addEventListener('click', () => {
+        const willMinimize = !consolePipBox.classList.contains('is-minimized');
+        consolePipBox.classList.toggle('is-minimized', willMinimize);
+        consolePipPreview.hidden = willMinimize;
+        btnTogglePip.setAttribute('aria-expanded', String(!willMinimize));
+        btnTogglePip.textContent = willMinimize ? 'Mostrar' : 'Minimizar';
+      });
+    }
+
+    if (btnConsoleSupport && consoleSupportNotice) {
+      btnConsoleSupport.addEventListener('click', () => {
+        consoleSupportNotice.textContent =
+          'Respaldo solicitado: supervisor LSP notificado para apoyo o transferencia. La sesión actual continúa sin cortar el video.';
+        consoleSupportNotice.hidden = false;
+      });
+    }
+
+    // Glosario Técnico LSP (Figma P10)
+    function renderGlossary() {
+      if (!glossaryList) return;
+      const query = state.glossaryQuery.trim().toLowerCase();
+      const cat = state.glossaryCategory;
+
+      const filtered = GLOSSARY_TERMS.filter((item) => {
+        const catMatch = cat === 'Todos' || item.category === cat;
+        const textMatch =
+          !query ||
+          item.term.toLowerCase().includes(query) ||
+          item.definition.toLowerCase().includes(query) ||
+          item.category.toLowerCase().includes(query);
+        return catMatch && textMatch;
+      });
+
+      glossaryList.textContent = '';
+      if (glossaryEmpty) glossaryEmpty.hidden = filtered.length > 0;
+
+      filtered.forEach((item) => {
+        const li = document.createElement('li');
+        li.className = 'glossary-item';
+
+        const head = document.createElement('div');
+        head.className = 'glossary-item-head';
+
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'glossary-item-title-wrap';
+
+        const title = document.createElement('h3');
+        title.className = 'glossary-term';
+        title.textContent = item.term;
+
+        const badge = document.createElement('span');
+        badge.className = 'glossary-category-pill';
+        badge.textContent = item.category;
+
+        titleWrap.append(title, badge);
+
+        const isFav = state.glossaryFavorites.has(item.id);
+        const favBtn = document.createElement('button');
+        favBtn.type = 'button';
+        favBtn.className = `glossary-fav-btn${isFav ? ' is-fav' : ''}`;
+        favBtn.setAttribute('aria-pressed', String(isFav));
+        favBtn.setAttribute('aria-label', `${isFav ? 'Quitar' : 'Marcar'} ${item.term} como favorito`);
+        favBtn.textContent = isFav ? '\u{2605}' : '\u{2606}';
+        favBtn.addEventListener('click', () => {
+          if (state.glossaryFavorites.has(item.id)) state.glossaryFavorites.delete(item.id);
+          else state.glossaryFavorites.add(item.id);
+          renderGlossary();
+        });
+
+        head.append(titleWrap, favBtn);
+
+        const def = document.createElement('p');
+        def.className = 'glossary-definition';
+        def.textContent = item.definition;
+
+        li.append(head, def);
+        glossaryList.appendChild(li);
+      });
+    }
+
+    if (btnOpenGlossary) {
+      btnOpenGlossary.addEventListener('click', () => {
+        renderGlossary();
+        openDialog('modal-glossary', btnOpenGlossary);
+      });
+    }
+
+    if (glossarySearch) {
+      glossarySearch.addEventListener('input', () => {
+        state.glossaryQuery = glossarySearch.value;
+        renderGlossary();
+      });
+    }
+
+    glossaryFilterBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.glossaryCategory = btn.dataset.glossaryFilter || 'Todos';
+        glossaryFilterBtns.forEach((b) => {
+          const active = b === btn;
+          b.classList.toggle('is-active', active);
+          b.setAttribute('aria-pressed', String(active));
+        });
+        renderGlossary();
+      });
+    });
 
     // Dictado de voz simulado (o Web Speech API si está disponible)
     if (btnVoiceDictation && chatInput) {
@@ -972,6 +1524,8 @@
         state.sessionActive = true;
         appendMessage('Ciudadano / Usuario', text, 'user');
         chatInput.value = '';
+        updateLiveBadge();
+        updateStepsGuide();
         updateSessionMeta();
 
         setTimeout(() => {
@@ -983,6 +1537,32 @@
         }, 500);
       });
     }
+
+    // Calificación de experiencia en modal de cierre (Figma P6 / HU-029)
+    function resetClosureRating() {
+      closureRatingBtns.forEach((btn) => {
+        btn.classList.remove('is-selected');
+        btn.setAttribute('aria-pressed', 'false');
+      });
+      if (closureRatingFeedback) {
+        closureRatingFeedback.hidden = true;
+        closureRatingFeedback.textContent = '';
+      }
+    }
+
+    closureRatingBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        closureRatingBtns.forEach((b) => {
+          const active = b === btn;
+          b.classList.toggle('is-selected', active);
+          b.setAttribute('aria-pressed', String(active));
+        });
+        if (closureRatingFeedback) {
+          closureRatingFeedback.textContent = `¡Gracias por tu calificación! (${btn.dataset.rating})`;
+          closureRatingFeedback.hidden = false;
+        }
+      });
+    });
 
     // Cierre de atención, código de 8 dígitos, QR dinámico y purga local (HU-025, HU-026, HU-031)
     function finishAttentionAndPurge(triggerEl) {
@@ -1007,11 +1587,18 @@
         isDemoBase: false
       });
 
-      // Purga inmediata del chat local
+      // Purga inmediata del chat local, bloc de notas y restablecimiento de datos ficticios
+      if (state.connecting) cancelConnecting();
       state.chatMessages = [];
       state.sessionActive = false;
-      if (state.emergencyActive) deactivateEmergency();
+      if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
       if (chatInput) chatInput.value = '';
+      if (consolePrivateNotes) consolePrivateNotes.value = '';
+      if (consoleSupportNotice) {
+        consoleSupportNotice.hidden = true;
+        consoleSupportNotice.textContent = '';
+      }
+      setInterpreterStatus('Disponible');
       updateSectorContext(state.sector);
       // Purga local: el módulo de Cámara IA libera la cámara y limpia su salida
       document.dispatchEvent(new CustomEvent('senasegura:purge'));
@@ -1038,6 +1625,7 @@
       const verifierInput = document.getElementById('verifier-code-input');
       if (verifierInput) verifierInput.value = code;
 
+      resetClosureRating();
       openDialog('modal-closure', triggerEl);
     }
 
@@ -1096,10 +1684,18 @@
       });
     }
 
+    // Purga externa (por si algún evento dispara senasegura:purge)
+    document.addEventListener('senasegura:purge', () => {
+      if (consolePrivateNotes) consolePrivateNotes.value = '';
+    });
+
     // Inicializar estado por defecto
     updateSectorContext('Banco');
     updateTurnLabels();
+    setInterpreterStatus('Disponible');
     setChannel(state.channel);
+    updateLiveBadge();
+    updateStepsGuide();
 
     /**
      * Puente público hacia el módulo opcional de Cámara IA (js/vision-ai.js).
@@ -1111,6 +1707,8 @@
       appendChatMessage(sender, text, type = 'user') {
         state.sessionActive = true;
         appendMessage(sender, text, type);
+        updateLiveBadge();
+        updateStepsGuide();
         updateSessionMeta();
       },
       activateEmergency() {

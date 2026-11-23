@@ -46,14 +46,14 @@
   };
 
   const GESTURES = [
-    { id: 'palma', emoji: '✋', label: 'Palma abierta', phrase: 'Hola, necesito atención en ventanilla' },
-    { id: 'pulgar', emoji: '👍', label: 'Pulgar arriba', phrase: 'Sí, confirmo los datos' },
-    { id: 'puno', emoji: '✊', label: 'Puño cerrado', phrase: 'No / Detener operación' },
-    { id: 'indice', emoji: '☝️', label: 'Solo índice arriba', phrase: 'Quiero realizar una consulta o trámite' },
-    { id: 'v', emoji: '✌️', label: 'Dos dedos en V', phrase: 'Aquí tengo mi DNI / documento' },
+    { id: 'palma', emoji: '\u{270B}', label: 'Palma abierta', phrase: 'Hola, necesito atención en ventanilla' },
+    { id: 'pulgar', emoji: '\u{1F44D}', label: 'Pulgar arriba', phrase: 'Sí, confirmo los datos' },
+    { id: 'puno', emoji: '\u{270A}', label: 'Puño cerrado', phrase: 'No / Detener operación' },
+    { id: 'indice', emoji: '\u{261D}\u{FE0F}', label: 'Solo índice arriba', phrase: 'Quiero realizar una consulta o trámite' },
+    { id: 'v', emoji: '\u{270C}\u{FE0F}', label: 'Dos dedos en V', phrase: 'Aquí tengo mi DNI / documento' },
     {
       id: 'auxilio',
-      emoji: '🤟',
+      emoji: '\u{1F91F}',
       label: 'Seña de auxilio (ILY)',
       phrase: 'Necesito ayuda urgente — Escalar a Intérprete',
       urgent: true

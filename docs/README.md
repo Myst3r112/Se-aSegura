@@ -19,7 +19,8 @@ SeñaSegura/
 ├── css/
 │   └── styles.css              # Tokens oficiales, layout responsive, Alto Contraste y @media print
 ├── js/
-│   └── main.js                 # Lógica modular en Vanilla JS (ES6+)
+│   ├── main.js                 # Lógica modular en Vanilla JS (ES6+)
+│   └── vision-ai.js            # Cámara IA (Gestos): MediaPipe Hands cargado bajo demanda (jsDelivr, versión fijada)
 ├── assets/
 │   ├── fonts/                  # Atkinson Hyperlegible (400 y 700 woff2)
 │   ├── icons/                  # Iconografía SVG oficial exportada desde Figma

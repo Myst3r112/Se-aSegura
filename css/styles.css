@@ -95,6 +95,11 @@ img {
   max-width: 100%;
 }
 
+/* El atributo hidden siempre gana sobre display:flex/grid de componentes (paneles de emergencia, avisos, Cámara IA) */
+[hidden] {
+  display: none !important;
+}
+
 button,
 input,
 select {
@@ -2179,6 +2184,543 @@ html[data-contrast="high"] .modal-info-block h3 {
 
 html[data-contrast="high"] .demo-success-subtitle {
   color: #F59E0B;
+}
+
+/* =========================================================
+   CÁMARA IA (GESTOS) · Selector de canal, panel y módulo de visión
+   ========================================================= */
+
+/* Insignia de canal activo (color + ícono + texto) */
+.channel-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-8);
+  border: 2px solid var(--color-primary);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+.channel-badge[data-channel-active="camara"] {
+  border-color: var(--color-success);
+}
+
+.channel-badge[data-channel-active="texto"] {
+  border-color: var(--color-warning);
+}
+
+.channel-badge-icon {
+  flex-shrink: 0;
+  color: var(--color-primary);
+}
+
+.channel-badge[data-channel-active="camara"] .channel-badge-icon {
+  color: var(--color-success);
+}
+
+.channel-badge[data-channel-active="texto"] .channel-badge-icon {
+  color: var(--color-warning);
+}
+
+.channel-badge [data-icon] {
+  display: none;
+}
+
+.channel-badge[data-channel-active="lsp"] [data-icon="lsp"],
+.channel-badge[data-channel-active="camara"] [data-icon="camara"],
+.channel-badge[data-channel-active="texto"] [data-icon="texto"] {
+  display: inline;
+}
+
+html[data-contrast="high"] .channel-badge {
+  background-color: #121820;
+  border-color: #F59E0B;
+  color: #FFFFFF;
+}
+
+html[data-contrast="high"] .channel-badge-icon {
+  color: #F59E0B;
+}
+
+/* Panel principal */
+.vision-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  padding: var(--space-16);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-12);
+}
+
+html[data-contrast="high"] .vision-panel {
+  border: 2px solid #F59E0B;
+}
+
+.vision-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vision-title {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.vision-privacy {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+/* Barra de estado: color + ícono + texto */
+.vision-status {
+  --vs-color: var(--color-muted);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 2px solid var(--vs-color);
+  border-left-width: 8px;
+  border-radius: var(--radius-12);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.vision-status[data-state="loading"] {
+  --vs-color: var(--color-warning);
+}
+
+.vision-status[data-state="live"] {
+  --vs-color: var(--color-success);
+}
+
+.vision-status[data-state="simulation"] {
+  --vs-color: var(--color-primary);
+}
+
+html[data-contrast="high"] .vision-status {
+  --vs-color: #F59E0B;
+  background-color: #121820;
+}
+
+html[data-contrast="high"] .vision-status[data-state="idle"] {
+  --vs-color: #FFFFFF;
+}
+
+.vision-status-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--vs-color);
+}
+
+.vision-status-icon [data-state-icon] {
+  display: none;
+}
+
+.vision-status[data-state="idle"] [data-state-icon="idle"],
+.vision-status[data-state="loading"] [data-state-icon="loading"],
+.vision-status[data-state="live"] [data-state-icon="live"],
+.vision-status[data-state="simulation"] [data-state-icon="simulation"] {
+  display: inline;
+}
+
+.vision-status[data-state="loading"] [data-state-icon="loading"] {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: spin 1.1s linear infinite;
+}
+
+.vision-status[data-state="live"] [data-state-icon="live"] circle:last-child {
+  animation: vision-blink 1.4s ease-in-out infinite;
+}
+
+@keyframes vision-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.vision-notice {
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: var(--radius-12);
+  border: 2px solid var(--color-warning);
+  background-color: #FEF3C7;
+  color: #78350F;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+html[data-contrast="high"] .vision-notice {
+  background-color: #121820;
+  border-color: #F59E0B;
+  color: #FFFFFF;
+}
+
+/* Escenario de video + canvas alineados y en espejo */
+.vision-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--radius-12);
+  border: 2px solid var(--color-navy);
+  background-color: var(--color-navy);
+}
+
+html[data-contrast="high"] .vision-stage {
+  border-color: #F59E0B;
+}
+
+.vision-video,
+.vision-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: scaleX(-1);
+}
+
+.vision-video {
+  background-color: transparent;
+}
+
+.vision-canvas {
+  pointer-events: none;
+}
+
+.vision-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  background-color: rgba(10, 37, 64, 0.94);
+  color: #FFFFFF;
+}
+
+html[data-contrast="high"] .vision-placeholder {
+  background-color: #121820;
+}
+
+.vision-placeholder p {
+  margin: 0;
+  max-width: 420px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+/* Botones del módulo */
+.vision-actions,
+.vision-output-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-12);
+}
+
+.vision-btn {
+  flex: 1 1 200px;
+  min-height: 56px;
+  padding: 10px 16px;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.vision-btn-icon {
+  flex-shrink: 0;
+}
+
+.vision-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+html[data-contrast="high"] .vision-btn:disabled {
+  border-style: dashed;
+}
+
+html[data-contrast="high"] .vision-btn.btn-emergency {
+  background-color: #D92626;
+  color: #FFFFFF;
+}
+
+/* Respaldo: cuadrícula de 6 gestos */
+.vision-simulation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding: var(--space-16);
+  background-color: var(--color-surface);
+  border: 2px dashed var(--color-primary);
+  border-radius: var(--radius-12);
+}
+
+html[data-contrast="high"] .vision-simulation {
+  border-color: #F59E0B;
+}
+
+.vision-simulation-title {
+  margin: 0;
+  font-weight: 700;
+}
+
+.vision-gesture-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: var(--space-12);
+}
+
+.vision-gesture-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+  min-height: 56px;
+  padding: 12px;
+  text-align: left;
+  border-radius: var(--radius-12);
+  border: 2px solid var(--color-primary);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.vision-gesture-btn:hover {
+  background-color: var(--color-bg);
+}
+
+.vision-gesture-btn.is-urgent {
+  border-color: var(--color-emergency);
+}
+
+.vision-gesture-emoji {
+  font-size: 1.75rem;
+  line-height: 1.2;
+}
+
+.vision-gesture-label {
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.vision-gesture-text {
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+html[data-contrast="high"] .vision-gesture-btn {
+  background-color: #121820;
+  border-color: #F59E0B;
+  color: #FFFFFF;
+}
+
+html[data-contrast="high"] .vision-gesture-label {
+  color: #F59E0B;
+}
+
+html[data-contrast="high"] .vision-gesture-btn:hover {
+  background-color: #F59E0B;
+}
+
+html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-label,
+html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-text {
+  color: #121820;
+}
+
+/* Panel de salida (traducción) */
+.vision-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  padding: var(--space-16);
+  background-color: var(--color-surface);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-12);
+}
+
+html[data-contrast="high"] .vision-output {
+  border-color: #F59E0B;
+}
+
+.vision-output-label {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+.vision-gesture-name {
+  margin: 4px 0 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  overflow-wrap: anywhere;
+}
+
+html[data-contrast="high"] .vision-gesture-name {
+  color: #F59E0B;
+}
+
+.vision-phrase {
+  margin: 8px 0 0;
+  font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2rem);
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.vision-confidence {
+  margin: 8px 0 0;
+  font-weight: 700;
+}
+
+.vision-sent-note {
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+.vision-urgent-hint {
+  margin: 12px 0 0;
+  padding: 12px 16px;
+  border-left: 8px solid var(--color-emergency);
+  border-radius: var(--radius-8);
+  background-color: var(--color-emergency-bg);
+  color: var(--color-text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.vision-stability {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vision-stability-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-12);
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+.vision-progress {
+  height: 16px;
+  overflow: hidden;
+  border: 2px solid var(--color-muted);
+  border-radius: 8px;
+  background-color: var(--color-bg);
+}
+
+html[data-contrast="high"] .vision-progress {
+  border-color: #F59E0B;
+  background-color: #121820;
+}
+
+.vision-progress-fill {
+  width: 100%;
+  height: 100%;
+  background-color: var(--color-primary);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.1s linear;
+}
+
+html[data-contrast="high"] .vision-progress-fill {
+  background-color: #F59E0B;
+}
+
+/* Botón de escalado resaltado ante la seña de auxilio */
+.vision-escalate.is-highlighted {
+  box-shadow: 0 0 0 4px var(--color-surface), 0 0 0 8px var(--color-emergency);
+  animation: vision-pulse 1.2s ease-in-out infinite;
+}
+
+html[data-contrast="high"] .vision-escalate.is-highlighted {
+  box-shadow: 0 0 0 4px #121820, 0 0 0 8px #F59E0B;
+}
+
+@keyframes vision-pulse {
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vision-escalate.is-highlighted,
+  .vision-status[data-state="loading"] [data-state-icon="loading"],
+  .vision-status[data-state="live"] [data-state-icon="live"] circle:last-child {
+    animation: none;
+  }
+
+  .vision-progress-fill {
+    transition: none;
+  }
+}
+
+/* Botón flotante de Soporte: se aparta solo cuando coincidiría con CTAs/formularios */
+.floating-support-btn {
+  transition: opacity 0.2s ease, visibility 0.2s ease, transform 0.15s ease;
+}
+
+.floating-support-btn.is-avoiding {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.support-label-short {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .floating-support-btn {
+    transition: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .vision-stage {
+    aspect-ratio: 4 / 3;
+  }
+
+  .vision-btn {
+    flex-basis: 100%;
+  }
+
+  /* Soporte compacto (HU-046): ícono + "Soporte", área táctil ≥48×48 */
+  .floating-support-btn {
+    right: 16px;
+    bottom: 16px;
+    z-index: 850;
+    min-width: 48px;
+    min-height: 48px;
+    padding: 10px 16px;
+    gap: 8px;
+    font-size: 1rem;
+  }
+
+  .support-label-full {
+    display: none;
+  }
+
+  .support-label-short {
+    display: inline;
+  }
 }
 
 /* Responsive Tablet & Mobile (<768px) */

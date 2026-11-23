@@ -159,11 +159,11 @@
           <div class="bimodal-card">
             <h2 class="bimodal-title">Mensajería Asistida + Modo Emergencia</h2>
             <p class="bimodal-text">
-              Texto para la atención cotidiana. Intérprete LSP en &lt;30 s cuando la situación lo requiere. Sin login para iniciar.
+              Texto y Cámara IA para la atención cotidiana. Intérprete LSP en &lt;30 s cuando la situación lo requiere. Sin login para iniciar.
             </p>
           </div>
 
-          <div class="hero-actions">
+          <div class="hero-actions" data-support-avoid>
             <a href="#simulador" class="btn btn-primary">
               <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
               <span>Probar Simulador Interactivo</span>
@@ -279,7 +279,7 @@
           </div>
           <ol class="sector-steps" id="sector-panel-steps">
             <li><span class="step-num">01</span> Inicia con un toque</li>
-            <li><span class="step-num">02</span> Elige LSP o Texto/Lectura</li>
+            <li><span class="step-num">02</span> Elige LSP, Cámara IA o Texto/Lectura</li>
             <li><span class="step-num">03</span> Finaliza con tu comprobante</li>
           </ol>
         </div>
@@ -420,8 +420,17 @@
             <div class="sim-preferences">
               <div class="pref-group" role="group" aria-label="Canal de comunicación">
                 <span class="pref-label">Comunicación</span>
-                <button type="button" class="pref-chip is-active" data-channel="lsp" aria-pressed="true">LSP</button>
-                <button type="button" class="pref-chip" data-channel="texto" aria-pressed="false">Texto/Lectura</button>
+                <button type="button" class="pref-chip is-active" data-channel="lsp" aria-pressed="true">Intérprete LSP</button>
+                <button type="button" class="pref-chip" data-channel="camara" aria-pressed="false" aria-controls="vision-panel">Cámara IA (Gestos)</button>
+                <button type="button" class="pref-chip" data-channel="texto" aria-pressed="false">Texto / Lectura</button>
+                <span class="channel-badge" id="sim-channel-badge" data-channel-active="lsp" role="status">
+                  <svg class="channel-badge-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path data-icon="lsp" d="M5 12H19M14 17L19 12L14 7"/>
+                    <g data-icon="camara"><path d="M4 5H14C15.1 5 16 5.9 16 7V17C16 18.1 15.1 19 14 19H4C2.9 19 2 18.1 2 17V7C2 5.9 2.9 5 4 5Z"/><path d="M16 10L22 6V18L16 14"/></g>
+                    <g data-icon="texto"><path d="M4 6H20M4 12H20M4 18H14"/></g>
+                  </svg>
+                  <span id="sim-channel-badge-text">Canal activo: Intérprete LSP</span>
+                </span>
               </div>
 
               <div class="pref-group" role="group" aria-label="Sector institucional">
@@ -446,6 +455,86 @@
             <div class="sim-main-grid" id="sim-main-grid">
               <!-- Columna Video -->
               <div class="sim-video-column" id="sim-video-column">
+                <!-- Panel Cámara IA (Gestos): MediaPipe se inyecta SOLO al pulsar "Activar Cámara IA" -->
+                <section class="vision-panel" id="vision-panel" hidden aria-labelledby="vision-title" data-support-avoid>
+                  <div class="vision-head">
+                    <h4 class="vision-title" id="vision-title">Cámara IA (Gestos)</h4>
+                    <p class="vision-privacy">El video se procesa en tu dispositivo. No se graba ni se envía.</p>
+                  </div>
+
+                  <div class="vision-status" id="vision-status" data-state="idle" role="status">
+                    <span class="vision-status-icon" aria-hidden="true">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                        <g data-state-icon="idle"><circle cx="12" cy="12" r="8"/><path d="M8 8L16 16"/></g>
+                        <g data-state-icon="loading"><path d="M12 3V7M12 17V21M3 12H7M17 12H21M5.6 5.6L8.4 8.4M15.6 15.6L18.4 18.4M5.6 18.4L8.4 15.6M15.6 8.4L18.4 5.6"/></g>
+                        <g data-state-icon="live"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></g>
+                        <g data-state-icon="simulation"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9H15M9 12H15M9 15H12"/></g>
+                      </svg>
+                    </span>
+                    <span class="vision-status-text" id="vision-status-text">Cámara inactiva</span>
+                  </div>
+
+                  <p class="vision-notice" id="vision-notice" role="status" hidden></p>
+
+                  <div class="vision-stage" id="vision-stage">
+                    <video id="vision-video" class="vision-video" autoplay playsinline muted disablepictureinpicture aria-label="Vista previa de tu cámara"></video>
+                    <canvas id="vision-canvas" class="vision-canvas" width="640" height="480" aria-hidden="true"></canvas>
+                    <div class="vision-placeholder" id="vision-placeholder">
+                      <p id="vision-placeholder-text">Pulsa “Activar Cámara IA” y muestra tu mano frente a la cámara.</p>
+                    </div>
+                  </div>
+
+                  <div class="vision-actions" role="group" aria-label="Controles de Cámara IA">
+                    <button type="button" class="btn btn-primary vision-btn" id="btn-vision-start">
+                      <svg class="vision-btn-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5H14C15.1 5 16 5.9 16 7V17C16 18.1 15.1 19 14 19H4C2.9 19 2 18.1 2 17V7C2 5.9 2.9 5 4 5Z"/><path d="M16 10L22 6V18L16 14"/></svg>
+                      <span>Activar Cámara IA</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-stop" disabled>
+                      <span>Detener Cámara</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-simulate">
+                      <span>Probar gestos sin cámara</span>
+                    </button>
+                  </div>
+
+                  <div class="vision-simulation" id="vision-simulation" hidden>
+                    <p class="vision-simulation-title" id="vision-simulation-title">Gestos de prueba (modo simulación)</p>
+                    <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
+                  </div>
+
+                  <div class="vision-output" id="vision-output">
+                    <div class="vision-live" id="vision-live" aria-live="polite" aria-atomic="true">
+                      <p class="vision-output-label">Gesto detectado</p>
+                      <p class="vision-gesture-name" id="vision-gesture-name">Sin gesto confirmado</p>
+                      <p class="vision-phrase" id="vision-phrase">Muestra un gesto y mantenlo 0,6 s para traducirlo.</p>
+                      <p class="vision-confidence" id="vision-confidence">Confianza: —</p>
+                      <p class="vision-sent-note" id="vision-sent-note" hidden></p>
+                      <p class="vision-urgent-hint" id="vision-urgent-hint" hidden>Seña de auxilio detectada. Pulsa el botón rojo para conectar con un intérprete humano.</p>
+                    </div>
+
+                    <div class="vision-stability">
+                      <div class="vision-stability-head">
+                        <span id="vision-progress-label">Estabilidad del gesto (600 ms)</span>
+                        <span id="vision-progress-value">0%</span>
+                      </div>
+                      <div class="vision-progress" id="vision-progress" role="progressbar" aria-labelledby="vision-progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <div class="vision-progress-fill" id="vision-progress-fill"></div>
+                      </div>
+                    </div>
+
+                    <div class="vision-output-actions">
+                      <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-speak" disabled>
+                        <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
+                        <span>Reproducir voz al funcionario</span>
+                      </button>
+                      <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
+                        <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
+                        <span>Escalar a Intérprete Humano (&lt;30 s)</span>
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
                 <div class="video-stage" id="sim-video-stage">
                   <img
                     src="../assets/images/interprete-lsp.png"
@@ -469,7 +558,7 @@
                   </div>
                 </div>
 
-                <div class="video-badges-row">
+                <div class="video-badges-row" id="sim-video-badges">
                   <div class="status-pill">
                     <img src="../assets/icons/signal.svg" alt="" width="20" height="20" class="icon-svg icon-primary">
                     <span id="sim-fps-badge">&gt;30 fps HD</span>
@@ -775,7 +864,7 @@
             </button>
             <div class="faq-panel" id="faq-answer-1">
               <p>
-                Toca “Iniciar Atención (One-Tap)”, elige LSP o Texto/Lectura y selecciona el tipo de trámite. No necesitas crear una cuenta ni iniciar sesión.
+                Toca “Iniciar Atención (One-Tap)”, elige Intérprete LSP, Cámara IA (Gestos) o Texto/Lectura y selecciona el tipo de trámite. No necesitas crear una cuenta ni iniciar sesión.
               </p>
               <button type="button" class="btn btn-secondary btn-lsp-modal" data-lsp-question="¿Cómo inicio una atención en ventanilla?">
                 <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
@@ -890,7 +979,7 @@
           </p>
         </div>
 
-        <form class="demo-form-card" id="demo-form" novalidate aria-labelledby="demo-form-title">
+        <form class="demo-form-card" id="demo-form" novalidate aria-labelledby="demo-form-title" data-support-avoid>
           <h3 id="demo-form-title" class="h2-title">Solicita una demo gratuita</h3>
           <p class="badge-caption">Todos los campos son obligatorios.</p>
 
@@ -1019,10 +1108,11 @@
     </div>
   </footer>
 
-  <!-- Botón flotante Soporte Técnico -->
+  <!-- Botón flotante Soporte Técnico (HU-046) -->
   <button type="button" class="btn btn-primary floating-support-btn" id="btn-floating-support" aria-label="Abrir ayuda y soporte técnico">
     <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
-    <span>Soporte Técnico</span>
+    <span class="support-label-full">Soporte Técnico</span>
+    <span class="support-label-short" aria-hidden="true">Soporte</span>
   </button>
 
   <!-- MODALES ACCESIBLES -->
@@ -1256,5 +1346,6 @@
   </dialog>
 
   <script src="../js/main.js"></script>
+  <script src="../js/vision-ai.js" defer></script>
 </body>
 </html>

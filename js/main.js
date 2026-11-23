@@ -16,7 +16,7 @@
       desc: 'Consulta de saldo, apertura de cuentas y explicación de montos con Mensajería Asistida. Un intérprete LSP acompaña las situaciones que necesitan mayor precisión.',
       steps: [
         'Inicia con un toque',
-        'Elige LSP o Texto/Lectura',
+        'Elige LSP, Cámara IA o Texto/Lectura',
         'Finaliza con tu comprobante'
       ]
     },
@@ -107,6 +107,13 @@
       ],
       dictationSample: 'Expediente 00412-2026 verificado en mesa de partes accesible.'
     }
+  };
+
+  /* Canales de comunicación del simulador (HU-035) */
+  const CHANNEL_INFO = {
+    lsp: { badge: 'Intérprete LSP', meta: 'LSP HD', receipt: 'Lengua de Señas Peruana', oneTap: 'Lengua de Señas Peruana' },
+    camara: { badge: 'Cámara IA (Gestos)', meta: 'Cámara IA', receipt: 'Cámara IA (Gestos)', oneTap: 'Cámara IA (Gestos)' },
+    texto: { badge: 'Texto / Lectura', meta: 'Texto/Lectura', receipt: 'Texto / Lectura', oneTap: 'Texto/Lectura' }
   };
 
   /* Registro de comprobantes verificables en sesión + ejemplo oficial SEG-84920 */
@@ -502,6 +509,11 @@
     const procedureSelect = document.getElementById('sim-procedure-select');
 
     const textModeOverlay = document.getElementById('sim-textmode-overlay');
+    const videoStage = document.getElementById('sim-video-stage');
+    const videoBadgesRow = document.getElementById('sim-video-badges');
+    const visionPanel = document.getElementById('vision-panel');
+    const channelBadge = document.getElementById('sim-channel-badge');
+    const channelBadgeText = document.getElementById('sim-channel-badge-text');
     const cameraOffOverlay = document.getElementById('sim-camera-off-overlay');
     const cameraAngleLabel = document.getElementById('sim-camera-angle');
     const liveBadge = document.getElementById('sim-live-badge');
@@ -591,7 +603,7 @@
 
     function updateSessionMeta() {
       if (!sessionMeta) return;
-      const channelLabel = state.channel === 'lsp' ? 'LSP HD' : 'Texto/Lectura';
+      const channelLabel = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).meta;
       const statusLabel = state.emergencyActive
         ? 'EMERGENCIA PRIORITARIA (<30 s)'
         : state.sessionActive
@@ -662,7 +674,7 @@
         updateSessionMeta();
         appendMessage(
           'Sistema SeñaSegura',
-          `Atención iniciada en 1 toque (${state.sector} · ${state.procedure}). Canal: ${state.channel === 'lsp' ? 'Lengua de Señas Peruana' : 'Texto/Lectura'}.`,
+          `Atención iniciada en 1 toque (${state.sector} · ${state.procedure}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
           'staff'
         );
       });
@@ -743,14 +755,8 @@
         crisisCards.forEach((c) => c.classList.remove('is-selected'));
         card.classList.add('is-selected');
         state.selectedCrisis = card.dataset.crisis;
-        // Activar automáticamente canal LSP HD para enlace directo
-        state.channel = 'lsp';
-        channelChips.forEach((chip) => {
-          const active = chip.dataset.channel === 'lsp';
-          chip.classList.toggle('is-active', active);
-          chip.setAttribute('aria-pressed', String(active));
-        });
-        if (textModeOverlay) textModeOverlay.hidden = true;
+        // Activar automáticamente canal LSP HD para enlace directo (detiene la Cámara IA si estaba activa)
+        setChannel('lsp');
 
         appendMessage(
           'Alerta de Crisis',
@@ -760,19 +766,39 @@
       });
     });
 
-    // Canal bimodal LSP vs Texto/Lectura
-    channelChips.forEach((chip) => {
-      chip.addEventListener('click', () => {
-        const ch = chip.dataset.channel;
-        state.channel = ch;
-        channelChips.forEach((btn) => {
-          const active = btn === chip;
-          btn.classList.toggle('is-active', active);
-          btn.setAttribute('aria-pressed', String(active));
-        });
-        if (textModeOverlay) textModeOverlay.hidden = ch === 'lsp';
-        updateSessionMeta();
+    // Canal de comunicación: Intérprete LSP | Cámara IA (Gestos) | Texto / Lectura (HU-035)
+    function setChannel(ch) {
+      if (!CHANNEL_INFO[ch]) return;
+      const previous = state.channel;
+      state.channel = ch;
+
+      channelChips.forEach((btn) => {
+        const active = btn.dataset.channel === ch;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', String(active));
       });
+
+      // Vistas según canal: video LSP / panel Cámara IA / overlay de texto
+      const isCamera = ch === 'camara';
+      if (videoStage) videoStage.hidden = isCamera;
+      if (videoBadgesRow) videoBadgesRow.hidden = isCamera;
+      if (visionPanel) visionPanel.hidden = !isCamera;
+      if (textModeOverlay) textModeOverlay.hidden = ch !== 'texto';
+
+      // Insignia visible de canal activo (color + ícono + texto)
+      if (channelBadge) channelBadge.setAttribute('data-channel-active', ch);
+      if (channelBadgeText) channelBadgeText.textContent = `Canal activo: ${CHANNEL_INFO[ch].badge}`;
+
+      updateSessionMeta();
+
+      // Avisa al módulo de visión (detiene la cámara al salir de "Cámara IA (Gestos)")
+      document.dispatchEvent(new CustomEvent('senasegura:channelchange', {
+        detail: { channel: ch, previous }
+      }));
+    }
+
+    channelChips.forEach((chip) => {
+      chip.addEventListener('click', () => setChannel(chip.dataset.channel));
     });
 
     // Sectores del simulador
@@ -963,7 +989,7 @@
       const code = generate8DigitCode();
       state.lastReceiptCode = code;
 
-      const channelName = state.channel === 'lsp' ? 'Lengua de Señas Peruana' : 'Texto / Lectura';
+      const channelName = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).receipt;
       const nowStr = new Date().toLocaleString('es-PE', {
         dateStyle: 'short',
         timeStyle: 'short'
@@ -987,6 +1013,8 @@
       if (state.emergencyActive) deactivateEmergency();
       if (chatInput) chatInput.value = '';
       updateSectorContext(state.sector);
+      // Purga local: el módulo de Cámara IA libera la cámara y limpia su salida
+      document.dispatchEvent(new CustomEvent('senasegura:purge'));
 
       // Actualizar UI del modal de cierre y vista previa PDF
       const codeEl = document.getElementById('closure-code-display');
@@ -1071,6 +1099,29 @@
     // Inicializar estado por defecto
     updateSectorContext('Banco');
     updateTurnLabels();
+    setChannel(state.channel);
+
+    /**
+     * Puente público hacia el módulo opcional de Cámara IA (js/vision-ai.js).
+     * Expone solo lo necesario; no revela el estado interno del simulador.
+     */
+    window.SenaSegura = Object.freeze({
+      getChannel: () => state.channel,
+      setChannel,
+      appendChatMessage(sender, text, type = 'user') {
+        state.sessionActive = true;
+        appendMessage(sender, text, type);
+        updateSessionMeta();
+      },
+      activateEmergency() {
+        if (!state.emergencyActive) activateEmergency();
+        if (emergencyPanel) {
+          emergencyPanel.setAttribute('tabindex', '-1');
+          emergencyPanel.focus({ preventScroll: false });
+        }
+      },
+      isEmergencyActive: () => state.emergencyActive
+    });
   }
 
   /* =========================================================
@@ -1341,6 +1392,68 @@
   }
 
   /* =========================================================
+     11. BOTÓN FLOTANTE DE SOPORTE: NUNCA TAPA CTAs NI FORMULARIOS (HU-046)
+     Se oculta temporalmente solo mientras su área en pantalla coincide con
+     un elemento marcado con [data-support-avoid] (CTAs del Hero, formulario
+     demo y panel de Cámara IA). Siempre queda disponible "Soporte Técnico" en el footer.
+     ========================================================= */
+  function initFloatingSupport() {
+    const btn = document.getElementById('btn-floating-support');
+    const targets = document.querySelectorAll('[data-support-avoid]');
+    if (!btn || !targets.length || !('IntersectionObserver' in window)) return;
+
+    const overlapping = new Set();
+    let observer = null;
+
+    function refresh() {
+      btn.classList.toggle('is-avoiding', overlapping.size > 0);
+    }
+
+    function observe() {
+      if (observer) observer.disconnect();
+      overlapping.clear();
+      refresh();
+
+      // El área raíz de observación es exactamente el rectángulo del botón (+8px de margen)
+      const rect = btn.getBoundingClientRect();
+      const vw = document.documentElement.clientWidth;
+      const vh = document.documentElement.clientHeight;
+      const top = Math.max(0, Math.round(rect.top - 8));
+      const left = Math.max(0, Math.round(rect.left - 8));
+      const right = Math.max(0, Math.round(vw - rect.right - 8));
+      const bottom = Math.max(0, Math.round(vh - rect.bottom - 8));
+
+      observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) overlapping.add(entry.target);
+            else overlapping.delete(entry.target);
+          });
+          refresh();
+        },
+        { rootMargin: `-${top}px -${right}px -${bottom}px -${left}px`, threshold: 0 }
+      );
+      targets.forEach((el) => observer.observe(el));
+    }
+
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(observe, 150);
+    });
+    // El escalado tipográfico cambia el ancho del botón
+    new MutationObserver(() => setTimeout(observe, 50)).observe(htmlEl, {
+      attributes: true,
+      attributeFilter: ['data-font-scale']
+    });
+    observe();
+    // La tipografía web puede cambiar el tamaño del botón tras cargar
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(observe).catch(() => {});
+    }
+  }
+
+  /* =========================================================
      INICIALIZACIÓN
      ========================================================= */
   document.addEventListener('DOMContentLoaded', () => {
@@ -1352,5 +1465,6 @@
     initFaq();
     initDemoForm();
     initModals();
+    initFloatingSupport();
   });
 })();

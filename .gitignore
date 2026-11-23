@@ -1,3 +1,6 @@
+.tmp.drivedownload
+.tmp.driveupload
+
 # Sistema operativo
 .DS_Store
 Thumbs.db

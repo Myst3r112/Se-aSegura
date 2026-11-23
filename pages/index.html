@@ -353,12 +353,12 @@
             <ol class="sim-steps-guide" id="sim-steps-guide" aria-label="Pasos para usar el simulador">
               <li class="sim-step-item is-current" data-sim-step="1">
                 <span class="sim-step-num" aria-hidden="true">1</span>
-                <span>Elige canal y trámite</span>
+                <span>Configura o inicia en 1 toque</span>
               </li>
               <li class="sim-step-arrow" aria-hidden="true">→</li>
               <li class="sim-step-item" data-sim-step="2">
                 <span class="sim-step-num" aria-hidden="true">2</span>
-                <span>Inicia atención o emergencia</span>
+                <span>Atención en vivo</span>
               </li>
               <li class="sim-step-arrow" aria-hidden="true">→</li>
               <li class="sim-step-item" data-sim-step="3">
@@ -371,7 +371,7 @@
             <div class="sim-start-row">
               <button type="button" class="btn btn-primary" id="btn-one-tap-start">
                 <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
-                <span>Iniciar Atención (One-Tap)</span>
+                <span id="btn-one-tap-label">Iniciar Atención (One-Tap)</span>
               </button>
 
               <button type="button" class="btn btn-emergency" id="btn-emergency-mode" aria-pressed="false">
@@ -608,8 +608,8 @@
 
                   <div class="video-connecting-overlay" id="sim-connecting-overlay" hidden role="status" aria-live="polite">
                     <span class="connecting-spinner" aria-hidden="true"></span>
-                    <p class="connecting-title">Buscando intérprete LSP · Estimado &lt; 30 s</p>
-                    <p class="connecting-subtitle">Conectando canal de video HD sin grabación…</p>
+                    <p class="connecting-title" id="sim-connecting-title">Buscando intérprete LSP · Estimado &lt; 30 s</p>
+                    <p class="connecting-subtitle" id="sim-connecting-countdown">Conectando en 2 s…</p>
                     <div class="connecting-actions">
                       <button type="button" class="btn btn-secondary" id="btn-cancel-connect">Cancelar</button>
                       <button type="button" class="btn btn-emergency" id="btn-escalate-connect">Convertir en Urgente</button>
@@ -709,7 +709,7 @@
               </div>
 
               <!-- Columna Chat Asistido -->
-              <aside class="sim-chat-column" aria-label="Mensajería asistida para datos sensibles">
+              <aside class="sim-chat-column" aria-label="Mensajería asistida para datos sensibles" data-support-avoid>
                 <div class="chat-header">
                   <h4 class="chat-title">Mensajería Asistida</h4>
                   <p class="chat-subtitle" id="sim-chat-sector-label">Banco · Datos de ejemplo</p>
@@ -738,12 +738,13 @@
                   <form class="sensitive-edit-form" id="sensitive-edit-form" hidden>
                     <div class="sensitive-edit-field">
                       <label for="edit-field-1" id="edit-label-1">DNI</label>
-                      <input type="text" id="edit-field-1" class="chat-input" autocomplete="off" maxlength="32">
+                      <input type="text" id="edit-field-1" class="chat-input" placeholder="Ej. 00000000" autocomplete="off" maxlength="32">
                     </div>
                     <div class="sensitive-edit-field">
                       <label for="edit-field-2" id="edit-label-2">Monto</label>
-                      <input type="text" id="edit-field-2" class="chat-input" autocomplete="off" maxlength="40">
+                      <input type="text" id="edit-field-2" class="chat-input" placeholder="Ej. 150.00" autocomplete="off" maxlength="40">
                     </div>
+                    <span class="field-error" id="sensitive-edit-error" role="alert" hidden></span>
                     <div class="sensitive-edit-actions">
                       <button type="submit" class="btn-soft btn-save-data" id="btn-save-data">Guardar</button>
                       <button type="button" class="btn-soft" id="btn-cancel-edit-data">Cancelar</button>
@@ -785,7 +786,7 @@
             </div>
 
             <!-- Barra de privacidad al pie del simulador -->
-            <div class="sim-privacy-footer">
+            <div class="sim-privacy-footer" data-support-avoid>
               <p>Sin grabación de video · Purga local al finalizar · Ley N.° 29733</p>
               <button type="button" class="btn-soft" id="btn-finish-session">
                 Finalizar atención y obtener constancia

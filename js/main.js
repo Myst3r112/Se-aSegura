@@ -57,9 +57,12 @@
         'Bloqueo o reposición de tarjeta'
       ],
       templates: [
-        'Confirmo mi DNI: 00000000 y monto S/ 150.00.',
-        'Por favor, repite en Lengua de Señas Peruana.',
-        'Necesito constancia impresa de la operación.'
+        {
+          label: 'Confirmar DNI y monto',
+          getText: (fields) => `Confirmo mi ${fields[0].label}: ${fields[0].value} y ${fields[1].label.toLowerCase()} ${fields[1].value}.`
+        },
+        { label: 'Repetir en LSP', text: 'Por favor, repite en Lengua de Señas Peruana.' },
+        { label: 'Pedir constancia', text: 'Necesito constancia impresa de la operación.' }
       ],
       dictationSample: 'Operación bancaria validada por S/ 150.00 en ventanilla.'
     },
@@ -77,9 +80,12 @@
         'Orientación sobre medidas de protección'
       ],
       templates: [
-        'Deseo registrar una denuncia con intérprete LSP.',
-        'Necesito constancia por pérdida de DNI.',
-        'Solicito atención prioritaria por emergencia.'
+        {
+          label: 'Registrar denuncia',
+          getText: (fields) => `Deseo registrar una denuncia con intérprete LSP (${fields[0].label}: ${fields[0].value} · ${fields[1].label}: ${fields[1].value}).`
+        },
+        { label: 'Constancia por pérdida', text: 'Necesito constancia por pérdida de DNI.' },
+        { label: 'Atención prioritaria', text: 'Solicito atención prioritaria por emergencia.' }
       ],
       dictationSample: 'Se toma registro de ocurrencia con apoyo de intérprete LSP.'
     },
@@ -97,9 +103,12 @@
         'Consentimiento informado de procedimiento'
       ],
       templates: [
-        'Tengo dolor agudo y necesito intérprete LSP.',
-        'No presento alergias conocidas a medicamentos.',
-        'Por favor, escribe los horarios de la receta.'
+        {
+          label: 'Solicitar intérprete LSP',
+          getText: (fields) => `Tengo dolor agudo y necesito intérprete LSP (${fields[0].label}: ${fields[0].value} · ${fields[1].label}: ${fields[1].value}).`
+        },
+        { label: 'Sin alergias', text: 'No presento alergias conocidas a medicamentos.' },
+        { label: 'Escribir horarios', text: 'Por favor, escribe los horarios de la receta.' }
       ],
       dictationSample: 'Indicaciones médicas registradas: tomar 1 tableta cada 8 horas.'
     },
@@ -117,9 +126,15 @@
         'Pago de arbitrios y fraccionamiento'
       ],
       templates: [
-        'Consulto el estado de mi expediente 00412-2026.',
-        'Necesito ayuda con el formulario en texto claro.',
-        'Confirmo mis datos para mesa de partes.'
+        {
+          label: 'Consultar expediente',
+          getText: (fields) => `Consulto el estado de mi ${fields[1].label.toLowerCase()} ${fields[1].value} (${fields[0].label}: ${fields[0].value}).`
+        },
+        { label: 'Ayuda en texto claro', text: 'Necesito ayuda con el formulario en texto claro.' },
+        {
+          label: 'Confirmar datos',
+          getText: (fields) => `Confirmo mis datos (${fields[0].label}: ${fields[0].value} · ${fields[1].label}: ${fields[1].value}) para mesa de partes.`
+        }
       ],
       dictationSample: 'Expediente 00412-2026 verificado en mesa de partes accesible.'
     }
@@ -569,6 +584,7 @@
 
     const sessionMeta = document.getElementById('sim-session-meta');
     const btnOneTap = document.getElementById('btn-one-tap-start');
+    const btnOneTapLabel = document.getElementById('btn-one-tap-label');
     const btnEmergency = document.getElementById('btn-emergency-mode');
     const btnExitEmergency = document.getElementById('btn-exit-emergency');
     const emergencyPanel = document.getElementById('emergency-panel');
@@ -586,6 +602,7 @@
     const videoBadgesRow = document.getElementById('sim-video-badges');
     const callControls = document.getElementById('sim-call-controls');
     const connectingOverlay = document.getElementById('sim-connecting-overlay');
+    const connectingCountdown = document.getElementById('sim-connecting-countdown');
     const btnCancelConnect = document.getElementById('btn-cancel-connect');
     const btnEscalateConnect = document.getElementById('btn-escalate-connect');
     const visionPanel = document.getElementById('vision-panel');
@@ -632,6 +649,7 @@
     const editLabel2 = document.getElementById('edit-label-2');
     const editField1 = document.getElementById('edit-field-1');
     const editField2 = document.getElementById('edit-field-2');
+    const sensitiveEditError = document.getElementById('sensitive-edit-error');
     const btnCancelEditData = document.getElementById('btn-cancel-edit-data');
     const chatForm = document.getElementById('sim-chat-form');
     const chatInput = document.getElementById('sim-chat-input');
@@ -665,6 +683,7 @@
 
     let emergencyInterval = null;
     let connectingTimer = null;
+    let connectingStepTimer = null;
 
     function switchSimulatorView(viewName) {
       state.simView = viewName;
@@ -714,14 +733,49 @@
     function updateStepsGuide() {
       if (!stepItems.length) return;
       let currentStep = 1;
-      if (state.connecting) currentStep = 2;
-      else if (state.sessionActive || state.emergencyActive) currentStep = 3;
+      if (state.connecting || state.sessionActive || state.emergencyActive) {
+        currentStep = state.chatMessages.length > 1 ? 3 : 2;
+      }
 
       stepItems.forEach((item) => {
         const num = Number(item.dataset.simStep);
         item.classList.toggle('is-done', num < currentStep);
         item.classList.toggle('is-current', num === currentStep);
       });
+    }
+
+    function updateOneTapButton() {
+      if (!btnOneTap) return;
+      const labelEl = btnOneTapLabel || btnOneTap.querySelector('span');
+      btnOneTap.classList.remove('is-active-session', 'is-connecting');
+
+      if (state.connecting) {
+        btnOneTap.disabled = true;
+        btnOneTap.classList.add('is-connecting');
+        if (labelEl) labelEl.textContent = 'Conectando intérprete (<30 s)…';
+      } else if (state.sessionActive) {
+        btnOneTap.disabled = false;
+        btnOneTap.classList.add('is-active-session');
+        if (labelEl) labelEl.textContent = 'Atención en curso (En línea)';
+      } else {
+        btnOneTap.disabled = false;
+        if (labelEl) labelEl.textContent = 'Iniciar Atención (One-Tap)';
+      }
+    }
+
+    function scrollToActiveChannel(focusInput = false) {
+      if (state.channel === 'camara') {
+        if (visionPanel) visionPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (focusInput) {
+          const btnVisionStart = document.getElementById('btn-vision-start');
+          if (btnVisionStart && !btnVisionStart.disabled) btnVisionStart.focus({ preventScroll: true });
+        }
+      } else if (state.channel === 'texto') {
+        if (textModeCard) textModeCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (focusInput && chatInput) chatInput.focus({ preventScroll: true });
+      } else if (videoStage) {
+        videoStage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
     }
 
     function updateLiveBadge() {
@@ -782,6 +836,10 @@
     function closeSensitiveEditForm(restoreFocus = false) {
       if (!sensitiveEditForm) return;
       sensitiveEditForm.hidden = true;
+      if (sensitiveEditError) {
+        sensitiveEditError.hidden = true;
+        sensitiveEditError.textContent = '';
+      }
       if (btnEditData) {
         btnEditData.setAttribute('aria-expanded', 'false');
         if (restoreFocus) btnEditData.focus();
@@ -869,12 +927,15 @@
         if (consoleProcedureVal) consoleProcedureVal.textContent = state.procedure;
       }
       if (quickTemplatesBox) {
-        quickTemplatesBox.innerHTML = config.templates
-          .map(
-            (tpl) =>
-              `<button type="button" class="template-chip" data-template="${tpl}">${tpl.slice(0, 26)}${tpl.length > 26 ? '…' : ''}</button>`
-          )
-          .join('');
+        quickTemplatesBox.textContent = '';
+        config.templates.forEach((tpl, idx) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'template-chip';
+          btn.dataset.templateIndex = String(idx);
+          btn.textContent = tpl.label;
+          quickTemplatesBox.appendChild(btn);
+        });
       }
 
       state.chatMessages = [
@@ -887,21 +948,28 @@
       renderChat();
       updateSessionMeta();
       updateLiveBadge();
+      updateOneTapButton();
       updateStepsGuide();
     }
 
-    // Delegación para plantillas rápidas
+    // Delegación para plantillas rápidas (sincronizadas con valores editados en vivo)
     if (quickTemplatesBox) {
       quickTemplatesBox.addEventListener('click', (e) => {
         const chip = e.target.closest('.template-chip');
         if (!chip) return;
-        const text = chip.dataset.template;
+        const config = SIM_SECTORS[state.sector];
+        const idx = Number(chip.dataset.templateIndex);
+        const tpl = config && Number.isInteger(idx) ? config.templates[idx] : null;
+        if (!tpl) return;
+        const text = typeof tpl.getText === 'function' ? tpl.getText(state.sensitiveFields) : tpl.text;
         if (!text) return;
+
         state.sessionActive = true;
+        updateOneTapButton();
         updateLiveBadge();
-        updateStepsGuide();
         updateSessionMeta();
         appendMessage('Ciudadano (Plantilla)', text, 'user');
+        updateStepsGuide();
         setTimeout(() => {
           appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${state.procedure}. Continuamos con tu atención.`, 'staff');
         }, 450);
@@ -913,60 +981,75 @@
         clearTimeout(connectingTimer);
         connectingTimer = null;
       }
+      if (connectingStepTimer) {
+        clearTimeout(connectingStepTimer);
+        connectingStepTimer = null;
+      }
       state.connecting = false;
       if (connectingOverlay) connectingOverlay.hidden = true;
+      updateOneTapButton();
       updateLiveBadge();
       updateStepsGuide();
       updateSessionMeta();
     }
 
-    // Inicio One-Tap (HU-001 a HU-005, transición Listo -> Conectando -> En vivo en LSP; inmediato en Cámara IA / Texto)
+    // Inicio One-Tap (HU-001 a HU-005): feedback real, cuenta regresiva y scroll suave
     if (btnOneTap) {
       btnOneTap.addEventListener('click', () => {
         if (state.connecting) return;
 
+        if (state.sessionActive) {
+          scrollToActiveChannel(true);
+          return;
+        }
+
         if (state.channel !== 'lsp') {
           state.sessionActive = true;
+          updateOneTapButton();
           updateLiveBadge();
-          updateStepsGuide();
           updateSessionMeta();
           appendMessage(
             'Sistema SeñaSegura',
             `Atención iniciada de forma inmediata (${state.sector} · ${state.procedure}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
             'staff'
           );
-          return;
-        }
-
-        if (state.sessionActive) {
-          appendMessage(
-            'Sistema SeñaSegura',
-            `Atención en curso (${state.sector} · ${state.procedure}). Canal: Intérprete LSP.`,
-            'staff'
-          );
+          updateStepsGuide();
+          scrollToActiveChannel(true);
           return;
         }
 
         state.connecting = true;
+        if (connectingCountdown) connectingCountdown.textContent = 'Conectando en 2 s…';
         if (connectingOverlay) connectingOverlay.hidden = false;
+        updateOneTapButton();
         updateLiveBadge();
         updateStepsGuide();
         updateSessionMeta();
+        scrollToActiveChannel(false);
+
+        connectingStepTimer = setTimeout(() => {
+          connectingStepTimer = null;
+          if (state.connecting && connectingCountdown) {
+            connectingCountdown.textContent = 'Conectando en 1 s…';
+          }
+        }, 900);
 
         connectingTimer = setTimeout(() => {
           connectingTimer = null;
+          connectingStepTimer = null;
           state.connecting = false;
           state.sessionActive = true;
           if (connectingOverlay) connectingOverlay.hidden = true;
+          updateOneTapButton();
           updateLiveBadge();
-          updateStepsGuide();
           updateSessionMeta();
           appendMessage(
             'Sistema SeñaSegura',
             `Intérprete LSP en línea (${state.sector} · ${state.procedure}). Atención iniciada en 1 toque.`,
             'staff'
           );
-        }, 1200);
+          updateStepsGuide();
+        }, 1800);
       });
     }
 
@@ -997,6 +1080,7 @@
 
       if (emergencyPanel) emergencyPanel.hidden = false;
       if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
+      updateOneTapButton();
       updateLiveBadge();
       updateStepsGuide();
       updateConsolePriorityContext();
@@ -1053,6 +1137,7 @@
       });
       updateConsolePriorityContext();
       updateCriticalBanner();
+      updateOneTapButton();
       updateLiveBadge();
       updateStepsGuide();
       updateSessionMeta();
@@ -1300,6 +1385,15 @@
     if (btnEditData && sensitiveEditForm && editField1 && editField2) {
       let editOpenedAt = 0;
 
+      function placeholderForField(label) {
+        if (label === 'DNI') return 'Ej. 00000000';
+        if (label === 'Monto') return 'Ej. 150.00';
+        if (label === 'Referencia') return 'Ej. Parte N.° 2026-041';
+        if (label === 'Área') return 'Ej. Triaje · Prioridad II';
+        if (label === 'Expediente') return 'Ej. 00412-2026';
+        return '';
+      }
+
       btnEditData.addEventListener('click', () => {
         const willOpen = sensitiveEditForm.hidden;
         if (!willOpen) {
@@ -1309,8 +1403,14 @@
         const [f1, f2] = state.sensitiveFields;
         if (editLabel1 && f1) editLabel1.textContent = f1.label;
         if (editLabel2 && f2) editLabel2.textContent = f2.label;
+        editField1.placeholder = f1 ? placeholderForField(f1.label) : '';
+        editField2.placeholder = f2 ? placeholderForField(f2.label) : '';
         editField1.value = f1 ? f1.value : '';
         editField2.value = f2 ? f2.value : '';
+        if (sensitiveEditError) {
+          sensitiveEditError.hidden = true;
+          sensitiveEditError.textContent = '';
+        }
         editOpenedAt = performance.now();
         sensitiveEditForm.hidden = false;
         btnEditData.setAttribute('aria-expanded', 'true');
@@ -1322,16 +1422,50 @@
       sensitiveEditForm.addEventListener('submit', (e) => {
         e.preventDefault();
         if (performance.now() - editOpenedAt < 150) return;
-        const v1 = editField1.value.trim();
-        const v2 = editField2.value.trim();
-        if (state.sensitiveFields[0] && v1) state.sensitiveFields[0].value = v1;
-        if (state.sensitiveFields[1] && v2) state.sensitiveFields[1].value = v2;
+
+        const inputs = [editField1, editField2];
+        const errors = [];
+        let firstInvalidEl = null;
+
+        state.sensitiveFields.forEach((field, idx) => {
+          const inputEl = inputs[idx];
+          if (!inputEl) return;
+          const raw = inputEl.value.trim();
+
+          if (field.label === 'DNI') {
+            if (!raw) return; // conserva el valor anterior
+            const digits = raw.replace(/\D/g, '').slice(0, 8);
+            if (!digits) {
+              errors.push('Ingresa solo números para el DNI (hasta 8 dígitos).');
+              if (!firstInvalidEl) firstInvalidEl = inputEl;
+            } else {
+              field.value = digits;
+            }
+          } else if (field.label === 'Monto') {
+            if (!raw) return; // conserva el valor anterior
+            const cleaned = raw.replace(/^\s*s\s*\/?\s*/i, '').replace(/\s+/g, '').replace(',', '.');
+            const num = Number(cleaned);
+            if (!/^\d+(\.\d+)?$/.test(cleaned) || !Number.isFinite(num) || num < 0) {
+              errors.push('Ingresa un monto numérico válido (ej. 150.00).');
+              if (!firstInvalidEl) firstInvalidEl = inputEl;
+            } else {
+              field.value = `S/ ${num.toFixed(2)}`;
+            }
+          } else if (raw) {
+            field.value = raw;
+          }
+        });
+
         renderSensitiveData();
+
+        if (errors.length && sensitiveEditError) {
+          sensitiveEditError.textContent = `${errors[0]} Se conservó el formato válido.`;
+          sensitiveEditError.hidden = false;
+          if (firstInvalidEl) firstInvalidEl.focus();
+          return;
+        }
+
         closeSensitiveEditForm(true);
-        state.sessionActive = true;
-        updateLiveBadge();
-        updateStepsGuide();
-        updateSessionMeta();
         appendMessage('Sistema SeñaSegura', 'Datos actualizados para verificación visual.', 'staff');
       });
 
@@ -1367,6 +1501,7 @@
         state.sessionActive = true;
         setInterpreterStatus('Ocupado');
         updateCriticalBanner();
+        updateOneTapButton();
         updateLiveBadge();
         updateStepsGuide();
         updateSessionMeta();
@@ -1524,6 +1659,7 @@
         state.sessionActive = true;
         appendMessage('Ciudadano / Usuario', text, 'user');
         chatInput.value = '';
+        updateOneTapButton();
         updateLiveBadge();
         updateStepsGuide();
         updateSessionMeta();
@@ -1600,6 +1736,7 @@
       }
       setInterpreterStatus('Disponible');
       updateSectorContext(state.sector);
+      updateOneTapButton();
       // Purga local: el módulo de Cámara IA libera la cámara y limpia su salida
       document.dispatchEvent(new CustomEvent('senasegura:purge'));
 
@@ -1707,6 +1844,7 @@
       appendChatMessage(sender, text, type = 'user') {
         state.sessionActive = true;
         appendMessage(sender, text, type);
+        updateOneTapButton();
         updateLiveBadge();
         updateStepsGuide();
         updateSessionMeta();

@@ -231,6 +231,7 @@
     interpreterStatus: 'Disponible',
     criticalAlertActive: false,
     criticalAccepted: false,
+    criticalFromConsoleSim: false,
     glossaryCategory: 'Todos',
     glossaryQuery: '',
     glossaryFavorites: new Set(),
@@ -261,7 +262,7 @@
     }
   }
 
-  function closeDialog(dialogId) {
+  function closeDialog(dialogId, { restoreFocus = true } = {}) {
     const dialog = document.getElementById(dialogId);
     if (!dialog) return;
     if (typeof dialog.close === 'function' && dialog.open) {
@@ -269,10 +270,10 @@
     } else {
       dialog.removeAttribute('open');
     }
-    if (lastTriggerElement && typeof lastTriggerElement.focus === 'function') {
+    if (restoreFocus && lastTriggerElement && typeof lastTriggerElement.focus === 'function') {
       lastTriggerElement.focus();
-      lastTriggerElement = null;
     }
+    lastTriggerElement = null;
   }
 
   function bindTablistArrows(tabs, onSelect) {
@@ -402,8 +403,27 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !drawer.hidden) {
+      if (drawer.hidden) return;
+      if (e.key === 'Escape') {
         toggleDrawer(false);
+        return;
+      }
+      if (e.key === 'Tab') {
+        const focusable = Array.from(
+          drawer.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')
+        ).filter((el) => el.offsetParent !== null);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first || !drawer.contains(document.activeElement)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (document.activeElement === last || !drawer.contains(document.activeElement)) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     });
   }
@@ -682,6 +702,7 @@
     const consoleCriticalTitle = document.getElementById('console-critical-title');
     const consoleCriticalSub = document.getElementById('console-critical-sub');
     const btnAcceptCritical = document.getElementById('btn-accept-critical-emergency');
+    const btnDismissCriticalSim = document.getElementById('btn-dismiss-critical-sim');
     const consolePipBox = document.getElementById('console-pip-box');
     const consolePipPreview = document.getElementById('console-pip-preview');
     const btnTogglePip = document.getElementById('btn-toggle-pip');
@@ -703,6 +724,7 @@
     let emergencyInterval = null;
     let connectingTimer = null;
     let connectingStepTimer = null;
+    let dictTimer = null;
 
     function switchSimulatorView(viewName) {
       state.simView = viewName;
@@ -910,6 +932,7 @@
           btnAcceptCritical.textContent = 'Emergencia aceptada';
           btnAcceptCritical.disabled = true;
         }
+        if (btnDismissCriticalSim) btnDismissCriticalSim.hidden = true;
       } else {
         consoleCriticalBanner.classList.remove('is-accepted');
         if (consoleCriticalTitle) {
@@ -923,6 +946,9 @@
         if (btnAcceptCritical) {
           btnAcceptCritical.textContent = 'Aceptar Emergencia Ahora';
           btnAcceptCritical.disabled = false;
+        }
+        if (btnDismissCriticalSim) {
+          btnDismissCriticalSim.hidden = !state.criticalFromConsoleSim;
         }
       }
     }
@@ -939,7 +965,21 @@
       }
     }
 
+    function stopDictation() {
+      if (dictTimer) {
+        clearInterval(dictTimer);
+        dictTimer = null;
+      }
+      state.dictating = false;
+      if (btnVoiceDictation) {
+        btnVoiceDictation.setAttribute('aria-pressed', 'false');
+        const btnLabel = btnVoiceDictation.querySelector('span');
+        if (btnLabel) btnLabel.textContent = 'Dictado de voz';
+      }
+    }
+
     function updateSectorContext(sectorName) {
+      stopDictation();
       state.sector = sectorName;
       const config = SIM_SECTORS[sectorName];
       if (!config) return;
@@ -1152,6 +1192,7 @@
       state.selectedCrisis = null;
       state.criticalAlertActive = false;
       state.criticalAccepted = false;
+      state.criticalFromConsoleSim = false;
       if (emergencyInterval) {
         clearInterval(emergencyInterval);
         emergencyInterval = null;
@@ -1521,6 +1562,7 @@
       btnConsoleSimAlert.addEventListener('click', () => {
         state.criticalAlertActive = true;
         state.criticalAccepted = false;
+        state.criticalFromConsoleSim = !state.emergencyActive;
         updateCriticalBanner();
         if (btnAcceptCritical) btnAcceptCritical.focus();
       });
@@ -1528,9 +1570,19 @@
 
     if (btnAcceptCritical) {
       btnAcceptCritical.addEventListener('click', () => {
+        state.emergencyActive = true;
+        state.criticalAlertActive = true;
         state.criticalAccepted = true;
+        state.criticalFromConsoleSim = false;
         state.sessionActive = true;
+        if (state.channel !== 'lsp') setChannel('lsp');
+        if (emergencyPanel) emergencyPanel.hidden = false;
+        if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
+        if (emergencyQueueTimer) {
+          emergencyQueueTimer.textContent = '¡Intérprete LSP conectado en <30 s! Emergencia aceptada desde Consola.';
+        }
         setInterpreterStatus('Ocupado');
+        updateConsolePriorityContext();
         updateCriticalBanner();
         updateOneTapButton();
         updateLiveBadge();
@@ -1541,6 +1593,16 @@
           'Emergencia crítica aceptada en consola (<30 s). Atención prioritaria en curso.',
           'staff'
         );
+      });
+    }
+
+    if (btnDismissCriticalSim) {
+      btnDismissCriticalSim.addEventListener('click', () => {
+        state.criticalAlertActive = false;
+        state.criticalAccepted = false;
+        state.criticalFromConsoleSim = false;
+        updateCriticalBanner();
+        if (btnConsoleSimAlert) btnConsoleSimAlert.focus();
       });
     }
 
@@ -1669,15 +1731,12 @@
         let i = 0;
         chatInput.value = '';
 
-        const dictTimer = setInterval(() => {
+        dictTimer = setInterval(() => {
           if (i < words.length) {
             chatInput.value = `${chatInput.value}${i === 0 ? '' : ' '}${words[i]}`;
             i += 1;
           } else {
-            clearInterval(dictTimer);
-            state.dictating = false;
-            btnVoiceDictation.setAttribute('aria-pressed', 'false');
-            if (btnLabel) btnLabel.textContent = 'Dictado de voz';
+            stopDictation();
             chatInput.focus();
           }
         }, 130);
@@ -1759,9 +1818,22 @@
 
       // Purga inmediata del chat local, bloc de notas y restablecimiento de datos ficticios
       const finishedProcedure = state.procedure;
+      stopDictation();
       if (state.connecting) cancelConnecting();
       state.chatMessages = [];
       state.sessionActive = false;
+      state.micMuted = false;
+      state.cameraOff = false;
+      state.cameraAngle = 'Frontal · Intérprete LSP';
+      state.turnDirection = 'lsp';
+      if (cameraOffOverlay) cameraOffOverlay.hidden = true;
+      if (btnMic) {
+        btnMic.setAttribute('aria-pressed', 'false');
+        btnMic.title = 'Micrófono activo';
+      }
+      if (btnCamera) btnCamera.setAttribute('aria-pressed', 'false');
+      if (cameraAngleLabel) cameraAngleLabel.textContent = `Cámara: ${state.cameraAngle}`;
+      updateTurnLabels();
       if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
       if (chatInput) chatInput.value = '';
       if (consolePrivateNotes) consolePrivateNotes.value = '';
@@ -1808,39 +1880,50 @@
       btnFinishSession.addEventListener('click', () => finishAttentionAndPurge(btnFinishSession));
     }
 
-    // Descargar constancia + Imprimir ticket + Vista previa PDF
+    // Descargar constancia + Imprimir ticket + Copiar código + Vista previa PDF
     const btnDownloadReceipt = document.getElementById('btn-download-receipt');
     const btnPrintTicket = document.getElementById('btn-print-ticket');
+    const btnCopyClosureCode = document.getElementById('btn-copy-closure-code');
     const btnPreviewPdf = document.getElementById('btn-preview-pdf');
+    const btnPdfDownload = document.getElementById('btn-pdf-download');
+    const btnPdfPrint = document.getElementById('btn-pdf-print');
+    const btnClosePdfPreview = document.getElementById('btn-close-pdf-preview');
+    let copyCodeTimer = null;
+
+    function downloadReceiptFile() {
+      const record = receiptRegistry.get(state.lastReceiptCode);
+      const content = [
+        'SEÑASEGURA · CONSTANCIA DE ATENCIÓN ACCESIBLE',
+        '==============================================',
+        `Código único : ${record ? record.code : state.lastReceiptCode}`,
+        `Sector       : ${record ? record.sector : state.sector}`,
+        `Trámite      : ${record ? record.procedure : state.procedure}`,
+        `Canal        : ${record ? record.channel : 'Lengua de Señas Peruana'}`,
+        `Estado       : ${record ? record.status : 'Cierre confirmado'}`,
+        `Fecha/Hora   : ${record ? record.timestamp : new Date().toLocaleString('es-PE')}`,
+        '----------------------------------------------',
+        'Privacidad   : Sin grabación de video.',
+        'Purga local  : Chat eliminado del dispositivo (Ley N.° 29733).',
+        'Marco legal  : Ley N.° 29535 (Lengua de Señas Peruana).'
+      ].join('\n');
+
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `constancia-${state.lastReceiptCode}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
 
     if (btnDownloadReceipt) {
-      btnDownloadReceipt.addEventListener('click', () => {
-        const record = receiptRegistry.get(state.lastReceiptCode);
-        const content = [
-          'SEÑASEGURA · CONSTANCIA DE ATENCIÓN ACCESIBLE',
-          '==============================================',
-          `Código único : ${record ? record.code : state.lastReceiptCode}`,
-          `Sector       : ${record ? record.sector : state.sector}`,
-          `Trámite      : ${record ? record.procedure : state.procedure}`,
-          `Canal        : ${record ? record.channel : 'Lengua de Señas Peruana'}`,
-          `Estado       : ${record ? record.status : 'Cierre confirmado'}`,
-          `Fecha/Hora   : ${record ? record.timestamp : new Date().toLocaleString('es-PE')}`,
-          '----------------------------------------------',
-          'Privacidad   : Sin grabación de video.',
-          'Purga local  : Chat eliminado del dispositivo (Ley N.° 29733).',
-          'Marco legal  : Ley N.° 29535 (Lengua de Señas Peruana).'
-        ].join('\n');
+      btnDownloadReceipt.addEventListener('click', downloadReceiptFile);
+    }
 
-        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `constancia-${state.lastReceiptCode}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      });
+    if (btnPdfDownload) {
+      btnPdfDownload.addEventListener('click', downloadReceiptFile);
     }
 
     if (btnPrintTicket) {
@@ -1849,10 +1932,43 @@
       });
     }
 
+    if (btnPdfPrint) {
+      btnPdfPrint.addEventListener('click', () => {
+        window.print();
+      });
+    }
+
+    if (btnCopyClosureCode) {
+      btnCopyClosureCode.addEventListener('click', () => {
+        const codeText = state.lastReceiptCode || '';
+        const confirmCopied = () => {
+          btnCopyClosureCode.textContent = '¡Código copiado!';
+          if (copyCodeTimer) clearTimeout(copyCodeTimer);
+          copyCodeTimer = setTimeout(() => {
+            btnCopyClosureCode.textContent = 'Copiar código';
+            copyCodeTimer = null;
+          }, 1800);
+        };
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          navigator.clipboard.writeText(codeText).then(confirmCopied).catch(confirmCopied);
+        } else {
+          confirmCopied();
+        }
+      });
+    }
+
     if (btnPreviewPdf) {
       btnPreviewPdf.addEventListener('click', () => {
-        closeDialog('modal-closure');
-        openDialog('modal-pdf-preview', btnFinishSession);
+        closeDialog('modal-closure', { restoreFocus: false });
+        openDialog('modal-pdf-preview', btnPreviewPdf);
+      });
+    }
+
+    if (btnClosePdfPreview) {
+      btnClosePdfPreview.addEventListener('click', () => {
+        closeDialog('modal-pdf-preview', { restoreFocus: false });
+        openDialog('modal-closure', btnFinishSession);
+        if (btnPreviewPdf) btnPreviewPdf.focus();
       });
     }
 
@@ -1902,6 +2018,7 @@
     const form = document.getElementById('verifier-form');
     const input = document.getElementById('verifier-code-input');
     const resultBox = document.getElementById('verifier-result');
+    const badgeIcon = document.getElementById('verifier-badge-icon');
     const badgeText = document.getElementById('verifier-badge-text');
     const resultTitle = document.getElementById('verifier-result-title');
     const resultDetails = document.getElementById('verifier-result-details');
@@ -1909,10 +2026,23 @@
 
     if (!form || !input || !resultBox) return;
 
+    function setVerifierIcon(isValid) {
+      if (!badgeIcon) return;
+      if (isValid) {
+        badgeIcon.setAttribute('viewBox', '0 0 20 20');
+        badgeIcon.innerHTML =
+          '<path d="M4.16667 10L7.5 13.3333L15.8333 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+      } else {
+        badgeIcon.setAttribute('viewBox', '0 0 24 24');
+        badgeIcon.innerHTML =
+          '<path d="M12 3L22 21H2L12 3Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 9V14M12 17V17.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+      }
+    }
+
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       let raw = input.value.trim().toUpperCase();
-      if (/^\d{8}$/.test(raw)) {
+      if (/^\d{8}$/.test(raw) || raw === '84920') {
         raw = `SEG-${raw}`;
       }
 
@@ -1931,6 +2061,7 @@
 
         resultBox.classList.remove('is-error');
         resultBox.classList.add('is-valid');
+        setVerifierIcon(true);
         if (badgeText) badgeText.textContent = 'Comprobante válido';
         if (resultTitle) resultTitle.textContent = 'Comprobante verificado';
         if (resultDetails) {
@@ -1948,6 +2079,7 @@
       } else {
         resultBox.classList.remove('is-valid');
         resultBox.classList.add('is-error');
+        setVerifierIcon(false);
         if (badgeText) badgeText.textContent = 'Código no reconocido';
         if (resultTitle) resultTitle.textContent = 'No se encontró la constancia';
         if (resultDetails) {
@@ -2059,10 +2191,13 @@
       phone: {
         el: document.getElementById('field-phone'),
         err: document.getElementById('err-phone'),
-        validate: (v) =>
-          /^[+\d\s()-]{7,18}$/.test(v.trim())
+        validate: (v) => {
+          const trimmed = v.trim();
+          const digits = trimmed.replace(/\D/g, '');
+          return digits.length >= 7 && digits.length <= 15 && /^[+\d\s()-]+$/.test(trimmed)
             ? ''
-            : 'Ingresa un número telefónico válido (7 a 15 dígitos).'
+            : 'Ingresa un número telefónico válido (7 a 15 dígitos).';
+        }
       },
       windows: {
         el: document.getElementById('field-windows'),
@@ -2153,7 +2288,24 @@
     }
 
     document.querySelectorAll('[data-close-modal]').forEach((btn) => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', (e) => {
+        const targetHref = btn.tagName === 'A' ? btn.getAttribute('href') : '';
+        if (targetHref && targetHref.startsWith('#')) {
+          e.preventDefault();
+          closeDialog(btn.dataset.closeModal, { restoreFocus: false });
+          const targetEl = document.querySelector(targetHref);
+          const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+          if (targetEl) {
+            targetEl.scrollIntoView({ behavior: prefersReduced ? 'auto' : 'smooth', block: 'start' });
+          }
+          const firstField = document.getElementById('field-fullname');
+          if (firstField) {
+            setTimeout(() => {
+              firstField.focus({ preventScroll: true });
+            }, 150);
+          }
+          return;
+        }
         closeDialog(btn.dataset.closeModal);
       });
     });

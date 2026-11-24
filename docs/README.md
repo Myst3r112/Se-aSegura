@@ -68,14 +68,15 @@ Extraídos del sistema de diseño de SeñaSegura en Figma (`Atkinson Hyperlegibl
   - Titular bimodal, tarjeta explicativa y vista previa en tablet.
   - KPIs animados al entrar en pantalla (`+232,000`, `<30 s`, `20 → 7 min`, `100%`) y pestañas por sector (*Agencias Bancarias*, *Comisarías*, *Centros de Salud*).
 - **Simulador Interactivo Core:**
-  - Dos vistas sincronizadas: **Ventanilla (Ciudadano/Personal)** y **Consola del Intérprete**.
-  - **Modo Regular (HU-001 a HU-005, HU-007, HU-035):** Inicio en 1 toque sin login, selector bimodal (`LSP` vs `Texto/Lectura`), selección de sector y trámite institucional, chat asistido con plantillas rápidas y dictado de voz simulado.
-  - **Modo Emergencia (HU-009, HU-011, HU-014, HU-015):** Botón rojo `#D92626` con salto de cola `<30 s`, alerta sonora/visual, 4 pictogramas de crisis (`≥80×80px`) y enlace a videollamada HD.
-  - **Videollamada HD y Controles (HU-017, HU-018, HU-021, HU-023, HU-040):** Badge `>30 fps HD`, indicador interactivo de turnos (`Interpretando a LSP` / `Voz a funcionario`), chat lateral con botón `Copiar datos`, controles de micrófono, cámara, cambio de cámara y pantalla completa.
-  - **Contingencia:** Botón `Simular microcorte` con reconexión visible sin pérdida del historial.
-- **Cierre, Trazabilidad y Verificador Web (HU-025, HU-026, HU-031, HU-032):**
-  - Generación de código único de 8 dígitos (`SEG-XXXXXXXX`), código QR dinámico en SVG, descarga de constancia, impresión de ticket (`@media print`) y purga inmediata del chat local.
-  - Verificador web capaz de validar el ejemplo base (`SEG-84920`) y los códigos generados en sesión.
+  - Dos vistas sincronizadas: **Ventanilla (Ciudadano/Personal)** y **Consola del Intérprete (P8–P10)**.
+  - **Tres canales de comunicación (HU-035):** **Intérprete LSP** (videollamada humana en vivo con transición *Listo → Conectando → En vivo*), **Cámara IA (Gestos)** (carga bajo demanda de MediaPipe Hands al pulsar *Activar Cámara IA*, con 6 gestos estables en 600 ms, traducción a texto/voz, barra de progreso en tiempo real y modo de simulación sin cámara) y **Texto / Lectura** (chat asistido y dictado de voz).
+  - **Edición en vivo de datos y contexto sectorial:** Selección de sector (*Banco*, *Comisaría*, *Salud*, *Municipal*) y trámite, con **edición en vivo de DNI / Monto** (y campos del sector) sincronizada instantáneamente con plantillas rápidas, dictado y la Consola del Intérprete.
+  - **Modo Emergencia (HU-009, HU-011, HU-014, HU-015):** Botón rojo `#D92626` con salto de cola `<30 s`, alerta sonora/visual, tipos de emergencia, 4 pictogramas de crisis y sincronización directa con la alerta crítica en Consola.
+  - **Consola del Intérprete (P8–P10):** Banner de alerta crítica prioritaria con aceptación en tiempo real (o descarte en modo simulación), indicador interactivo de turnos (`Interpretando a LSP` / `Voz a funcionario`), vista PiP minimizable, bloc de notas con purga local, solicitud de respaldo y **Glosario Técnico LSP (P10)** buscable por categoría y con favoritos.
+  - **Videollamada HD, Controles y Contingencia (HU-017, HU-018, HU-021, HU-023, HU-040):** Controles de micrófono, cámara, cambio de ángulo y pantalla completa centrada, además del botón `Simular microcorte` con reconexión automática sin pérdida del historial.
+- **Cierre, Calificación, Trazabilidad y Verificador Web (P6 · HU-025, HU-026, HU-029, HU-031, HU-032):**
+  - Generación de código único de 8 dígitos (`SEG-XXXXXXXX`) con botón de copiado rápido, código QR dinámico en SVG, descarga de constancia, vista previa PDF con descarga e impresión directa (`@media print`), **calificación opcional de la experiencia en cierre (P6)** y purga local inmediata (incluyendo detención y limpieza de Cámara IA).
+  - Verificador web capaz de validar el ejemplo base (`SEG-84920` o `84920`) y los códigos generados en sesión con estado visual diferenciado.
 - **Respaldo Normativo, FAQ y Formulario B2G/B2B (HU-042, HU-043, HU-044, HU-048):**
   - Respaldo explícito a la **Ley N.° 29535** (Lengua de Señas Peruana), **Ley N.° 29733** (Protección de Datos Personales) y política de **No grabación de video**, con modal de *Ficha de Conformidad*.
   - Acordeón de FAQ filtrable por categoría con modal de apoyo visual en LSP.

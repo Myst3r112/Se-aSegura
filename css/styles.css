@@ -418,7 +418,7 @@ html[data-contrast="high"] .site-header {
 }
 
 .brand-logo {
-  font-size: 1.375rem;
+  font-size: clamp(18px, 1.375rem, 24px);
   font-weight: 700;
   color: var(--color-primary);
   text-decoration: none;
@@ -616,7 +616,7 @@ html[data-contrast="high"] .a11y-bar {
   border-radius: var(--radius-12);
   border: 2px solid var(--color-muted);
   background-color: var(--color-surface);
-  font-size: 1.125rem;
+  font-size: clamp(14px, 1rem, 18px);
   font-weight: 700;
   cursor: pointer;
 }
@@ -735,6 +735,10 @@ html[data-contrast="high"] .btn-scale-preset-mobile.is-active {
 }
 
 /* Secciones generales */
+section[id] {
+  scroll-margin-top: 136px;
+}
+
 .section {
   padding-block: 64px;
 }
@@ -2131,6 +2135,13 @@ html[data-contrast="high"] .console-status-bar {
   border-color: var(--color-success);
 }
 
+.console-critical-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 html[data-contrast="high"] .console-critical-banner {
   background-color: #2B1012;
   border-color: #F59E0B;
@@ -2433,6 +2444,22 @@ html[data-contrast="high"] .verifier-card {
 
 .certificate-result.is-error {
   border-color: var(--color-emergency);
+}
+
+.certificate-result.is-valid .verifier-badge-icon {
+  color: var(--color-success);
+}
+
+.certificate-result.is-error .verifier-badge-icon {
+  color: var(--color-emergency);
+}
+
+html[data-contrast="high"] .certificate-result.is-valid .verifier-badge-icon {
+  color: #F59E0B;
+}
+
+html[data-contrast="high"] .certificate-result.is-error .verifier-badge-icon {
+  color: #FCA5A5;
 }
 
 .certificate-title {
@@ -3897,6 +3924,10 @@ html[data-contrast="high"] .vision-escalate.is-highlighted {
     flex: 1 1 100%;
   }
 
+  section[id] {
+    scroll-margin-top: 16px;
+  }
+
   .section {
     padding-block: 40px;
   }
@@ -3965,11 +3996,13 @@ html[data-contrast="high"] .vision-escalate.is-highlighted {
 
 /* Impresión de Ticket / Constancia */
 @media print {
-  body > *:not(#modal-closure) {
+  body > *:not(#modal-closure):not(#modal-pdf-preview),
+  dialog.app-modal:not([open]) {
     display: none !important;
   }
 
-  #modal-closure {
+  #modal-closure[open],
+  #modal-pdf-preview[open] {
     position: static;
     width: 100%;
     max-height: none;
@@ -3978,7 +4011,12 @@ html[data-contrast="high"] .vision-escalate.is-highlighted {
   }
 
   #modal-closure .closure-actions,
-  #modal-closure [data-close-modal] {
+  #modal-closure .closure-rating-box,
+  #modal-closure .closure-demo-note,
+  #modal-closure [data-close-modal],
+  #modal-pdf-preview .modal-actions-row,
+  #modal-pdf-preview .pdf-demo-note,
+  #modal-pdf-preview [data-close-modal] {
     display: none !important;
   }
 }

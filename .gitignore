@@ -1,5 +1,6 @@
 .tmp.drivedownload
 .tmp.driveupload
+.tmp.driveupload/
 
 # Sistema operativo
 .DS_Store

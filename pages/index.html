@@ -6,13 +6,13 @@
   <meta name="description" content="SeñaSegura: plataforma de atención presencial accesible en Lengua de Señas Peruana (LSP) y Mensajería Asistida para bancos, comisarías, centros de salud y municipalidades.">
   <title>SeñaSegura · Atención Accesible en Lengua de Señas Peruana (LSP)</title>
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="../css/styles.css?v=4">
+  <link rel="stylesheet" href="../css/styles.css?v=5">
 </head>
-<body>
+<body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
 
   <!-- 01 HEADER Y ACCESIBILIDAD -->
-  <header class="site-header" id="inicio">
+  <header class="site-header">
     <div class="container header-inner">
       <div class="nav-row">
         <a href="#inicio" class="brand-logo" aria-label="SeñaSegura, volver al inicio">
@@ -833,9 +833,14 @@
                 <strong id="console-critical-title">EMERGENCIA CRÍTICA · Comisaría Alfonso Ugarte — Denuncia Policial (&lt;30 s)</strong>
                 <span id="console-critical-sub">Prioridad máxima en cola · Sin grabación de video</span>
               </div>
-              <button type="button" class="btn btn-emergency" id="btn-accept-critical-emergency">
-                Aceptar Emergencia Ahora
-              </button>
+              <div class="console-critical-actions">
+                <button type="button" class="btn btn-emergency" id="btn-accept-critical-emergency">
+                  Aceptar Emergencia Ahora
+                </button>
+                <button type="button" class="btn-soft" id="btn-dismiss-critical-sim" hidden>
+                  Descartar simulación
+                </button>
+              </div>
             </div>
 
             <div class="console-grid">
@@ -963,16 +968,18 @@
 
             <div class="certificate-result is-valid" id="verifier-result" role="region" aria-live="polite">
               <div class="status-pill" id="verifier-badge">
-                <img src="../assets/icons/check.svg" alt="" width="20" height="20" class="icon-svg icon-check">
-                <span id="verifier-badge-text">Red Operativa</span>
+                <svg id="verifier-badge-icon" class="icon-svg verifier-badge-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <path d="M4.16667 10L7.5 13.3333L15.8333 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span id="verifier-badge-text">Comprobante válido</span>
               </div>
               <h4 class="certificate-title" id="verifier-result-title">Comprobante verificado</h4>
               <div class="certificate-meta" id="verifier-result-details">
-                <p>SEG-84920 · Atención finalizada</p>
-                <p>Canal: Lengua de Señas Peruana</p>
-                <p>Estado: cierre confirmado</p>
+                <p><strong>SEG-84920</strong> · Atención finalizada · Cierre confirmado</p>
+                <p>Sector: Banco · Canal: Lengua de Señas Peruana</p>
+                <p>Fecha: Ejemplo institucional · Purga local aplicada</p>
               </div>
-              <p class="badge-caption" id="verifier-result-footer">DEMOSTRACIÓN · Sin validez documental</p>
+              <p class="badge-caption" id="verifier-result-footer">DEMOSTRACIÓN · Ejemplo base SEG-84920</p>
             </div>
           </article>
 
@@ -1314,12 +1321,15 @@
               <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
               <span>Imprimir ticket</span>
             </button>
+            <button type="button" class="btn-soft" id="btn-copy-closure-code">
+              Copiar código
+            </button>
             <button type="button" class="btn-soft" id="btn-preview-pdf">
               Vista previa PDF
             </button>
           </div>
 
-          <p class="muted-text">Demostración: el comprobante no contiene video ni mensajes de la conversación.</p>
+          <p class="muted-text closure-demo-note">Demostración: el comprobante no contiene video ni mensajes de la conversación.</p>
         </div>
 
         <div class="closure-qr-box">
@@ -1392,7 +1402,7 @@
         <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
         <span>Volver al simulador</span>
       </button>
-      <p class="badge-caption">Constancia demostrativa · Verificable en el buscador inferior.</p>
+      <p class="badge-caption closure-demo-note">Constancia demostrativa · Verificable en el buscador inferior.</p>
     </div>
   </dialog>
 
@@ -1414,14 +1424,24 @@
         </div>
       </div>
 
-      <p class="muted-text">
+      <p class="muted-text pdf-demo-note">
         Puedes descargar la constancia o imprimir el ticket institucional directamente desde el navegador.
       </p>
 
-      <button type="button" class="btn btn-primary" data-close-modal="modal-pdf-preview">
-        <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
-        <span>Cerrar vista previa</span>
-      </button>
+      <div class="modal-actions-row">
+        <button type="button" class="btn btn-primary" id="btn-pdf-download">
+          <img src="../assets/icons/download.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+          <span>Descargar constancia</span>
+        </button>
+        <button type="button" class="btn btn-secondary" id="btn-pdf-print">
+          <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+          <span>Imprimir / Guardar PDF</span>
+        </button>
+        <button type="button" class="btn btn-secondary" id="btn-close-pdf-preview">
+          <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+          <span>Cerrar vista previa</span>
+        </button>
+      </div>
     </div>
   </dialog>
 
@@ -1611,7 +1631,7 @@
     </div>
   </dialog>
 
-  <script src="../js/main.js?v=4"></script>
-  <script src="../js/vision-ai.js?v=4" defer></script>
+  <script src="../js/main.js?v=5"></script>
+  <script src="../js/vision-ai.js?v=5" defer></script>
 </body>
 </html>

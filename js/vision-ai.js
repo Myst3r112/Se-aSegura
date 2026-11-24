@@ -116,8 +116,8 @@
     if (T && I && M && R && K) id = 'palma';
     else if (!T && !I && !M && !R && !K) id = 'puno';
     else if (T && !I && !M && !R && !K && thumbUp) id = 'pulgar';
-    else if (!T && I && !M && !R && !K) id = 'indice';
-    else if (!T && I && M && !R && !K) id = 'v';
+    else if (I && !M && !R && !K) id = 'indice';
+    else if (I && M && !R && !K) id = 'v';
     else if (T && I && !M && !R && K) id = 'auxilio';
 
     return { id, fingers };
@@ -215,6 +215,7 @@
     const urgentHint = $('vision-urgent-hint');
     const progressBar = $('vision-progress');
     const progressFill = $('vision-progress-fill');
+    const progressLabel = $('vision-progress-label');
     const progressValue = $('vision-progress-value');
 
     if (!panel || !video || !canvas || !btnStart || !btnStop || !btnSimulate || !btnSpeak || !btnEscalate) {
@@ -223,6 +224,7 @@
 
     const ctx = canvas.getContext('2d');
     const DEFAULT_PHRASE = 'Muestra un gesto y mantenlo 0,6 s para traducirlo.';
+    const DEFAULT_PROGRESS_LABEL = 'Estabilidad del gesto (600 ms)';
 
     let mode = 'idle'; // idle | loading | live | simulation
     let sessionToken = 0;
@@ -251,6 +253,8 @@
       const busy = nextMode === 'loading' || nextMode === 'live';
       btnStart.disabled = busy;
       btnStop.disabled = nextMode === 'idle';
+      const btnStopLabel = btnStop.querySelector('span') || btnStop;
+      btnStopLabel.textContent = nextMode === 'simulation' ? 'Salir de simulación' : 'Detener Cámara';
       btnSimulate.disabled = nextMode === 'simulation';
       simBox.hidden = nextMode !== 'simulation';
     }
@@ -289,6 +293,7 @@
       btnSpeak.disabled = true;
       setUrgent(false);
       setProgress(0);
+      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
 
     function resetDetection() {
@@ -299,6 +304,7 @@
       detection.scoreSum = 0;
       detection.scoreN = 0;
       setProgress(0);
+      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
 
     /* ---------- Cámara ---------- */
@@ -591,7 +597,13 @@
 
       if (!detection.id) {
         setProgress(0);
+        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
         return;
+      }
+
+      const activeGesture = GESTURE_BY_ID[detection.id];
+      if (progressLabel && activeGesture) {
+        progressLabel.textContent = `Confirmando: ${activeGesture.label}…`;
       }
 
       const progress = Math.min(1, (now - detection.since) / CONFIRM_MS);

@@ -5,7 +5,7 @@
  *   No existe ninguna etiqueta <script> de MediaPipe en el HTML (Lighthouse intacto en la carga inicial).
  * - Todo el procesamiento de video ocurre en el dispositivo: no se graba ni se envía video.
  * - Si no hay cámara, se deniega el permiso o falla el CDN, se activa un modo de respaldo
- *   (cuadrícula de 6 gestos) que ejecuta exactamente el mismo flujo de traducción.
+ *   (cuadrícula de 8 gestos: 1 y 2 manos) que ejecuta exactamente el mismo flujo de traducción.
  *
  * Integración con js/main.js mediante:
  *   - window.SenaSegura (puente: setChannel, appendChatMessage, activateEmergency)
@@ -40,7 +40,7 @@
   };
 
   const PLACEHOLDER_TEXT = {
-    idle: 'Pulsa “Activar Cámara IA” y muestra tu mano frente a la cámara.',
+    idle: 'Pulsa “Activar Cámara IA” y muestra una o ambas manos frente a la cámara.',
     loading: 'Cargando modelo de visión... Si el navegador lo solicita, permite el acceso a la cámara.',
     simulation: 'Modo simulación: la cámara no está en uso. Elige un gesto de la cuadrícula para probar la traducción.'
   };
@@ -57,6 +57,20 @@
       label: 'Seña de auxilio (ILY)',
       phrase: 'Necesito ayuda urgente — Escalar a Intérprete',
       urgent: true
+    },
+    {
+      id: 'dos_palmas',
+      emoji: '\u{1F64C}',
+      label: 'Dos palmas abiertas',
+      phrase: 'Por favor, espera un momento',
+      twoHands: true
+    },
+    {
+      id: 'dos_pulgares',
+      emoji: '\u{1F44D}\u{1F44D}',
+      label: 'Dos pulgares arriba',
+      phrase: 'Todo conforme, muchas gracias',
+      twoHands: true
     }
   ];
   const GESTURE_BY_ID = Object.fromEntries(GESTURES.map((g) => [g.id, g]));
@@ -87,44 +101,98 @@
     const P = landmarks.map((p) => ({ x: p.x * aspect, y: p.y }));
     const palmSize = dist(P[0], P[9]) || 1e-6; // muñeca → nudillo del medio
 
-    // Dedo extendido: la punta está más lejos de la muñeca que su articulación PIP (8vs6, 12vs10, 16vs14, 20vs18)
-    const isExtended = (tip, pip) => dist(P[tip], P[0]) - dist(P[pip], P[0]) > 0.1 * palmSize;
+    // Dedo extendido: punta más lejos de la muñeca que PIP (+ margen) y que su nudillo MCP
+    const isExtended = (tip, pip, mcp) => {
+      const tipDist = dist(P[tip], P[0]);
+      return tipDist > dist(P[pip], P[0]) + 0.08 * palmSize && tipDist > dist(P[mcp], P[0]);
+    };
 
-    // Pulgar (4, 3, 2): punta [4] vs articulación [3] medidas contra el nudillo del meñique [17].
-    // Si la punta se aleja del meñique más que la articulación, el pulgar está abierto.
-    // No depende de qué mano sea (izquierda/derecha): solo de que el pulgar se aleje de la palma.
+    // Pulgar abierto lateralmente
     const thumbTipToPinkyBase = dist(P[4], P[17]);
     const thumbSpread = thumbTipToPinkyBase > dist(P[3], P[17]) * 1.04 && thumbTipToPinkyBase > 0.85 * palmSize;
 
-    // Pulgar vertical hacia arriba: orientación dominante vertical y bien por encima del nudillo del índice
+    // Pulgar vertical hacia arriba: tolerante a inclinación natural sin confundirse con puño
     const dx = Math.abs(P[4].x - P[2].x);
     const dy = P[2].y - P[4].y;
-    const thumbUp = P[4].y < P[3].y && P[3].y < P[2].y && dy > dx && P[5].y - P[4].y > 0.25 * palmSize;
+    const thumbUp = P[4].y < P[3].y && P[3].y < P[2].y && dy > dx * 0.7 && P[5].y - P[4].y > 0.14 * palmSize;
 
     const thumbExtended = thumbSpread || thumbUp;
 
     const fingers = {
       thumb: thumbExtended,
-      index: isExtended(8, 6),
-      middle: isExtended(12, 10),
-      ring: isExtended(16, 14),
-      pinky: isExtended(20, 18)
+      index: isExtended(8, 6, 5),
+      middle: isExtended(12, 10, 9),
+      ring: isExtended(16, 14, 13),
+      pinky: isExtended(20, 18, 17)
     };
-    const { thumb: T, index: I, middle: M, ring: R, pinky: K } = fingers;
+    const { index: I, middle: M, ring: R, pinky: K } = fingers;
 
     let id = null;
-    if (T && I && M && R && K) id = 'palma';
-    else if (!T && !I && !M && !R && !K) id = 'puno';
-    else if (T && !I && !M && !R && !K && thumbUp) id = 'pulgar';
-    else if (I && !M && !R && !K) id = 'indice';
+    if (I && M && R && K) id = 'palma';
+    else if (!I && !M && !R && !K && thumbUp) id = 'pulgar';
+    else if (!I && !M && !R && !K && !thumbUp) id = 'puno';
+    else if (I && !M && !R && K) id = 'auxilio';
     else if (I && M && !R && !K) id = 'v';
-    else if (T && I && !M && !R && K) id = 'auxilio';
+    else if (I && !M && !R && !K) id = 'indice';
 
     return { id, fingers };
   }
 
+  /**
+   * Combina las manos detectadas (0, 1 o 2) en un único gesto activo sin parpadeos.
+   * @param {Array<{id: string|null, score: number}>} handEntries
+   * @param {string|null} currentId gesto en seguimiento actual para desempate estable
+   * @returns {{id: string, score: number}|null}
+   */
+  function resolveMultiHandGesture(handEntries, currentId = null) {
+    if (!Array.isArray(handEntries) || handEntries.length === 0) return null;
+
+    if (handEntries.length === 1) {
+      const single = handEntries[0];
+      return single && single.id ? { id: single.id, score: typeof single.score === 'number' ? single.score : 0.9 } : null;
+    }
+
+    const valid = handEntries.filter((entry) => entry && entry.id);
+    if (valid.length === 0) return null;
+
+    // 1. Prioridad máxima de seguridad: auxilio en cualquiera de las 2 manos
+    const auxHands = valid.filter((entry) => entry.id === 'auxilio');
+    if (auxHands.length > 0) {
+      const bestAux = auxHands.reduce((best, cur) => ((cur.score || 0) > (best.score || 0) ? cur : best));
+      return { id: 'auxilio', score: typeof bestAux.score === 'number' ? bestAux.score : 0.9 };
+    }
+
+    // 2 y 3. Gestos bimanuales combinados cuando hay 2 manos activas
+    if (valid.length >= 2) {
+      const [h0, h1] = valid;
+      const avgScore = ((h0.score || 0.9) + (h1.score || 0.9)) / 2;
+      if (h0.id === 'palma' && h1.id === 'palma') {
+        return { id: 'dos_palmas', score: avgScore };
+      }
+      if (h0.id === 'pulgar' && h1.id === 'pulgar') {
+        return { id: 'dos_pulgares', score: avgScore };
+      }
+    }
+
+    // 4. Solo una mano hace un gesto válido (la otra está relajada)
+    if (valid.length === 1) {
+      const active = valid[0];
+      return { id: active.id, score: typeof active.score === 'number' ? active.score : 0.9 };
+    }
+
+    // 5. Ambas manos con gestos distintos: prioriza el gesto ya en progreso o el de mayor confianza
+    if (currentId) {
+      const steady = valid.find((entry) => entry.id === currentId);
+      if (steady) {
+        return { id: steady.id, score: typeof steady.score === 'number' ? steady.score : 0.9 };
+      }
+    }
+    const top = valid.reduce((best, cur) => ((cur.score || 0) > (best.score || 0) ? cur : best));
+    return { id: top.id, score: typeof top.score === 'number' ? top.score : 0.9 };
+  }
+
   // Disponible para pruebas manuales en consola; no altera el estado de la app.
-  window.SenaSeguraVision = Object.freeze({ classifyHand, GESTURES });
+  window.SenaSeguraVision = Object.freeze({ classifyHand, resolveMultiHandGesture, GESTURES });
 
   /* =========================================================
      3. CARGA DINÁMICA DE MEDIAPIPE (sin duplicados)
@@ -198,6 +266,7 @@
     const canvas = $('vision-canvas');
     const statusBox = $('vision-status');
     const statusText = $('vision-status-text');
+    const handsCountEl = $('vision-hands-count');
     const notice = $('vision-notice');
     const placeholder = $('vision-placeholder');
     const placeholderText = $('vision-placeholder-text');
@@ -242,10 +311,22 @@
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0 };
 
     /* ---------- UI helpers ---------- */
+    function updateHandsCount(count) {
+      if (!handsCountEl) return;
+      const safeCount = Math.max(0, Math.min(2, Number(count) || 0));
+      handsCountEl.textContent = `Manos: ${safeCount} / 2`;
+      handsCountEl.setAttribute('aria-label', `Manos detectadas: ${safeCount} de 2`);
+      handsCountEl.setAttribute('data-count', String(safeCount));
+    }
+
     function setStatus(nextMode) {
       mode = nextMode;
       statusBox.setAttribute('data-state', nextMode);
       statusText.textContent = STATUS_TEXT[nextMode];
+      if (handsCountEl) {
+        handsCountEl.hidden = nextMode !== 'live';
+        if (nextMode !== 'live') updateHandsCount(0);
+      }
       placeholder.hidden = nextMode === 'live';
       if (nextMode !== 'live') {
         placeholderText.textContent = PLACEHOLDER_TEXT[nextMode];
@@ -341,6 +422,7 @@
       releaseStream();
       clearCanvas();
       if (stage) stage.style.removeProperty('aspect-ratio');
+      updateHandsCount(0);
       resetDetection();
       setUrgent(false);
       if (!keepStatus) setStatus('idle');
@@ -396,11 +478,11 @@
       handsPromise = (async () => {
         await loadMediaPipe();
         const instance = new window.Hands({ locateFile: (file) => HANDS_BASE_URL + file });
-        const lowPower = (navigator.hardwareConcurrency || 4) <= 4 || window.matchMedia('(max-width: 767px)').matches;
+        const lowPower = window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
         instance.setOptions({
-          maxNumHands: 1,
+          maxNumHands: 2,
           modelComplexity: lowPower ? 0 : 1,
-          minDetectionConfidence: 0.6,
+          minDetectionConfidence: 0.5,
           minTrackingConfidence: 0.5
         });
         instance.onResults(handleResults);
@@ -523,14 +605,16 @@
     }
 
     /* ---------- Resultados, dibujo y filtro anti-ruido ---------- */
-    function drawHand(landmarks) {
+    function drawHand(landmarks, handIndex = 0) {
       const high = document.documentElement.getAttribute('data-contrast') === 'high';
-      const lineColor = high ? '#F59E0B' : '#0F4C81';
-      const dotColor = high ? '#FFFFFF' : '#F59E0B';
+      const isSecond = handIndex > 0;
+      const haloColor = high ? '#121820' : '#FFFFFF';
+      const lineColor = high ? (isSecond ? '#FFFFFF' : '#F59E0B') : (isSecond ? '#15803D' : '#0F4C81');
+      const dotColor = high ? (isSecond ? '#F59E0B' : '#FFFFFF') : (isSecond ? '#FFFFFF' : '#F59E0B');
       const connections = window.HAND_CONNECTIONS || HAND_CONNECTIONS_FALLBACK;
 
       if (typeof window.drawConnectors === 'function' && typeof window.drawLandmarks === 'function') {
-        window.drawConnectors(ctx, landmarks, connections, { color: high ? '#121820' : '#FFFFFF', lineWidth: 8 });
+        window.drawConnectors(ctx, landmarks, connections, { color: haloColor, lineWidth: 8 });
         window.drawConnectors(ctx, landmarks, connections, { color: lineColor, lineWidth: 4 });
         window.drawLandmarks(ctx, landmarks, { color: '#121820', fillColor: dotColor, lineWidth: 2, radius: 5 });
         return;
@@ -539,7 +623,7 @@
       // Respaldo manual si drawing_utils no cargó
       const w = canvas.width;
       const h = canvas.height;
-      [[high ? '#121820' : '#FFFFFF', 8], [lineColor, 4]].forEach(([color, width]) => {
+      [[haloColor, 8], [lineColor, 4]].forEach(([color, width]) => {
         ctx.strokeStyle = color;
         ctx.lineWidth = width;
         ctx.lineCap = 'round';
@@ -564,18 +648,27 @@
     function handleResults(results) {
       if (!running) return;
       clearCanvas();
-      const landmarks = results.multiHandLandmarks && results.multiHandLandmarks[0];
+      const allLandmarks = Array.isArray(results.multiHandLandmarks) ? results.multiHandLandmarks : [];
       const now = performance.now();
+      updateHandsCount(allLandmarks.length);
 
-      if (!landmarks) {
+      if (allLandmarks.length === 0) {
         feedGesture(null, 0, now);
         return;
       }
-      drawHand(landmarks);
-      const handedness = results.multiHandedness && results.multiHandedness[0];
-      const score = handedness && typeof handedness.score === 'number' ? handedness.score : 0.9;
-      const { id } = classifyHand(landmarks, canvas.width / canvas.height);
-      feedGesture(id, score, now);
+
+      const aspect = canvas.width / canvas.height;
+      const handEntries = [];
+      allLandmarks.forEach((landmarks, idx) => {
+        drawHand(landmarks, idx);
+        const handedness = results.multiHandedness && results.multiHandedness[idx];
+        const score = handedness && typeof handedness.score === 'number' ? handedness.score : 0.9;
+        const { id } = classifyHand(landmarks, aspect);
+        handEntries.push({ id, score });
+      });
+
+      const resolved = resolveMultiHandGesture(handEntries, detection.id);
+      feedGesture(resolved ? resolved.id : null, resolved ? resolved.score : 0, now);
     }
 
     /** Exige 600 ms de estabilidad antes de confirmar un gesto. */

@@ -275,6 +275,25 @@
     }
   }
 
+  function bindTablistArrows(tabs, onSelect) {
+    if (!tabs || !tabs.length) return;
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          const next = tabs[(index + 1) % tabs.length];
+          next.focus();
+          onSelect(next);
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          const prev = tabs[(index - 1 + tabs.length) % tabs.length];
+          prev.focus();
+          onSelect(prev);
+        }
+      });
+    });
+  }
+
   function initAccessibilityControls() {
     const contrastBtn = document.getElementById('btn-contrast-toggle');
     const decreaseBtn = document.getElementById('btn-font-decrease');
@@ -287,8 +306,8 @@
 
     function updateA11yStatus() {
       const label = state.contrast === 'high'
-        ? `Alto contraste activado · Texto al ${state.fontScale}%`
-        : `Texto al ${state.fontScale}%`;
+        ? `Alto contraste: Sí · ${state.fontScale}%`
+        : `Alto contraste: No · ${state.fontScale}%`;
       if (statusText) statusText.textContent = label;
       if (mobileStatusText) mobileStatusText.textContent = label;
     }
@@ -700,6 +719,7 @@
     viewTabs.forEach((tab) => {
       tab.addEventListener('click', () => switchSimulatorView(tab.dataset.simView));
     });
+    bindTablistArrows(viewTabs, (tab) => switchSimulatorView(tab.dataset.simView));
 
     if (btnConsoleBack) {
       btnConsoleBack.addEventListener('click', () => switchSimulatorView('ventanilla'));
@@ -796,10 +816,21 @@
     }
 
     function updateTurnLabels() {
-      const label = state.turnDirection === 'lsp' ? 'Interpretando a LSP' : 'Voz a funcionario';
+      const isLsp = state.turnDirection === 'lsp';
+      const label = isLsp ? 'Interpretando a LSP' : 'Voz a funcionario';
       if (simTurnLabel) simTurnLabel.textContent = label;
       if (consoleTurnStatus) consoleTurnStatus.textContent = label;
       if (fullscreenTurnLabel) fullscreenTurnLabel.textContent = label;
+      if (btnConsoleToLsp) {
+        btnConsoleToLsp.classList.toggle('btn-primary', isLsp);
+        btnConsoleToLsp.classList.toggle('btn-secondary', !isLsp);
+        btnConsoleToLsp.setAttribute('aria-pressed', String(isLsp));
+      }
+      if (btnConsoleToEs) {
+        btnConsoleToEs.classList.toggle('btn-primary', !isLsp);
+        btnConsoleToEs.classList.toggle('btn-secondary', isLsp);
+        btnConsoleToEs.setAttribute('aria-pressed', String(!isLsp));
+      }
     }
 
     function updateSessionMeta() {
@@ -1727,6 +1758,7 @@
       });
 
       // Purga inmediata del chat local, bloc de notas y restablecimiento de datos ficticios
+      const finishedProcedure = state.procedure;
       if (state.connecting) cancelConnecting();
       state.chatMessages = [];
       state.sessionActive = false;
@@ -1757,7 +1789,7 @@
       if (qrBox) qrBox.innerHTML = qrSvg;
       if (qrCaption) qrCaption.innerHTML = `${code}<br>QR verificable`;
       if (pdfCode) pdfCode.textContent = code;
-      if (pdfSector) pdfSector.textContent = `Atención finalizada · Sector: ${state.sector} (${state.procedure})`;
+      if (pdfSector) pdfSector.textContent = `Atención finalizada · Sector: ${state.sector} (${finishedProcedure})`;
       if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
       if (pdfQr) pdfQr.innerHTML = qrSvg;
 
@@ -1939,35 +1971,38 @@
     const lspButtons = document.querySelectorAll('.btn-lsp-modal');
     const modalLspQuestion = document.getElementById('modal-lsp-question');
 
-    filterBtns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const category = btn.dataset.faqFilter;
-        filterBtns.forEach((b) => {
-          const active = b === btn;
-          b.classList.toggle('is-active', active);
-          b.setAttribute('aria-selected', String(active));
-        });
-
-        let firstVisible = true;
-        faqItems.forEach((item) => {
-          const match = item.dataset.faqCategory === category;
-          item.hidden = !match;
-          const trigger = item.querySelector('.faq-trigger');
-          const panel = item.querySelector('.faq-panel');
-          const icon = item.querySelector('.faq-icon');
-          if (match && firstVisible && trigger && panel) {
-            trigger.setAttribute('aria-expanded', 'true');
-            panel.hidden = false;
-            if (icon) icon.textContent = '−';
-            firstVisible = false;
-          } else if (trigger && panel) {
-            trigger.setAttribute('aria-expanded', 'false');
-            panel.hidden = true;
-            if (icon) icon.textContent = '+';
-          }
-        });
+    function selectFaqFilter(btn) {
+      const category = btn.dataset.faqFilter;
+      filterBtns.forEach((b) => {
+        const active = b === btn;
+        b.classList.toggle('is-active', active);
+        b.setAttribute('aria-selected', String(active));
       });
+
+      let firstVisible = true;
+      faqItems.forEach((item) => {
+        const match = category === 'todas' || item.dataset.faqCategory === category;
+        item.hidden = !match;
+        const trigger = item.querySelector('.faq-trigger');
+        const panel = item.querySelector('.faq-panel');
+        const icon = item.querySelector('.faq-icon');
+        if (match && firstVisible && trigger && panel) {
+          trigger.setAttribute('aria-expanded', 'true');
+          panel.hidden = false;
+          if (icon) icon.textContent = '−';
+          firstVisible = false;
+        } else if (trigger && panel) {
+          trigger.setAttribute('aria-expanded', 'false');
+          panel.hidden = true;
+          if (icon) icon.textContent = '+';
+        }
+      });
+    }
+
+    filterBtns.forEach((btn) => {
+      btn.addEventListener('click', () => selectFaqFilter(btn));
     });
+    bindTablistArrows(filterBtns, selectFaqFilter);
 
     faqTriggers.forEach((trigger) => {
       trigger.addEventListener('click', () => {
@@ -2180,10 +2215,10 @@
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(observe, 150);
     });
-    // El escalado tipográfico cambia el ancho del botón
+    // El escalado tipográfico y el contraste pueden ajustar dimensiones del botón
     new MutationObserver(() => setTimeout(observe, 50)).observe(htmlEl, {
       attributes: true,
-      attributeFilter: ['data-font-scale']
+      attributeFilter: ['data-font-scale', 'data-contrast']
     });
     observe();
     // La tipografía web puede cambiar el tamaño del botón tras cargar

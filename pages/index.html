@@ -6,7 +6,7 @@
   <meta name="description" content="SeñaSegura: plataforma de atención presencial accesible en Lengua de Señas Peruana (LSP) y Mensajería Asistida para bancos, comisarías, centros de salud y municipalidades.">
   <title>SeñaSegura · Atención Accesible en Lengua de Señas Peruana (LSP)</title>
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="../css/styles.css?v=3">
+  <link rel="stylesheet" href="../css/styles.css?v=4">
 </head>
 <body>
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -59,7 +59,7 @@
       <div class="a11y-bar" role="region" aria-label="Controles globales de accesibilidad">
         <div class="a11y-info">
           <span class="a11y-title">Accesibilidad</span>
-          <span class="a11y-status" id="a11y-status-text" aria-live="polite">Texto al 100%</span>
+          <span class="a11y-status" id="a11y-status-text" aria-live="polite">Alto contraste: No · 100%</span>
         </div>
 
         <div class="a11y-controls">
@@ -132,7 +132,7 @@
       <div class="mobile-drawer-a11y">
         <p class="mobile-drawer-heading">Accesibilidad</p>
         <p class="mobile-a11y-subtitle">Tamaño de texto</p>
-        <p class="mobile-a11y-status" id="mobile-a11y-status">Texto al 100%</p>
+        <p class="mobile-a11y-status" id="mobile-a11y-status">Alto contraste: No · 100%</p>
         <div class="mobile-scale-presets" role="group" aria-label="Escala de texto móvil">
           <button type="button" class="btn-scale-preset-mobile is-active" data-scale="100" aria-pressed="true">100%</button>
           <button type="button" class="btn-scale-preset-mobile" data-scale="125" aria-pressed="false">125%</button>
@@ -900,12 +900,12 @@
                 <p class="console-turn-status" id="console-turn-status" aria-live="polite">Interpretando a LSP</p>
 
                 <div class="console-turn-controls">
-                  <button type="button" class="btn btn-primary" id="btn-console-to-lsp">
-                    <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+                  <button type="button" class="btn btn-primary" id="btn-console-to-lsp" aria-pressed="true">
+                    <svg class="icon-svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12H19M14 17L19 12L14 7"/></svg>
                     <span>Interpretar a LSP</span>
                   </button>
-                  <button type="button" class="btn btn-primary" id="btn-console-to-es">
-                    <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+                  <button type="button" class="btn btn-secondary" id="btn-console-to-es" aria-pressed="false">
+                    <svg class="icon-svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12H19M14 17L19 12L14 7"/></svg>
                     <span>Voz a funcionario</span>
                   </button>
                   <button type="button" class="btn btn-secondary" id="btn-console-support">
@@ -1021,7 +1021,8 @@
         <p class="section-lead">Información clara para ciudadanos, personal de ventanilla e instituciones.</p>
 
         <div class="faq-filters" role="tablist" aria-label="Filtrar preguntas frecuentes por categoría">
-          <button type="button" class="faq-filter-btn is-active" role="tab" aria-selected="true" data-faq-filter="uso">Uso</button>
+          <button type="button" class="faq-filter-btn is-active" role="tab" aria-selected="true" data-faq-filter="todas">Todas</button>
+          <button type="button" class="faq-filter-btn" role="tab" aria-selected="false" data-faq-filter="uso">Uso</button>
           <button type="button" class="faq-filter-btn" role="tab" aria-selected="false" data-faq-filter="costos">Costos</button>
           <button type="button" class="faq-filter-btn" role="tab" aria-selected="false" data-faq-filter="seguridad">Seguridad</button>
           <button type="button" class="faq-filter-btn" role="tab" aria-selected="false" data-faq-filter="soporte">Soporte</button>
@@ -1610,7 +1611,7 @@
     </div>
   </dialog>
 
-  <script src="../js/main.js?v=3"></script>
-  <script src="../js/vision-ai.js?v=3" defer></script>
+  <script src="../js/main.js?v=4"></script>
+  <script src="../js/vision-ai.js?v=4" defer></script>
 </body>
 </html>

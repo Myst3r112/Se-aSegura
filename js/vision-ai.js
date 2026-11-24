@@ -334,7 +334,7 @@
       isProcessing = false;
       releaseStream();
       clearCanvas();
-      if (stage) stage.style.aspectRatio = '16 / 9';
+      if (stage) stage.style.removeProperty('aspect-ratio');
       resetDetection();
       setUrgent(false);
       if (!keepStatus) setStatus('idle');

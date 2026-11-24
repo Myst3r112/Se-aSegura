@@ -510,26 +510,22 @@
       if (panelSubtitle) panelSubtitle.textContent = data.subtitle;
       if (panelDesc) panelDesc.textContent = data.desc;
       if (panelSteps) {
-        panelSteps.innerHTML = data.steps
-          .map((step, i) => `<li><span class="step-num">0${i + 1}</span> ${step}</li>`)
-          .join('');
+        panelSteps.textContent = '';
+        data.steps.forEach((step, i) => {
+          const li = document.createElement('li');
+          const num = document.createElement('span');
+          num.className = 'step-num';
+          num.textContent = `0${i + 1}`;
+          li.append(num, ` ${step}`);
+          panelSteps.appendChild(li);
+        });
       }
     }
 
-    sectorTabs.forEach((tab, index) => {
+    sectorTabs.forEach((tab) => {
       tab.addEventListener('click', () => selectSectorTab(tab));
-      tab.addEventListener('keydown', (e) => {
-        if (e.key === 'ArrowRight') {
-          const next = sectorTabs[(index + 1) % sectorTabs.length];
-          next.focus();
-          selectSectorTab(next);
-        } else if (e.key === 'ArrowLeft') {
-          const prev = sectorTabs[(index - 1 + sectorTabs.length) % sectorTabs.length];
-          prev.focus();
-          selectSectorTab(prev);
-        }
-      });
     });
+    bindTablistArrows(sectorTabs, selectSectorTab);
   }
 
   /* =========================================================
@@ -553,6 +549,11 @@
         osc.start(now + idx * 0.14);
         osc.stop(now + idx * 0.14 + 0.14);
       });
+      setTimeout(() => {
+        if (typeof ctx.close === 'function' && ctx.state !== 'closed') {
+          ctx.close().catch(() => {});
+        }
+      }, 450);
     } catch (_) {
       // Silencio seguro si el navegador restringe Web Audio
     }
@@ -564,9 +565,10 @@
   }
 
   /**
-   * Genera un código QR determinista en SVG para códigos dinámicos de 8 dígitos.
+   * Genera un código QR determinista en nodo SVG para códigos dinámicos de 8 dígitos.
    */
   function buildDynamicQrSvg(code) {
+    const svgNs = 'http://www.w3.org/2000/svg';
     const size = 21;
     const cell = 6;
     const margin = 11;
@@ -591,7 +593,19 @@
       return false;
     }
 
-    const rects = [];
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('width', '148');
+    svg.setAttribute('height', '148');
+    svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', `Código QR ${code}`);
+
+    const bg = document.createElementNS(svgNs, 'rect');
+    bg.setAttribute('width', String(total));
+    bg.setAttribute('height', String(total));
+    bg.setAttribute('fill', '#FFFFFF');
+    svg.appendChild(bg);
+
     for (let r = 0; r < size; r += 1) {
       for (let c = 0; c < size; c += 1) {
         let dark = false;
@@ -602,14 +616,18 @@
           dark = (seed & 3) !== 0;
         }
         if (dark) {
-          rects.push(
-            `<rect x="${margin + c * cell}" y="${margin + r * cell}" width="${cell}" height="${cell}" fill="#0A2540"/>`
-          );
+          const rect = document.createElementNS(svgNs, 'rect');
+          rect.setAttribute('x', String(margin + c * cell));
+          rect.setAttribute('y', String(margin + r * cell));
+          rect.setAttribute('width', String(cell));
+          rect.setAttribute('height', String(cell));
+          rect.setAttribute('fill', '#0A2540');
+          svg.appendChild(rect);
         }
       }
     }
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="148" height="148" viewBox="0 0 ${total} ${total}" role="img" aria-label="Código QR ${code}"><rect width="${total}" height="${total}" fill="#FFFFFF"/>${rects.join('')}</svg>`;
+    return svg;
   }
 
   function initSimulator() {
@@ -725,6 +743,7 @@
     let connectingTimer = null;
     let connectingStepTimer = null;
     let dictTimer = null;
+    let chatEpoch = 0;
 
     function switchSimulatorView(viewName) {
       state.simView = viewName;
@@ -979,6 +998,7 @@
     }
 
     function updateSectorContext(sectorName) {
+      chatEpoch += 1;
       stopDictation();
       state.sector = sectorName;
       const config = SIM_SECTORS[sectorName];
@@ -991,9 +1011,13 @@
       if (chatSectorLabel) chatSectorLabel.textContent = config.subtitle;
       if (consoleSectorLabel) consoleSectorLabel.textContent = config.subtitle;
       if (procedureSelect) {
-        procedureSelect.innerHTML = config.procedures
-          .map((proc) => `<option value="${proc}">${proc}</option>`)
-          .join('');
+        procedureSelect.textContent = '';
+        config.procedures.forEach((proc) => {
+          const option = document.createElement('option');
+          option.value = proc;
+          option.textContent = proc;
+          procedureSelect.appendChild(option);
+        });
         state.procedure = config.procedures[0];
         if (consoleProcedureVal) consoleProcedureVal.textContent = state.procedure;
       }
@@ -1041,7 +1065,9 @@
         updateSessionMeta();
         appendMessage('Ciudadano (Plantilla)', text, 'user');
         updateStepsGuide();
+        const epoch = chatEpoch;
         setTimeout(() => {
+          if (epoch !== chatEpoch) return;
           appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${state.procedure}. Continuamos con tu atención.`, 'staff');
         }, 450);
       });
@@ -1757,7 +1783,9 @@
         updateStepsGuide();
         updateSessionMeta();
 
+        const epoch = chatEpoch;
         setTimeout(() => {
+          if (epoch !== chatEpoch) return;
           appendMessage(
             'Personal de ventanilla',
             `Mensaje confirmado en ${state.sector}. Puedes finalizar cuando estés listo para recibir tu código.`,
@@ -1818,6 +1846,7 @@
 
       // Purga inmediata del chat local, bloc de notas y restablecimiento de datos ficticios
       const finishedProcedure = state.procedure;
+      chatEpoch += 1;
       stopDictation();
       if (state.connecting) cancelConnecting();
       state.chatMessages = [];
@@ -1856,14 +1885,17 @@
       const pdfChannel = document.getElementById('pdf-preview-channel');
       const pdfQr = document.getElementById('pdf-preview-qr');
 
-      const qrSvg = buildDynamicQrSvg(code);
+      const qrSvgNode = buildDynamicQrSvg(code);
       if (codeEl) codeEl.textContent = code;
-      if (qrBox) qrBox.innerHTML = qrSvg;
-      if (qrCaption) qrCaption.innerHTML = `${code}<br>QR verificable`;
+      if (qrBox) qrBox.replaceChildren(qrSvgNode);
+      if (qrCaption) {
+        qrCaption.textContent = '';
+        qrCaption.append(code, document.createElement('br'), 'QR verificable');
+      }
       if (pdfCode) pdfCode.textContent = code;
       if (pdfSector) pdfSector.textContent = `Atención finalizada · Sector: ${state.sector} (${finishedProcedure})`;
       if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
-      if (pdfQr) pdfQr.innerHTML = qrSvg;
+      if (pdfQr) pdfQr.replaceChildren(qrSvgNode.cloneNode(true));
 
       // Precargar el código generado en el verificador web para prueba inmediata
       const verifierInput = document.getElementById('verifier-code-input');
@@ -2026,16 +2058,27 @@
 
     if (!form || !input || !resultBox) return;
 
+    function createSvgPath(d) {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('stroke', 'currentColor');
+      path.setAttribute('stroke-width', '2');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('stroke-linejoin', 'round');
+      return path;
+    }
+
     function setVerifierIcon(isValid) {
       if (!badgeIcon) return;
       if (isValid) {
         badgeIcon.setAttribute('viewBox', '0 0 20 20');
-        badgeIcon.innerHTML =
-          '<path d="M4.16667 10L7.5 13.3333L15.8333 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+        badgeIcon.replaceChildren(createSvgPath('M4.16667 10L7.5 13.3333L15.8333 5'));
       } else {
         badgeIcon.setAttribute('viewBox', '0 0 24 24');
-        badgeIcon.innerHTML =
-          '<path d="M12 3L22 21H2L12 3Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 9V14M12 17V17.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+        badgeIcon.replaceChildren(
+          createSvgPath('M12 3L22 21H2L12 3Z'),
+          createSvgPath('M12 9V14M12 17V17.1')
+        );
       }
     }
 
@@ -2065,11 +2108,18 @@
         if (badgeText) badgeText.textContent = 'Comprobante válido';
         if (resultTitle) resultTitle.textContent = 'Comprobante verificado';
         if (resultDetails) {
-          resultDetails.innerHTML = `
-            <p><strong>${record.code}</strong> · ${record.status}</p>
-            <p>Sector: ${record.sector} · Canal: ${record.channel}</p>
-            <p>Fecha: ${record.timestamp} · Purga local aplicada</p>
-          `;
+          const p1 = document.createElement('p');
+          const codeStrong = document.createElement('strong');
+          codeStrong.textContent = record.code;
+          p1.append(codeStrong, ` · ${record.status}`);
+
+          const p2 = document.createElement('p');
+          p2.textContent = `Sector: ${record.sector} · Canal: ${record.channel}`;
+
+          const p3 = document.createElement('p');
+          p3.textContent = `Fecha: ${record.timestamp} · Purga local aplicada`;
+
+          resultDetails.replaceChildren(p1, p2, p3);
         }
         if (resultFooter) {
           resultFooter.textContent = record.isDemoBase
@@ -2083,10 +2133,11 @@
         if (badgeText) badgeText.textContent = 'Código no reconocido';
         if (resultTitle) resultTitle.textContent = 'No se encontró la constancia';
         if (resultDetails) {
-          resultDetails.innerHTML = `
-            <p>Ingresa un código de 8 dígitos (ej. SEG-84920418) o el ejemplo SEG-84920.</p>
-            <p>Puedes generar un nuevo código cerrando una atención en el Simulador.</p>
-          `;
+          const p1 = document.createElement('p');
+          p1.textContent = 'Ingresa un código de 8 dígitos (ej. SEG-84920418) o el ejemplo SEG-84920.';
+          const p2 = document.createElement('p');
+          p2.textContent = 'Puedes generar un nuevo código cerrando una atención en el Simulador.';
+          resultDetails.replaceChildren(p1, p2);
         }
         if (resultFooter) resultFooter.textContent = 'Formato esperado: SEG-XXXXXXXX';
       }

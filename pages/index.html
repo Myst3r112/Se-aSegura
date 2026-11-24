@@ -3,10 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0F4C81">
   <meta name="description" content="SeñaSegura: plataforma de atención presencial accesible en Lengua de Señas Peruana (LSP) y Mensajería Asistida para bancos, comisarías, centros de salud y municipalidades.">
   <title>SeñaSegura · Atención Accesible en Lengua de Señas Peruana (LSP)</title>
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="../css/styles.css?v=6">
+  <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="../css/styles.css?v=7">
+  <script src="../js/main.js?v=7" defer></script>
+  <script src="../js/vision-ai.js?v=7" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -191,7 +196,9 @@
                 <img
                   src="../assets/images/interprete-lsp.png"
                   alt="Intérprete de Lengua de Señas Peruana saludando en video HD"
-                  class="hero-video-img">
+                  class="hero-video-img"
+                  decoding="async"
+                  fetchpriority="high">
               </div>
               <div class="tablet-screen-status">
                 <span class="turn-pill">
@@ -563,16 +570,7 @@
 
                   <details class="vision-guide" id="vision-guide">
                     <summary class="vision-guide-summary">Ver gestos reconocidos (1 y 2 manos)</summary>
-                    <ul class="vision-guide-list">
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x270B;</span><span><strong>Palma abierta (1 mano):</strong> Hola, necesito atención en ventanilla</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x1F44D;</span><span><strong>Pulgar arriba (1 mano):</strong> Sí, confirmo los datos</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x270A;</span><span><strong>Puño cerrado (1 mano):</strong> No / Detener operación</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x261D;&#xFE0F;</span><span><strong>Solo índice arriba (1 mano):</strong> Quiero realizar una consulta o trámite</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x270C;&#xFE0F;</span><span><strong>Dos dedos en V (1 mano):</strong> Aquí tengo mi DNI / documento</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x1F91F;</span><span><strong>Seña de auxilio ILY (1 o 2 manos):</strong> Necesito ayuda urgente — Escalar a Intérprete</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x1F64C;</span><span><strong>Dos palmas abiertas (2 manos):</strong> Por favor, espera un momento</span></li>
-                      <li><span class="vision-guide-emoji" aria-hidden="true">&#x1F44D;&#x1F44D;</span><span><strong>Dos pulgares arriba (2 manos):</strong> Todo conforme, muchas gracias</span></li>
-                    </ul>
+                    <ul class="vision-guide-list" id="vision-guide-list"></ul>
                   </details>
 
                   <div class="vision-simulation" id="vision-simulation" hidden>
@@ -618,7 +616,9 @@
                     src="../assets/images/interprete-lsp.png"
                     alt="Video demostrativo de intérprete de Lengua de Señas Peruana en HD"
                     class="video-stage-img"
-                    id="sim-video-img">
+                    id="sim-video-img"
+                    loading="lazy"
+                    decoding="async">
 
                   <div class="video-overlay-top">
                     <span class="video-camera-tag" id="sim-camera-angle">Cámara: Frontal · Intérprete LSP</span>
@@ -896,7 +896,9 @@
                   <img
                     src="../assets/images/consola-video.png"
                     alt="Vista de ciudadano e intérprete en consola de interpretación LSP"
-                    class="console-video-img">
+                    class="console-video-img"
+                    loading="lazy"
+                    decoding="async">
                   <span class="console-tech-badge" aria-label="Telemetría en vivo">32 fps · 45 ms</span>
 
                   <div class="console-pip-box" id="console-pip-box">
@@ -915,7 +917,9 @@
                       <img
                         src="../assets/images/interprete-lsp.png"
                         alt="Autovista del intérprete en plano medio"
-                        class="console-pip-img">
+                        class="console-pip-img"
+                        loading="lazy"
+                        decoding="async">
                     </div>
                   </div>
                 </div>
@@ -983,7 +987,7 @@
               </p>
             </form>
 
-            <div class="certificate-result is-valid" id="verifier-result" role="region" aria-live="polite">
+            <div class="certificate-result is-valid" id="verifier-result" role="region" aria-label="Resultado de verificación" aria-live="polite">
               <div class="status-pill" id="verifier-badge">
                 <svg id="verifier-badge-icon" class="icon-svg verifier-badge-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
                   <path d="M4.16667 10L7.5 13.3333L15.8333 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1351,7 +1355,7 @@
 
         <div class="closure-qr-box">
           <div id="closure-qr-container" class="qr-render-area" aria-label="Código QR de la constancia de atención">
-            <img src="../assets/images/qr-seg-84920.svg" alt="Código QR de comprobante" width="148" height="148">
+            <img src="../assets/images/qr-seg-84920.svg" alt="Código QR de comprobante" width="148" height="148" loading="lazy" decoding="async">
           </div>
           <p class="badge-caption" id="closure-qr-caption">SEG-84920418<br>QR verificable</p>
         </div>
@@ -1437,7 +1441,7 @@
           <p>No incluye video ni mensajes de la conversación.</p>
         </div>
         <div id="pdf-preview-qr" class="qr-render-area">
-          <img src="../assets/images/qr-seg-84920.svg" alt="Código QR del comprobante" width="148" height="148">
+          <img src="../assets/images/qr-seg-84920.svg" alt="Código QR del comprobante" width="148" height="148" loading="lazy" decoding="async">
         </div>
       </div>
 
@@ -1551,7 +1555,9 @@
         <img
           src="../assets/images/respuesta-lsp.png"
           alt="Vista ilustrativa del reproductor de respuesta en Lengua de Señas Peruana"
-          class="lsp-player-img">
+          class="lsp-player-img"
+          loading="lazy"
+          decoding="async">
       </div>
 
       <p class="muted-text">
@@ -1577,7 +1583,9 @@
         <img
           src="../assets/images/interprete-lsp.png"
           alt="Intérprete de Lengua de Señas Peruana en pantalla completa"
-          class="fullscreen-video-img">
+          class="fullscreen-video-img"
+          loading="lazy"
+          decoding="async">
       </div>
 
       <div class="fullscreen-footer">
@@ -1647,8 +1655,5 @@
       </button>
     </div>
   </dialog>
-
-  <script src="../js/main.js?v=6"></script>
-  <script src="../js/vision-ai.js?v=6" defer></script>
 </body>
 </html>

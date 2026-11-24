@@ -277,6 +277,7 @@
     const btnEscalate = $('btn-vision-escalate');
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
+    const guideList = $('vision-guide-list');
     const gestureName = $('vision-gesture-name');
     const phraseEl = $('vision-phrase');
     const confidenceEl = $('vision-confidence');
@@ -811,6 +812,23 @@
 
       btn.append(emoji, label, text);
       simGrid.appendChild(btn);
+
+      if (guideList) {
+        const li = document.createElement('li');
+        const guideEmoji = document.createElement('span');
+        guideEmoji.className = 'vision-guide-emoji';
+        guideEmoji.setAttribute('aria-hidden', 'true');
+        guideEmoji.textContent = gesture.emoji;
+
+        const descWrap = document.createElement('span');
+        const modality = gesture.id === 'auxilio' ? '1 o 2 manos' : gesture.twoHands ? '2 manos' : '1 mano';
+        const strong = document.createElement('strong');
+        strong.textContent = `${gesture.label} (${modality}):`;
+        descWrap.append(strong, ` ${gesture.phrase}`);
+
+        li.append(guideEmoji, descWrap);
+        guideList.appendChild(li);
+      }
     });
 
     simGrid.addEventListener('click', (e) => {

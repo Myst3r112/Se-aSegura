@@ -24,9 +24,13 @@
   ];
 
   const CONFIRM_MS = 600; // el gesto debe mantenerse estable este tiempo
+  const CONFIRM_FAST_MS = 280; // confirmación ágil ante saludo activo en movimiento
   const COOLDOWN_MS = 2500; // antes de reenviar la misma frase al chat
   const GRACE_MS = 150; // parpadeos de detección tolerados sin reiniciar el temporizador
   const MIN_FRAME_INTERVAL_MS = 33; // máx. ~30 inferencias/s
+  const MOTION_WINDOW = 18; // ventana deslizante para detección dinámica
+  const CUSTOM_TARGET_SAMPLES = 12;
+  const CUSTOM_SIMILARITY_THRESHOLD = 0.94;
   const LOAD_TIMEOUT_MS = 25000;
   const SCRIPT_TIMEOUT_MS = 15000;
 
@@ -51,6 +55,12 @@
     { id: 'puno', emoji: '\u{270A}', label: 'Puño cerrado', phrase: 'No / Detener operación' },
     { id: 'indice', emoji: '\u{261D}\u{FE0F}', label: 'Solo índice arriba', phrase: 'Quiero realizar una consulta o trámite' },
     { id: 'v', emoji: '\u{270C}\u{FE0F}', label: 'Dos dedos en V', phrase: 'Aquí tengo mi DNI / documento' },
+    {
+      id: 'negar_mov',
+      emoji: '\u{1F645}',
+      label: 'Negación con índice',
+      phrase: 'No estoy de acuerdo / Por favor corregir'
+    },
     {
       id: 'auxilio',
       emoji: '\u{1F91F}',
@@ -191,8 +201,142 @@
     return { id: top.id, score: typeof top.score === 'number' ? top.score : 0.9 };
   }
 
+  /**
+   * Normaliza los 21 landmarks de una mano en un vector invariante de 42 valores (x, y)
+   * centrado en la muñeca [0] y escalado por palmSize.
+   * @param {Array<{x:number,y:number,z?:number}>} landmarks
+   * @param {number} aspect
+   * @returns {number[]|null}
+   */
+  function extractHandFeatureVector(landmarks, aspect = 4 / 3) {
+    if (!Array.isArray(landmarks) || landmarks.length < 21) return null;
+    const ox = landmarks[0].x * aspect;
+    const oy = landmarks[0].y;
+    const mx = landmarks[9].x * aspect;
+    const my = landmarks[9].y;
+    const palmSize = Math.hypot(mx - ox, my - oy) || 1e-6;
+    const vec = new Array(42);
+    for (let i = 0; i < 21; i += 1) {
+      vec[i * 2] = (landmarks[i].x * aspect - ox) / palmSize;
+      vec[i * 2 + 1] = (landmarks[i].y - oy) / palmSize;
+    }
+    return vec;
+  }
+
+  /**
+   * Similitud coseno entre dos vectores de características.
+   * @param {number[]} vecA
+   * @param {number[]} vecB
+   * @returns {number}
+   */
+  function cosineSimilarity(vecA, vecB) {
+    if (!Array.isArray(vecA) || !Array.isArray(vecB) || vecA.length === 0 || vecA.length !== vecB.length) {
+      return 0;
+    }
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i += 1) {
+      const a = vecA[i];
+      const b = vecB[i];
+      dot += a * b;
+      normA += a * a;
+      normB += b * b;
+    }
+    const denom = Math.sqrt(normA) * Math.sqrt(normB);
+    return denom > 0 ? dot / denom : 0;
+  }
+
+  /**
+   * Detecta oscilación horizontal en la ventana deslizante de trayectoria (muñeca o punta índice).
+   * @param {Array<{t:number,palmSize:number,wristX:number,wristY:number,tipX:number,tipY:number}>} motionBuffer
+   * @returns {boolean}
+   */
+  function detectHorizontalOscillation(motionBuffer) {
+    if (!Array.isArray(motionBuffer) || motionBuffer.length < 8) return false;
+    const latestT = motionBuffer[motionBuffer.length - 1].t;
+    const recent = motionBuffer.filter((f) => latestT - f.t <= 1400);
+    if (recent.length < 8) return false;
+
+    const avgPalm = recent.reduce((acc, f) => acc + (f.palmSize || 0.1), 0) / recent.length || 1e-6;
+
+    function axisOscillates(xKey, yKey) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i < recent.length; i += 1) {
+        const x = recent[i][xKey];
+        const y = recent[i][yKey];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      const spanX = (maxX - minX) / avgPalm;
+      const spanY = (maxY - minY) / avgPalm;
+      if (spanX < 0.45 || spanX <= spanY * 1.1) return false;
+
+      let dir = 0;
+      let reversals = 0;
+      let anchorX = recent[0][xKey];
+      const stepThreshold = 0.04 * avgPalm;
+      for (let i = 1; i < recent.length; i += 1) {
+        const dx = recent[i][xKey] - anchorX;
+        if (Math.abs(dx) >= stepThreshold) {
+          const nextDir = dx > 0 ? 1 : -1;
+          if (dir !== 0 && nextDir !== dir) reversals += 1;
+          dir = nextDir;
+          anchorX = recent[i][xKey];
+        }
+      }
+      return reversals >= 2;
+    }
+
+    return axisOscillates('tipX', 'tipY') || axisOscillates('wristX', 'wristY');
+  }
+
+  /**
+   * Clasificador Few-Shot k-NN (k=3) sobre señas personalizadas guardadas en sesión.
+   * @param {number[]} featureVec
+   * @param {Array<{id:string,label:string,phrase:string,samples:number[][]}>} customList
+   * @param {number} threshold
+   * @returns {{id:string,score:number,gesture:object}|null}
+   */
+  function matchCustomGesture(featureVec, customList, threshold = CUSTOM_SIMILARITY_THRESHOLD) {
+    if (!featureVec || !Array.isArray(customList) || customList.length === 0) return null;
+    let bestGesture = null;
+    let bestScore = -1;
+
+    customList.forEach((gesture) => {
+      if (!gesture || !Array.isArray(gesture.samples) || gesture.samples.length === 0) return;
+      const sims = gesture.samples
+        .map((sample) => cosineSimilarity(featureVec, sample))
+        .sort((a, b) => b - a);
+      const topK = sims.slice(0, Math.min(3, sims.length));
+      const meanScore = topK.reduce((sum, val) => sum + val, 0) / topK.length;
+      if (meanScore > bestScore) {
+        bestScore = meanScore;
+        bestGesture = gesture;
+      }
+    });
+
+    if (bestGesture && bestScore >= threshold) {
+      return { id: bestGesture.id, score: bestScore, gesture: bestGesture };
+    }
+    return null;
+  }
+
   // Disponible para pruebas manuales en consola; no altera el estado de la app.
-  window.SenaSeguraVision = Object.freeze({ classifyHand, resolveMultiHandGesture, GESTURES });
+  window.SenaSeguraVision = Object.freeze({
+    classifyHand,
+    resolveMultiHandGesture,
+    extractHandFeatureVector,
+    cosineSimilarity,
+    detectHorizontalOscillation,
+    matchCustomGesture,
+    GESTURES
+  });
 
   /* =========================================================
      3. CARGA DINÁMICA DE MEDIAPIPE (sin duplicados)
@@ -278,6 +422,15 @@
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
     const guideList = $('vision-guide-list');
+    const customLabelInput = $('vision-custom-label');
+    const btnCapture = $('btn-vision-capture');
+    const btnClearCustom = $('btn-vision-clear-custom');
+    const trainerProgressWrap = $('vision-trainer-progress-wrap');
+    const trainerProgress = $('vision-trainer-progress');
+    const trainerProgressFill = $('vision-trainer-progress-fill');
+    const trainerStatus = $('vision-trainer-status');
+    const customListEl = $('vision-custom-list');
+    const autoSpeakToggle = $('vision-autospeak');
     const gestureName = $('vision-gesture-name');
     const phraseEl = $('vision-phrase');
     const confidenceEl = $('vision-confidence');
@@ -309,7 +462,68 @@
     let lastConfirmed = null;
     let lastProgressPct = -1;
     const lastSentAt = {};
+    const motionBuffer = [];
+    let customGestures = [];
+    let customSeq = 0;
+    let captureState = null;
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0 };
+
+    function resolveGestureMeta(id) {
+      if (!id) return null;
+      return GESTURE_BY_ID[id] || customGestures.find((g) => g.id === id) || null;
+    }
+
+    function updateCaptureProgress(count) {
+      const safe = Math.max(0, Math.min(CUSTOM_TARGET_SAMPLES, count));
+      if (trainerProgressWrap) trainerProgressWrap.hidden = !captureState;
+      if (trainerProgress) trainerProgress.setAttribute('aria-valuenow', String(safe));
+      if (trainerProgressFill) trainerProgressFill.style.transform = `scaleX(${safe / CUSTOM_TARGET_SAMPLES})`;
+    }
+
+    function renderCustomGestures() {
+      if (btnClearCustom) btnClearCustom.hidden = customGestures.length === 0;
+      if (!customListEl) return;
+      customListEl.textContent = '';
+
+      customGestures.forEach((item) => {
+        const li = document.createElement('li');
+        li.className = 'vision-custom-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'vision-custom-meta';
+
+        const nameEl = document.createElement('strong');
+        nameEl.textContent = item.label;
+
+        const samplesEl = document.createElement('span');
+        samplesEl.className = 'vision-custom-samples';
+        samplesEl.textContent = `${item.samples.length} muestras · IA local`;
+
+        meta.append(nameEl, samplesEl);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn-soft';
+        removeBtn.dataset.removeCustom = item.id;
+        removeBtn.textContent = 'Eliminar';
+        removeBtn.setAttribute('aria-label', `Eliminar seña ${item.label}`);
+
+        li.append(meta, removeBtn);
+        customListEl.appendChild(li);
+      });
+    }
+
+    function clearCustomGestures(statusMessage) {
+      customGestures = [];
+      captureState = null;
+      updateCaptureProgress(0);
+      renderCustomGestures();
+      if (btnCapture) btnCapture.disabled = mode !== 'live';
+      if (trainerStatus) {
+        trainerStatus.textContent =
+          statusMessage || 'Activa la cámara en vivo para entrenar una seña con 12 muestras locales.';
+      }
+    }
 
     /* ---------- UI helpers ---------- */
     function updateHandsCount(count) {
@@ -335,6 +549,7 @@
       const busy = nextMode === 'loading' || nextMode === 'live';
       btnStart.disabled = busy;
       btnStop.disabled = nextMode === 'idle';
+      if (btnCapture) btnCapture.disabled = nextMode !== 'live' || Boolean(captureState);
       const btnStopLabel = btnStop.querySelector('span') || btnStop;
       btnStopLabel.textContent = nextMode === 'simulation' ? 'Salir de simulación' : 'Detener Cámara';
       btnSimulate.disabled = nextMode === 'simulation';
@@ -385,6 +600,7 @@
       detection.confirmed = false;
       detection.scoreSum = 0;
       detection.scoreN = 0;
+      motionBuffer.length = 0;
       setProgress(0);
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
@@ -423,6 +639,8 @@
       releaseStream();
       clearCanvas();
       if (stage) stage.style.removeProperty('aspect-ratio');
+      captureState = null;
+      updateCaptureProgress(0);
       updateHandsCount(0);
       resetDetection();
       setUrgent(false);
@@ -646,6 +864,47 @@
       });
     }
 
+    function pushMotionFrame(landmarks, aspect, now) {
+      const wristX = landmarks[0].x * aspect;
+      const wristY = landmarks[0].y;
+      const palmSize = Math.hypot(landmarks[9].x * aspect - wristX, landmarks[9].y - wristY) || 1e-6;
+      if (motionBuffer.length >= MOTION_WINDOW) motionBuffer.shift();
+      motionBuffer.push({
+        t: now,
+        palmSize,
+        wristX,
+        wristY,
+        tipX: landmarks[8].x * aspect,
+        tipY: landmarks[8].y
+      });
+    }
+
+    function finalizeCapturedGesture() {
+      if (!captureState) return;
+      const { label, samples } = captureState;
+      const existingIdx = customGestures.findIndex((g) => g.label.toLowerCase() === label.toLowerCase());
+      const entry = {
+        id: existingIdx >= 0 ? customGestures[existingIdx].id : `custom_${++customSeq}`,
+        emoji: '\u{2728}',
+        label,
+        phrase: label,
+        samples: samples.slice()
+      };
+      if (existingIdx >= 0) {
+        customGestures[existingIdx] = entry;
+      } else {
+        customGestures.push(entry);
+      }
+      captureState = null;
+      updateCaptureProgress(0);
+      if (customLabelInput) customLabelInput.value = '';
+      if (btnCapture) btnCapture.disabled = mode !== 'live';
+      renderCustomGestures();
+      if (trainerStatus) {
+        trainerStatus.textContent = `¡Seña "${label}" entrenada con ${CUSTOM_TARGET_SAMPLES} muestras! Mantén la seña 0,6 s para probarla.`;
+      }
+    }
+
     function handleResults(results) {
       if (!running) return;
       clearCanvas();
@@ -653,27 +912,76 @@
       const now = performance.now();
       updateHandsCount(allLandmarks.length);
 
+      const aspect = canvas.width / canvas.height;
+
+      if (captureState) {
+        if (allLandmarks.length === 0) {
+          if (trainerStatus) {
+            trainerStatus.textContent = `Muestra una mano frente a la cámara para capturar (${captureState.samples.length} / ${CUSTOM_TARGET_SAMPLES})…`;
+          }
+          return;
+        }
+        allLandmarks.forEach((landmarks, idx) => drawHand(landmarks, idx));
+        const vec = extractHandFeatureVector(allLandmarks[0], aspect);
+        if (vec) {
+          captureState.samples.push(vec);
+          const count = captureState.samples.length;
+          updateCaptureProgress(count);
+          if (count >= CUSTOM_TARGET_SAMPLES) {
+            finalizeCapturedGesture();
+          } else if (trainerStatus) {
+            trainerStatus.textContent = `Capturando muestras: ${count} / ${CUSTOM_TARGET_SAMPLES}…`;
+          }
+        }
+        return;
+      }
+
       if (allLandmarks.length === 0) {
+        motionBuffer.length = 0;
         feedGesture(null, 0, now);
         return;
       }
 
-      const aspect = canvas.width / canvas.height;
+      pushMotionFrame(allLandmarks[0], aspect, now);
+      const hasOscillation = detectHorizontalOscillation(motionBuffer);
+
+      let customMatch = null;
+      let fastConfirm = false;
       const handEntries = [];
+
       allLandmarks.forEach((landmarks, idx) => {
         drawHand(landmarks, idx);
         const handedness = results.multiHandedness && results.multiHandedness[idx];
         const score = handedness && typeof handedness.score === 'number' ? handedness.score : 0.9;
-        const { id } = classifyHand(landmarks, aspect);
-        handEntries.push({ id, score });
+        const { id: staticId } = classifyHand(landmarks, aspect);
+        let effectiveId = staticId;
+
+        if (idx === 0 && hasOscillation) {
+          if (staticId === 'palma') fastConfirm = true;
+          else if (staticId === 'indice') effectiveId = 'negar_mov';
+        }
+
+        handEntries.push({ id: effectiveId, score });
+
+        if (!customMatch && customGestures.length > 0 && staticId !== 'auxilio') {
+          const vec = extractHandFeatureVector(landmarks, aspect);
+          const match = matchCustomGesture(vec, customGestures, CUSTOM_SIMILARITY_THRESHOLD);
+          if (match) customMatch = match;
+        }
       });
 
+      const hasAuxilio = handEntries.some((entry) => entry.id === 'auxilio');
+      if (customMatch && !hasAuxilio) {
+        feedGesture(customMatch.id, customMatch.score, now);
+        return;
+      }
+
       const resolved = resolveMultiHandGesture(handEntries, detection.id);
-      feedGesture(resolved ? resolved.id : null, resolved ? resolved.score : 0, now);
+      feedGesture(resolved ? resolved.id : null, resolved ? resolved.score : 0, now, { fastConfirm });
     }
 
-    /** Exige 600 ms de estabilidad antes de confirmar un gesto. */
-    function feedGesture(id, score, now) {
+    /** Exige estabilidad (600 ms o 280 ms en saludo activo) antes de confirmar un gesto. */
+    function feedGesture(id, score, now, { fastConfirm = false } = {}) {
       if (id && id === detection.id) {
         detection.lastSeen = now;
         detection.scoreSum += score;
@@ -695,12 +1003,13 @@
         return;
       }
 
-      const activeGesture = GESTURE_BY_ID[detection.id];
+      const activeGesture = resolveGestureMeta(detection.id);
       if (progressLabel && activeGesture) {
         progressLabel.textContent = `Confirmando: ${activeGesture.label}…`;
       }
 
-      const progress = Math.min(1, (now - detection.since) / CONFIRM_MS);
+      const targetMs = fastConfirm ? CONFIRM_FAST_MS : CONFIRM_MS;
+      const progress = Math.min(1, (now - detection.since) / targetMs);
       setProgress(progress);
 
       if (progress >= 1 && !detection.confirmed) {
@@ -712,7 +1021,7 @@
 
     /** Flujo único (cámara y simulación): caja de traducción + chat + voz. */
     function confirmGesture(id, confidencePct, source) {
-      const gesture = GESTURE_BY_ID[id];
+      const gesture = resolveGestureMeta(id);
       if (!gesture) return;
       lastConfirmed = gesture;
 
@@ -721,6 +1030,9 @@
       confidenceEl.textContent = `Confianza: ${confidencePct}%${source === 'simulation' ? ' (simulada)' : ''}`;
       btnSpeak.disabled = false;
       setUrgent(Boolean(gesture.urgent));
+      if (autoSpeakToggle && autoSpeakToggle.checked) {
+        speakLast();
+      }
 
       const now = performance.now();
       const last = lastSentAt[id];
@@ -855,6 +1167,50 @@
     btnSpeak.addEventListener('click', speakLast);
     btnEscalate.addEventListener('click', escalate);
 
+    if (btnCapture) {
+      btnCapture.addEventListener('click', () => {
+        if (mode !== 'live' || captureState) return;
+        const rawLabel = customLabelInput ? customLabelInput.value.trim() : '';
+        if (rawLabel.length < 2) {
+          if (trainerStatus) {
+            trainerStatus.textContent = 'Escribe un nombre o frase de al menos 2 caracteres antes de capturar.';
+          }
+          if (customLabelInput) customLabelInput.focus();
+          return;
+        }
+        captureState = { label: rawLabel, samples: [] };
+        btnCapture.disabled = true;
+        updateCaptureProgress(0);
+        if (trainerStatus) {
+          trainerStatus.textContent = `Capturando muestras: 0 / ${CUSTOM_TARGET_SAMPLES}… Muestra tu seña frente a la cámara.`;
+        }
+      });
+    }
+
+    if (customListEl) {
+      customListEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-remove-custom]');
+        if (!btn) return;
+        const targetId = btn.dataset.removeCustom;
+        customGestures = customGestures.filter((g) => g.id !== targetId);
+        if (lastConfirmed && lastConfirmed.id === targetId) {
+          resetOutput();
+        }
+        renderCustomGestures();
+        if (trainerStatus) {
+          trainerStatus.textContent = customGestures.length
+            ? 'Seña eliminada de la sesión local.'
+            : 'Activa la cámara en vivo para entrenar una seña con 12 muestras locales.';
+        }
+      });
+    }
+
+    if (btnClearCustom) {
+      btnClearCustom.addEventListener('click', () => {
+        clearCustomGestures('Todas las señas personalizadas fueron eliminadas de la memoria local.');
+      });
+    }
+
     // Esc detiene la cámara / simulación cuando el foco está dentro del panel
     panel.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && mode !== 'idle') {
@@ -873,6 +1229,7 @@
 
     // Purga local al cerrar la atención
     document.addEventListener('senasegura:purge', () => {
+      clearCustomGestures('Señas personalizadas eliminadas tras cerrar sesión.');
       resetToIdle();
       cancelSpeech();
     });

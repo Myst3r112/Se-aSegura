@@ -698,6 +698,7 @@
     const consolePriorityVal = document.getElementById('console-priority-value');
     const consoleProcedureVal = document.getElementById('console-procedure-value');
     const chatMessagesBox = document.getElementById('sim-chat-messages');
+    const consoleChatFeed = document.getElementById('console-chat-feed');
     const quickTemplatesBox = document.getElementById('sim-quick-templates');
     const btnCopyData = document.getElementById('btn-copy-data');
     const btnEditData = document.getElementById('btn-edit-data');
@@ -767,23 +768,25 @@
     }
 
     function renderChat() {
-      if (!chatMessagesBox) return;
-      chatMessagesBox.textContent = '';
-      state.chatMessages.forEach((msg) => {
-        const bubble = document.createElement('div');
-        bubble.className = `chat-bubble${msg.type === 'user' ? ' chat-bubble-user' : ''}`;
+      [chatMessagesBox, consoleChatFeed].forEach((container) => {
+        if (!container) return;
+        container.textContent = '';
+        state.chatMessages.forEach((msg) => {
+          const bubble = document.createElement('div');
+          bubble.className = `chat-bubble${msg.type === 'user' ? ' chat-bubble-user' : ''}`;
 
-        const senderEl = document.createElement('span');
-        senderEl.className = 'chat-sender';
-        senderEl.textContent = msg.sender;
+          const senderEl = document.createElement('span');
+          senderEl.className = 'chat-sender';
+          senderEl.textContent = msg.sender;
 
-        const textEl = document.createElement('p');
-        textEl.textContent = msg.text;
+          const textEl = document.createElement('p');
+          textEl.textContent = msg.text;
 
-        bubble.append(senderEl, textEl);
-        chatMessagesBox.appendChild(bubble);
+          bubble.append(senderEl, textEl);
+          container.appendChild(bubble);
+        });
+        container.scrollTop = container.scrollHeight;
       });
-      chatMessagesBox.scrollTop = chatMessagesBox.scrollHeight;
     }
 
     function appendMessage(sender, text, type = 'staff') {

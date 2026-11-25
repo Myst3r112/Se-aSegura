@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=7">
-  <script src="../js/main.js?v=7" defer></script>
-  <script src="../js/vision-ai.js?v=7" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=8">
+  <script src="../js/main.js?v=8" defer></script>
+  <script src="../js/vision-ai.js?v=8" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -573,6 +573,38 @@
                     <ul class="vision-guide-list" id="vision-guide-list"></ul>
                   </details>
 
+                  <details class="vision-trainer" id="vision-trainer">
+                    <summary class="vision-trainer-summary">Entrenar seña personalizada (IA local)</summary>
+                    <div class="vision-trainer-body">
+                      <div class="vision-trainer-form">
+                        <label for="vision-custom-label" class="vision-trainer-label">Frase o nombre de la seña</label>
+                        <input
+                          type="text"
+                          id="vision-custom-label"
+                          class="vision-trainer-input"
+                          maxlength="80"
+                          placeholder="Ej. Necesito mi estado de cuenta">
+                      </div>
+                      <div class="vision-trainer-actions">
+                        <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-capture" disabled>
+                          <span>Capturar seña (12 muestras)</span>
+                        </button>
+                        <button type="button" class="btn-soft" id="btn-vision-clear-custom" hidden>
+                          Limpiar señas
+                        </button>
+                      </div>
+                      <div class="vision-trainer-progress-wrap" id="vision-trainer-progress-wrap" hidden>
+                        <div class="vision-progress" id="vision-trainer-progress" role="progressbar" aria-label="Progreso de captura de muestras" aria-valuemin="0" aria-valuemax="12" aria-valuenow="0">
+                          <div class="vision-progress-fill" id="vision-trainer-progress-fill"></div>
+                        </div>
+                      </div>
+                      <p class="vision-trainer-status" id="vision-trainer-status" role="status" aria-live="polite">
+                        Activa la cámara en vivo para entrenar una seña con 12 muestras locales.
+                      </p>
+                      <ul class="vision-custom-list" id="vision-custom-list" aria-label="Señas personalizadas guardadas"></ul>
+                    </div>
+                  </details>
+
                   <div class="vision-simulation" id="vision-simulation" hidden>
                     <p class="vision-simulation-title" id="vision-simulation-title">Gestos de prueba (modo simulación)</p>
                     <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
@@ -596,6 +628,13 @@
                       <div class="vision-progress" id="vision-progress" role="progressbar" aria-labelledby="vision-progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                         <div class="vision-progress-fill" id="vision-progress-fill"></div>
                       </div>
+                    </div>
+
+                    <div class="vision-output-options">
+                      <label class="vision-autospeak-toggle" for="vision-autospeak">
+                        <input type="checkbox" id="vision-autospeak">
+                        <span>Voz automática al funcionario</span>
+                      </label>
                     </div>
 
                     <div class="vision-output-actions">
@@ -879,6 +918,11 @@
                   <dt>Privacidad</dt>
                   <dd>Evita repetir datos sensibles en voz alta.</dd>
                 </dl>
+
+                <div class="console-chat-panel">
+                  <p class="console-notes-label" id="console-chat-heading">Mensajes de Ventanilla (en vivo)</p>
+                  <div class="console-chat-feed" id="console-chat-feed" role="log" aria-labelledby="console-chat-heading" aria-live="polite"></div>
+                </div>
 
                 <div class="console-notes-panel">
                   <label for="console-private-notes" class="console-notes-label">Bloc de notas privado</label>

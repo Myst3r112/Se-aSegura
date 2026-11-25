@@ -1,14 +1,14 @@
 /**
  * SeñaSegura · Módulo "Cámara IA (LSP)" (Vanilla JS ES6+)
  *
- * - MediaPipe Hands se inyecta dinámicamente SOLO cuando la persona pulsa "Activar Cámara".
- *   No existe ninguna etiqueta <script> de MediaPipe en el HTML (Lighthouse intacto en la carga inicial).
+ * - @mediapipe/tasks-vision (FilesetResolver + HandLandmarker) se importa mediante ESM dinámico
+ *   SOLO cuando la persona pulsa "Activar Cámara". No existe ningún <script> de IA en el HTML.
  * - Todo el procesamiento de video ocurre en el dispositivo: no se graba ni se envía video.
- * - Un único motor interno pre-entrenado (sin botones de modo) evalúa en cada frame:
- *   señas de ventanilla (1 y 2 manos + movimiento en 18 frames) y letras distintivas del alfabeto LSP.
- *   Cada seña confirmada se encadena en una oración legible (LSP → Español).
+ * - Motor interno 3D basado en `worldLandmarks`, ángulos entre falanges, distancias normalizadas,
+ *   suavizado temporal por mayoría (ventana deslizante) y trayectoria en 18 frames:
+ *   señas de ventanilla (1 y 2 manos) + alfabeto dactilológico LSP (A, B, C, D, E, F, I, K, L, O, R, S, U, V, W, Y).
  * - Si no hay cámara, se deniega el permiso o falla el CDN, se activa una cuadrícula de respaldo
- *   que ejecuta exactamente el mismo flujo de traducción.
+ *   con exactamente el mismo flujo de traducción.
  *
  * Integración con js/main.js mediante:
  *   - window.SenaSegura (puente: setChannel, appendChatMessage, activateEmergency)
@@ -20,22 +20,22 @@
   /* =========================================================
      1. CONSTANTES
      ========================================================= */
-  const HANDS_BASE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/';
-  const MP_SCRIPTS = [
-    HANDS_BASE_URL + 'hands.js',
-    'https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js'
-  ];
+  const TASKS_VISION_VERSION = '0.10.22';
+  const VISION_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/vision_bundle.mjs`;
+  const VISION_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/wasm`;
+  const HAND_MODEL_URL =
+    'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-  const CONFIRM_MS = 350; // ritmo ágil: la seña debe mantenerse estable este tiempo
-  const CONFIRM_FAST_MS = 220; // saludo activo (palma en movimiento) se confirma más rápido
-  const CONFIRM_INDEX_MS = 560; // el índice espera un instante para distinguir "quieto" de "negación en movimiento"
+  const CONFIRM_MS = 320; // confirmación ágil tras estabilizarse por mayoría
+  const CONFIRM_FAST_MS = 210; // saludo activo (palma en movimiento)
+  const CONFIRM_INDEX_MS = 520; // espera breve para distinguir índice quieto vs negación en movimiento
   const COOLDOWN_MS = 1200; // antes de encadenar de nuevo la misma seña
-  const GRACE_MS = 150; // parpadeos de detección tolerados sin reiniciar el temporizador
+  const GRACE_MS = 160; // tolerancia a parpadeos sin reiniciar temporizador
   const MIN_FRAME_INTERVAL_MS = 33; // máx. ~30 inferencias/s
-  const MOTION_WINDOW = 18; // frames de trayectoria para detectar señas dinámicas
-  const AUTO_SEND_PAUSE_MS = 2000; // manos abajo este tiempo → envío y voz automáticos
+  const MOTION_WINDOW = 18; // frames de trayectoria para señas dinámicas
+  const VOTE_WINDOW = 6; // ventana deslizante (5-7 frames) para voto por mayoría
+  const AUTO_SEND_PAUSE_MS = 2000; // manos abajo este tiempo -> envío y voz automáticos
   const LOAD_TIMEOUT_MS = 25000;
-  const SCRIPT_TIMEOUT_MS = 15000;
 
   const CHAT_SENDER = 'Ciudadano (Cámara IA)';
 
@@ -48,13 +48,12 @@
 
   const PLACEHOLDER_TEXT = {
     idle: 'Pulsa “Activar Cámara” y muestra una o ambas manos. El video se procesa en tu dispositivo: no se graba ni se envía.',
-    loading: 'Cargando modelo de visión... Si el navegador lo solicita, permite el acceso a la cámara.',
-    simulation: 'Modo prueba: la cámara no está en uso. Elige una seña de la cuadrícula para probar la traducción.'
+    loading: 'Cargando modelo 3D de visión... Si el navegador lo solicita, permite el acceso a la cámara.',
+    simulation: 'Modo prueba: la cámara no está en uso. Elige una seña o letra de la cuadrícula para probar la traducción.'
   };
 
   /**
    * Catálogo único de señas (fuente de verdad para detección, cuadrícula sin cámara y guía).
-   * `phrase` es el fragmento que se encadena en la oración; en letras es `letter`.
    */
   const GESTURES = [
     { id: 'palma', emoji: '\u{270B}', label: 'Palma abierta / saludo', phrase: 'Hola,', hands: '1 mano' },
@@ -68,7 +67,14 @@
     },
     { id: 'pulgar', emoji: '\u{1F44D}', label: 'Pulgar arriba', phrase: 'sí, confirmo', hands: '1 mano' },
     { id: 'puno', emoji: '\u{270A}', label: 'Puño cerrado', phrase: 'detener operación', hands: '1 mano' },
-    { id: 'v', emoji: '\u{270C}\u{FE0F}', label: 'Dos dedos en V', phrase: 'aquí tengo mi DNI', hands: '1 mano' },
+    {
+      id: 'dni',
+      emoji: '\u{1FAA7}',
+      label: 'Presentar DNI / carnet',
+      phrase: 'aquí tengo mi DNI',
+      hands: '2 manos en marco L/C',
+      twoHands: true
+    },
     {
       id: 'dos_palmas',
       emoji: '\u{1F64C}',
@@ -93,84 +99,220 @@
       hands: '1 o 2 manos',
       urgent: true
     },
+    { id: 'letra_a', kind: 'letter', letter: 'A', emoji: 'A', label: 'Letra A', hands: '1 mano', hint: 'puño cerrado con pulgar recto al costado del índice' },
+    { id: 'letra_b', kind: 'letter', letter: 'B', emoji: 'B', label: 'Letra B', hands: '1 mano', hint: 'cuatro dedos rectos unidos y pulgar cruzado en la palma' },
+    { id: 'letra_c', kind: 'letter', letter: 'C', emoji: 'C', label: 'Letra C', hands: '1 mano', hint: 'mano arqueada formando una C abierta' },
+    { id: 'letra_d', kind: 'letter', letter: 'D', emoji: 'D', label: 'Letra D', hands: '1 mano', hint: 'índice arriba mientras pulgar y dedos medios forman círculo' },
+    { id: 'letra_e', kind: 'letter', letter: 'E', emoji: 'E', label: 'Letra E', hands: '1 mano', hint: 'dedos curvados en garra sobre el pulgar doblado' },
+    { id: 'letra_f', kind: 'letter', letter: 'F', emoji: 'F', label: 'Letra F', hands: '1 mano', hint: 'pulgar e índice en pinza, otros tres dedos extendidos' },
+    { id: 'letra_i', kind: 'letter', letter: 'I', emoji: 'I', label: 'Letra I', hands: '1 mano', hint: 'solo meñique extendido con pulgar recogido' },
+    { id: 'letra_k', kind: 'letter', letter: 'K', emoji: 'K', label: 'Letra K', hands: '1 mano', hint: 'índice y medio abiertos con pulgar apoyado entre ambos' },
     { id: 'letra_l', kind: 'letter', letter: 'L', emoji: 'L', label: 'Letra L', hands: '1 mano', hint: 'pulgar e índice en ángulo recto' },
-    { id: 'letra_y', kind: 'letter', letter: 'Y', emoji: 'Y', label: 'Letra Y', hands: '1 mano', hint: 'pulgar y meñique abiertos' },
-    { id: 'letra_f', kind: 'letter', letter: 'F', emoji: 'F', label: 'Letra F', hands: '1 mano', hint: 'pulgar e índice en círculo, otros tres arriba' },
-    { id: 'letra_o', kind: 'letter', letter: 'O', emoji: 'O', label: 'Letra O', hands: '1 mano', hint: 'dedos curvados tocando el pulgar' },
-    { id: 'letra_c', kind: 'letter', letter: 'C', emoji: 'C', label: 'Letra C', hands: '1 mano', hint: 'mano curvada como una C' },
-    { id: 'letra_w', kind: 'letter', letter: 'W', emoji: 'W', label: 'Letra W', hands: '1 mano', hint: 'índice, medio y anular arriba' }
+    { id: 'letra_o', kind: 'letter', letter: 'O', emoji: 'O', label: 'Letra O', hands: '1 mano', hint: 'todas las puntas curvadas tocando el pulgar en O' },
+    { id: 'letra_r', kind: 'letter', letter: 'R', emoji: 'R', label: 'Letra R', hands: '1 mano', hint: 'dedo medio cruzado sobre el índice' },
+    { id: 'letra_s', kind: 'letter', letter: 'S', emoji: 'S', label: 'Letra S', hands: '1 mano', hint: 'puño cerrado con pulgar cruzado al frente de los dedos' },
+    { id: 'letra_u', kind: 'letter', letter: 'U', emoji: 'U', label: 'Letra U', hands: '1 mano', hint: 'índice y medio extendidos juntos en paralelo' },
+    { id: 'letra_v', kind: 'letter', letter: 'V', emoji: 'V', label: 'Letra V', hands: '1 mano', hint: 'índice y medio extendidos separados en V' },
+    { id: 'letra_w', kind: 'letter', letter: 'W', emoji: 'W', label: 'Letra W', hands: '1 mano', hint: 'índice, medio y anular extendidos en abanico' },
+    { id: 'letra_y', kind: 'letter', letter: 'Y', emoji: 'Y', label: 'Letra Y', hands: '1 mano', hint: 'pulgar y meñique abiertos lateralmente' }
   ];
   const GESTURE_BY_ID = Object.fromEntries(GESTURES.map((g) => [g.id, g]));
 
-  // Conexiones de la mano (respaldo si HAND_CONNECTIONS no estuviera disponible)
+  // Conexiones anatómicas estándar (respaldo si HAND_CONNECTIONS no estuviera disponible)
   const HAND_CONNECTIONS_FALLBACK = [
     [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12],
     [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]
   ];
 
   /* =========================================================
-     2. MOTOR DE CLASIFICACIÓN (funciones puras, sin DOM)
-     Independiente de mano izquierda/derecha y de la rotación de la mano.
+     2. MOTOR DE CLASIFICACIÓN 3D + SUAVIZADO (funciones puras)
      ========================================================= */
-  function dist(a, b) {
-    return Math.hypot(a.x - b.x, a.y - b.y);
+  function dist3(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+  }
+
+  function angleDeg(a, b, c) {
+    const bax = a.x - b.x;
+    const bay = a.y - b.y;
+    const baz = (a.z || 0) - (b.z || 0);
+    const bcx = c.x - b.x;
+    const bcy = c.y - b.y;
+    const bcz = (c.z || 0) - (b.z || 0);
+    const mag = Math.hypot(bax, bay, baz) * Math.hypot(bcx, bcy, bcz);
+    if (!mag) return 180;
+    const cos = Math.max(-1, Math.min(1, (bax * bcx + bay * bcy + baz * bcz) / mag));
+    return (Math.acos(cos) * 180) / Math.PI;
   }
 
   /**
-   * Clasifica la postura estática de UNA mano (señas de ventanilla + letras LSP).
+   * Clasifica la postura estática de UNA mano usando landmarks 3D (`worldLandmarks`),
+   * ángulos entre falanges y distancias normalizadas por tamaño de palma.
    * @param {Array<{x:number,y:number,z?:number}>} landmarks 21 puntos normalizados de MediaPipe
-   * @param {number} aspect ancho/alto del video (corrige la distorsión de coordenadas normalizadas)
+   * @param {number} aspect relación ancho/alto del video para fallback 2D
+   * @param {Array<{x:number,y:number,z:number}>} [worldLandmarks] 21 puntos métricos 3D opcionales
    * @returns {{id: string|null, fingers: object}}
    */
-  function classifyHand(landmarks, aspect = 4 / 3) {
+  function classifyHand(landmarks, aspect = 4 / 3, worldLandmarks = null) {
     if (!Array.isArray(landmarks) || landmarks.length < 21) {
       return { id: null, fingers: null };
     }
-    const P = landmarks.map((p) => ({ x: p.x * aspect, y: p.y }));
-    const palmSize = dist(P[0], P[9]) || 1e-6; // muñeca → nudillo del medio
-    const rel = (a, b) => dist(P[a], P[b]) / palmSize;
 
-    // Dedo extendido: punta más lejos de la muñeca que PIP (+ margen) y que su nudillo MCP
-    const isExtended = (tip, pip, mcp) => {
-      const tipDist = dist(P[tip], P[0]);
-      return tipDist > dist(P[pip], P[0]) + 0.08 * palmSize && tipDist > dist(P[mcp], P[0]);
+    const P2 = landmarks.map((p) => ({
+      x: p.x * aspect,
+      y: p.y,
+      z: typeof p.z === 'number' ? p.z * aspect : 0
+    }));
+    const hasWorld = Array.isArray(worldLandmarks) && worldLandmarks.length >= 21;
+    const W = hasWorld ? worldLandmarks : P2;
+
+    const palm2D = Math.hypot(P2[9].x - P2[0].x, P2[9].y - P2[0].y) || 1e-6;
+    const palmW = dist3(W[0], W[9]) || 1e-6;
+    const rel = (a, b) => dist3(W[a], W[b]) / palmW;
+
+    const analyzeFinger = (mcp, pip, dip, tip) => {
+      const pipAngle = angleDeg(W[mcp], W[pip], W[dip]);
+      const dipAngle = angleDeg(W[pip], W[dip], W[tip]);
+      const reachTip = rel(0, tip);
+      const reachPip = rel(0, pip);
+      const reachMcp = rel(0, mcp);
+      const extended =
+        pipAngle >= 142 &&
+        dipAngle >= 132 &&
+        reachTip > reachPip + 0.08 &&
+        reachTip > reachMcp + 0.14;
+      return { extended, pipAngle, dipAngle, reachTip, reachPip };
     };
 
-    // Pulgar abierto lateralmente
-    const thumbTipToPinkyBase = dist(P[4], P[17]);
-    const thumbSpread = thumbTipToPinkyBase > dist(P[3], P[17]) * 1.04 && thumbTipToPinkyBase > 0.85 * palmSize;
+    const idxInfo = analyzeFinger(5, 6, 7, 8);
+    const midInfo = analyzeFinger(9, 10, 11, 12);
+    const rngInfo = analyzeFinger(13, 14, 15, 16);
+    const pnkInfo = analyzeFinger(17, 18, 19, 20);
 
-    // Pulgar vertical hacia arriba: tolerante a inclinación natural sin confundirse con puño
-    const dx = Math.abs(P[4].x - P[2].x);
-    const dy = P[2].y - P[4].y;
-    const thumbUp = P[4].y < P[3].y && P[3].y < P[2].y && dy > dx * 0.7 && P[5].y - P[4].y > 0.14 * palmSize;
+    const thumbPipAngle = angleDeg(W[1], W[2], W[3]);
+    const thumbTipAngle = angleDeg(W[2], W[3], W[4]);
+    const thumbStraight = thumbPipAngle >= 136 && thumbTipAngle >= 134;
 
-    const thumbOpen = rel(4, 5) > 0.8; // pulgar claramente separado de la palma (letras L, Y, C)
-    const pinch = rel(4, 8); // distancia pulgar-índice normalizada (letras F, O)
-    const reach = (tip) => rel(tip, 0); // ≈1.0 puño cerrado · ≈2.0 dedo extendido · ≈1.5 dedo curvado
+    const thumbToIndexMcp = rel(4, 5);
+    const thumbToIndexPip = rel(4, 6);
+    const thumbToMiddleMcp = rel(4, 9);
+    const thumbToMiddlePip = rel(4, 10);
+    const thumbToRingMcp = rel(4, 13);
+    const thumbToRingPip = rel(4, 14);
+    const thumbToPinkyMcp = rel(4, 17);
 
+    const thumbSpread =
+      thumbToPinkyMcp > rel(3, 17) * 1.03 &&
+      thumbToPinkyMcp > 0.84 &&
+      thumbToIndexMcp > 0.68;
+
+    // Orientación vertical hacia arriba en cámara para distinguir "Pulgar arriba (Sí)" de "Letra A"
+    const dxThumb2D = Math.abs(P2[4].x - P2[2].x);
+    const dyThumb2D = P2[2].y - P2[4].y;
+    const thumbUpHigh =
+      P2[4].y < P2[3].y &&
+      P2[3].y < P2[2].y &&
+      dyThumb2D > dxThumb2D * 0.7 &&
+      P2[5].y - P2[4].y > 0.30 * palm2D &&
+      thumbToIndexPip > 0.56 &&
+      thumbToPinkyMcp > 0.85;
+
+    const pinchThumbIndex = rel(4, 8);
     const fingers = {
-      thumb: thumbSpread || thumbUp,
-      index: isExtended(8, 6, 5),
-      middle: isExtended(12, 10, 9),
-      ring: isExtended(16, 14, 13),
-      pinky: isExtended(20, 18, 17)
+      thumb: thumbSpread || thumbUpHigh || thumbToIndexMcp > 0.65,
+      index: idxInfo.extended,
+      middle: midInfo.extended,
+      ring: rngInfo.extended,
+      pinky: pnkInfo.extended
     };
-    const { index: I, middle: M, ring: R, pinky: K } = fingers;
 
+    const { index: I, middle: M, ring: R, pinky: K } = fingers;
     let id = null;
-    if (pinch < 0.32 && M && R && K) id = 'letra_f';
-    else if (I && M && R && K) id = 'palma';
-    else if (I && !M && !R && K) id = 'auxilio';
-    else if (I && M && R && !K) id = 'letra_w';
-    else if (I && M && !R && !K) id = 'v';
-    else if (I && !M && !R && !K) id = thumbOpen ? 'letra_l' : 'indice';
-    else if (!I && !M && !R && K && thumbOpen) id = 'letra_y';
-    else if (!I && !M && !R && !K) {
-      if (thumbUp) id = 'pulgar';
-      else if (pinch < 0.3 && rel(4, 12) < 0.55 && reach(8) > 1.2) id = 'letra_o';
-      else if (thumbOpen && pinch >= 0.5 && pinch <= 1.2 && reach(8) > 1.25 && reach(12) > 1.25) id = 'letra_c';
-      else id = 'puno';
+
+    // 1. Letra F antes de Palma para no confundir pinza pulgar-índice con 4 dedos abiertos
+    if (M && R && K && !I && pinchThumbIndex < 0.38) {
+      id = 'letra_f';
+    } else if (I && M && R && K) {
+      const gapIM = rel(8, 12);
+      const gapMR = rel(12, 16);
+      const gapRK = rel(16, 20);
+      const avgGap = (gapIM + gapMR + gapRK) / 3;
+      const thumbAcrossPalm =
+        thumbToRingMcp < 0.70 ||
+        thumbToMiddleMcp < 0.60 ||
+        thumbToIndexMcp < 0.56;
+      id = thumbAcrossPalm && avgGap < 0.30 ? 'letra_b' : 'palma';
+    } else if (I && !M && !R && K) {
+      id = 'auxilio';
+    } else if (I && M && R && !K) {
+      id = 'letra_w';
+    } else if (I && M && !R && !K) {
+      const tipGapIM = rel(8, 12);
+      const pipGapIM = rel(6, 10);
+      if (tipGapIM < pipGapIM * 0.88 || tipGapIM < 0.16) {
+        id = 'letra_r';
+      } else if (tipGapIM >= 0.28 && thumbToMiddlePip < 0.50 && thumbToMiddleMcp < 0.56) {
+        id = 'letra_k';
+      } else if (tipGapIM < 0.28) {
+        id = 'letra_u';
+      } else {
+        id = 'letra_v';
+      }
+    } else if (I && !M && !R && !K) {
+      const lAngle = angleDeg(W[4], W[2], W[5]);
+      if (thumbSpread && lAngle >= 45 && thumbToIndexMcp > 0.70) {
+        id = 'letra_l';
+      } else if (rel(4, 12) < 0.42 && rel(4, 16) < 0.52 && !thumbSpread) {
+        id = 'letra_d';
+      } else {
+        id = 'indice';
+      }
+    } else if (!I && !M && !R && K) {
+      id = thumbToIndexMcp > 0.72 && thumbToPinkyMcp > 0.85 ? 'letra_y' : 'letra_i';
+    } else if (!I && !M && !R && !K) {
+      const avgPipCurl = (idxInfo.pipAngle + midInfo.pipAngle) / 2;
+      if (thumbUpHigh) {
+        id = 'pulgar';
+      } else if (
+        pinchThumbIndex < 0.36 &&
+        rel(4, 12) < 0.50 &&
+        idxInfo.reachTip > 1.06 &&
+        avgPipCurl >= 70 &&
+        avgPipCurl <= 148
+      ) {
+        id = 'letra_o';
+      } else if (
+        pinchThumbIndex >= 0.42 &&
+        pinchThumbIndex <= 1.28 &&
+        idxInfo.reachTip > 1.12 &&
+        midInfo.reachTip > 1.12 &&
+        rel(8, 12) < 0.46 &&
+        thumbToIndexMcp > 0.54
+      ) {
+        id = 'letra_c';
+      } else if (
+        idxInfo.reachTip > 0.96 &&
+        midInfo.reachTip > 0.96 &&
+        rel(8, 4) < 0.54 &&
+        rel(12, 4) < 0.54 &&
+        thumbToMiddlePip > 0.30
+      ) {
+        id = 'letra_e';
+      } else if (
+        (thumbToMiddlePip < 0.42 || thumbToRingPip < 0.44) &&
+        idxInfo.reachTip < 1.12 &&
+        thumbToIndexPip < 0.60
+      ) {
+        id = 'letra_s';
+      } else if (
+        thumbStraight &&
+        thumbToIndexPip < 0.62 &&
+        thumbToMiddlePip >= 0.44 &&
+        thumbToIndexMcp > 0.28
+      ) {
+        id = 'letra_a';
+      } else {
+        id = 'puno';
+      }
     }
 
     return { id, fingers };
@@ -200,7 +342,7 @@
       return { id: 'auxilio', score: typeof bestAux.score === 'number' ? bestAux.score : 0.9 };
     }
 
-    // 2 y 3. Gestos bimanuales combinados cuando hay 2 manos activas
+    // 2. Gestos bimanuales combinados cuando ambas manos muestran la seña
     if (valid.length >= 2) {
       const [h0, h1] = valid;
       const avgScore = ((h0.score || 0.9) + (h1.score || 0.9)) / 2;
@@ -210,15 +352,21 @@
       if (h0.id === 'pulgar' && h1.id === 'pulgar') {
         return { id: 'dos_pulgares', score: avgScore };
       }
+      if (
+        (h0.id === 'letra_l' && h1.id === 'letra_l') ||
+        (h0.id === 'letra_c' && h1.id === 'letra_c')
+      ) {
+        return { id: 'dni', score: avgScore };
+      }
     }
 
-    // 4. Solo una mano hace un gesto válido (la otra está relajada)
+    // 3. Solo una mano hace un gesto válido (la otra está relajada)
     if (valid.length === 1) {
       const active = valid[0];
       return { id: active.id, score: typeof active.score === 'number' ? active.score : 0.9 };
     }
 
-    // 5. Ambas manos con gestos distintos: prioriza el gesto ya en progreso o el de mayor confianza
+    // 4. Desempate estable con el gesto ya en progreso o el de mayor confianza
     if (currentId) {
       const steady = valid.find((entry) => entry.id === currentId);
       if (steady) {
@@ -227,6 +375,45 @@
     }
     const top = valid.reduce((best, cur) => ((cur.score || 0) > (best.score || 0) ? cur : best));
     return { id: top.id, score: typeof top.score === 'number' ? top.score : 0.9 };
+  }
+
+  /**
+   * Voto por mayoría sobre una ventana deslizante de frames para eliminar parpadeos.
+   * @param {Array<{id: string|null, score: number}>} voteBuffer
+   * @returns {{id: string|null, score: number}}
+   */
+  function majorityVoteGesture(voteBuffer) {
+    if (!Array.isArray(voteBuffer) || voteBuffer.length === 0) {
+      return { id: null, score: 0 };
+    }
+    const counts = new Map();
+    const scoreSums = new Map();
+    let nonNullCount = 0;
+
+    for (let i = 0; i < voteBuffer.length; i += 1) {
+      const item = voteBuffer[i];
+      if (!item || !item.id) continue;
+      nonNullCount += 1;
+      counts.set(item.id, (counts.get(item.id) || 0) + 1);
+      scoreSums.set(item.id, (scoreSums.get(item.id) || 0) + (item.score || 0.9));
+    }
+
+    if (nonNullCount === 0) return { id: null, score: 0 };
+
+    let bestId = null;
+    let bestCount = 0;
+    counts.forEach((cnt, id) => {
+      if (cnt > bestCount) {
+        bestCount = cnt;
+        bestId = id;
+      }
+    });
+
+    const minVotes = Math.max(2, Math.ceil(voteBuffer.length * 0.55));
+    if (bestCount < minVotes && !(voteBuffer.length < 3 && bestCount === voteBuffer.length)) {
+      return { id: null, score: 0 };
+    }
+    return { id: bestId, score: scoreSums.get(bestId) / bestCount };
   }
 
   /**
@@ -280,7 +467,7 @@
 
   /**
    * Encadena las señas confirmadas en una oración legible (capitalización, espacios y punto final).
-   * Las letras consecutivas se unen en un código (ej. "L" + "Y" → "LY").
+   * Las letras consecutivas se unen en un código (ej. "D" + "N" + "I" -> "DNI").
    * @param {Array<{kind:'word'|'letter', text:string}>} tokens
    * @returns {string}
    */
@@ -313,59 +500,21 @@
     return sentence;
   }
 
-  // Disponible para pruebas manuales en consola; no altera el estado de la app.
+  // Disponible para pruebas unitarias en consola; no altera el estado de la app.
   window.SenaSeguraVision = Object.freeze({
     classifyHand,
     resolveMultiHandGesture,
+    majorityVoteGesture,
     detectHorizontalOscillation,
     composeSentence,
     GESTURES
   });
 
   /* =========================================================
-     3. CARGA DINÁMICA DE MEDIAPIPE (sin duplicados)
+     3. CARGA DINÁMICA DE @mediapipe/tasks-vision (BAJO DEMANDA)
      ========================================================= */
-  const scriptPromises = new Map();
-
-  function loadScript(src) {
-    if (scriptPromises.has(src)) return scriptPromises.get(src);
-
-    const promise = new Promise((resolve, reject) => {
-      const el = document.createElement('script');
-      const timer = setTimeout(() => fail(new Error('timeout')), SCRIPT_TIMEOUT_MS);
-
-      function fail(err) {
-        clearTimeout(timer);
-        el.remove();
-        scriptPromises.delete(src); // permite reintentar
-        reject(err);
-      }
-
-      el.src = src;
-      el.async = true;
-      el.crossOrigin = 'anonymous';
-      el.setAttribute('data-vision-src', src);
-      el.onload = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      el.onerror = () => fail(new Error('network'));
-      document.head.appendChild(el);
-    });
-
-    scriptPromises.set(src, promise);
-    return promise;
-  }
-
-  async function loadMediaPipe() {
-    await Promise.all([
-      loadScript(MP_SCRIPTS[0]),
-      loadScript(MP_SCRIPTS[1]).catch(() => null) // el dibujo tiene respaldo propio
-    ]);
-    if (typeof window.Hands !== 'function') {
-      throw new Error('hands-unavailable');
-    }
-  }
+  let visionModulePromise = null;
+  let loadedHandConnections = HAND_CONNECTIONS_FALLBACK;
 
   function withTimeout(promise, ms) {
     return new Promise((resolve, reject) => {
@@ -381,6 +530,24 @@
         }
       );
     });
+  }
+
+  async function loadTasksVision() {
+    if (!visionModulePromise) {
+      visionModulePromise = withTimeout(import(VISION_BUNDLE_URL), LOAD_TIMEOUT_MS).catch((err) => {
+        visionModulePromise = null;
+        throw err;
+      });
+    }
+    const mod = await visionModulePromise;
+    if (!mod || !mod.FilesetResolver || !mod.HandLandmarker) {
+      visionModulePromise = null;
+      throw new Error('tasks-vision-unavailable');
+    }
+    if (Array.isArray(mod.HandLandmarker.HAND_CONNECTIONS)) {
+      loadedHandConnections = mod.HandLandmarker.HAND_CONNECTIONS;
+    }
+    return mod;
   }
 
   /* =========================================================
@@ -432,19 +599,20 @@
     let mode = 'idle'; // idle | loading | live | simulation
     let sessionToken = 0;
     let stream = null;
-    let hands = null;
-    let handsPromise = null;
+    let handLandmarker = null;
+    let landmarkerPromise = null;
     let running = false;
     let rafId = 0;
-    let isProcessing = false;
     let lastVideoTime = -1;
     let lastSendAt = 0;
     let lastConfirmed = null;
     let lastProgressPct = -1;
     let handsDownSince = null;
+    let speechTimer = null;
     let sentenceTokens = [];
     const lastAddedAt = {};
     const motionBuffer = [];
+    const voteBuffer = [];
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0 };
 
     /* ---------- UI helpers ---------- */
@@ -528,12 +696,13 @@
       detection.scoreSum = 0;
       detection.scoreN = 0;
       motionBuffer.length = 0;
+      voteBuffer.length = 0;
       handsDownSince = null;
       setProgress(0);
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
 
-    /* ---------- Cámara ---------- */
+    /* ---------- Cámara y ciclo de vida ---------- */
     function releaseStream() {
       if (stream) {
         stream.getTracks().forEach((track) => {
@@ -563,7 +732,6 @@
       running = false;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
-      isProcessing = false;
       releaseStream();
       clearCanvas();
       if (stage) stage.style.removeProperty('aspect-ratio');
@@ -618,26 +786,40 @@
         : 'No se pudo descargar el modelo de visión. Revisa tu conexión.';
     }
 
-    function getHands() {
-      if (handsPromise) return handsPromise;
-      handsPromise = (async () => {
-        await loadMediaPipe();
-        const instance = new window.Hands({ locateFile: (file) => HANDS_BASE_URL + file });
-        const lowPower = window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
-        instance.setOptions({
-          maxNumHands: 2,
-          modelComplexity: lowPower ? 0 : 1,
-          minDetectionConfidence: 0.5,
+    function getHandLandmarker() {
+      if (landmarkerPromise) return landmarkerPromise;
+      landmarkerPromise = (async () => {
+        const { FilesetResolver, HandLandmarker } = await loadTasksVision();
+        const vision = await withTimeout(FilesetResolver.forVisionTasks(VISION_WASM_URL), LOAD_TIMEOUT_MS);
+        const options = {
+          baseOptions: {
+            modelAssetPath: HAND_MODEL_URL,
+            delegate: 'GPU'
+          },
+          runningMode: 'VIDEO',
+          numHands: 2,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5,
           minTrackingConfidence: 0.5
-        });
-        instance.onResults(handleResults);
-        await withTimeout(instance.initialize(), LOAD_TIMEOUT_MS);
-        return instance;
+        };
+
+        try {
+          return await withTimeout(HandLandmarker.createFromOptions(vision, options), LOAD_TIMEOUT_MS);
+        } catch (_) {
+          // Respaldo automático a CPU si WebGL/GPU no está disponible en el dispositivo
+          return withTimeout(
+            HandLandmarker.createFromOptions(vision, {
+              ...options,
+              baseOptions: { ...options.baseOptions, delegate: 'CPU' }
+            }),
+            LOAD_TIMEOUT_MS
+          );
+        }
       })().catch((err) => {
-        handsPromise = null; // permite reintentar
+        landmarkerPromise = null; // permite reintentar
         throw err;
       });
-      return handsPromise;
+      return landmarkerPromise;
     }
 
     function waitForVideoReady() {
@@ -675,11 +857,10 @@
       setStatus('loading');
       btnStart.focus();
 
-      // Permiso de cámara y descarga del modelo en paralelo
-      const [camResult, libResult] = await Promise.allSettled([openCamera(), getHands()]);
+      // Permiso de cámara y descarga bajo demanda del modelo 3D en paralelo
+      const [camResult, libResult] = await Promise.allSettled([openCamera(), getHandLandmarker()]);
 
       if (token !== sessionToken) {
-        // La persona detuvo o cambió de canal mientras cargaba
         if (camResult.status === 'fulfilled') {
           camResult.value.getTracks().forEach((t) => t.stop());
         }
@@ -696,7 +877,7 @@
         enterSimulation(`${modelErrorMessage()} Usa la prueba sin cámara para continuar.`);
         return;
       }
-      hands = libResult.value;
+      handLandmarker = libResult.value;
 
       try {
         video.srcObject = stream;
@@ -714,7 +895,6 @@
         running = true;
         lastVideoTime = -1;
         lastSendAt = 0;
-        isProcessing = false;
         setStatus('live');
         rafId = requestAnimationFrame(loop);
       } catch (_) {
@@ -723,11 +903,10 @@
       }
     }
 
-    /** Bucle propio con requestAnimationFrame y bandera isProcessing (sin camera_utils). */
+    /** Bucle con requestAnimationFrame llamando detectForVideo(video, now). */
     function loop() {
-      if (!running) return;
+      if (!running || !handLandmarker) return;
       rafId = requestAnimationFrame(loop);
-      if (isProcessing) return;
       if (video.readyState < 2 || video.paused || video.ended) return;
 
       const now = performance.now();
@@ -736,17 +915,14 @@
       lastVideoTime = video.currentTime;
       lastSendAt = now;
 
-      isProcessing = true;
-      hands
-        .send({ image: video })
-        .catch(() => {
-          if (running) {
-            enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
-          }
-        })
-        .then(() => {
-          isProcessing = false;
-        });
+      try {
+        const results = handLandmarker.detectForVideo(video, now);
+        handleResults(results, now);
+      } catch (_) {
+        if (running) {
+          enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+        }
+      }
     }
 
     /* ---------- Resultados, dibujo y filtro anti-ruido ---------- */
@@ -756,16 +932,7 @@
       const haloColor = high ? '#121820' : '#FFFFFF';
       const lineColor = high ? (isSecond ? '#FFFFFF' : '#F59E0B') : (isSecond ? '#15803D' : '#0F4C81');
       const dotColor = high ? (isSecond ? '#F59E0B' : '#FFFFFF') : (isSecond ? '#FFFFFF' : '#F59E0B');
-      const connections = window.HAND_CONNECTIONS || HAND_CONNECTIONS_FALLBACK;
 
-      if (typeof window.drawConnectors === 'function' && typeof window.drawLandmarks === 'function') {
-        window.drawConnectors(ctx, landmarks, connections, { color: haloColor, lineWidth: 8 });
-        window.drawConnectors(ctx, landmarks, connections, { color: lineColor, lineWidth: 4 });
-        window.drawLandmarks(ctx, landmarks, { color: '#121820', fillColor: dotColor, lineWidth: 2, radius: 5 });
-        return;
-      }
-
-      // Respaldo manual si drawing_utils no cargó
       const w = canvas.width;
       const h = canvas.height;
       [[haloColor, 8], [lineColor, 4]].forEach(([color, width]) => {
@@ -773,12 +940,16 @@
         ctx.lineWidth = width;
         ctx.lineCap = 'round';
         ctx.beginPath();
-        connections.forEach(([a, b]) => {
+        loadedHandConnections.forEach((conn) => {
+          const a = Array.isArray(conn) ? conn[0] : conn.start;
+          const b = Array.isArray(conn) ? conn[1] : conn.end;
+          if (!landmarks[a] || !landmarks[b]) return;
           ctx.moveTo(landmarks[a].x * w, landmarks[a].y * h);
           ctx.lineTo(landmarks[b].x * w, landmarks[b].y * h);
         });
         ctx.stroke();
       });
+
       ctx.fillStyle = dotColor;
       ctx.strokeStyle = '#121820';
       ctx.lineWidth = 2;
@@ -805,15 +976,18 @@
       });
     }
 
-    function handleResults(results) {
-      if (!running) return;
+    function handleResults(results, now = performance.now()) {
+      if (!running || !results) return;
       clearCanvas();
-      const allLandmarks = Array.isArray(results.multiHandLandmarks) ? results.multiHandLandmarks : [];
-      const now = performance.now();
+      const allLandmarks = Array.isArray(results.landmarks) ? results.landmarks : [];
+      const allWorldLandmarks = Array.isArray(results.worldLandmarks) ? results.worldLandmarks : [];
+      const allHandedness = Array.isArray(results.handedness) ? results.handedness : [];
+
       updateHandsCount(allLandmarks.length);
 
       if (allLandmarks.length === 0) {
         motionBuffer.length = 0;
+        voteBuffer.length = 0;
         feedGesture(null, 0, now);
         if (handsDownSince === null) handsDownSince = now;
         if (sentenceTokens.length > 0 && now - handsDownSince >= AUTO_SEND_PAUSE_MS) {
@@ -831,9 +1005,10 @@
       const handEntries = [];
       allLandmarks.forEach((landmarks, idx) => {
         drawHand(landmarks, idx);
-        const handedness = results.multiHandedness && results.multiHandedness[idx];
-        const score = handedness && typeof handedness.score === 'number' ? handedness.score : 0.9;
-        const { id: staticId } = classifyHand(landmarks, aspect);
+        const worldPts = allWorldLandmarks[idx] || null;
+        const handedEntry = allHandedness[idx] && allHandedness[idx][0];
+        const score = handedEntry && typeof handedEntry.score === 'number' ? handedEntry.score : 0.9;
+        const { id: staticId } = classifyHand(landmarks, aspect, worldPts);
         let effectiveId = staticId;
 
         if (idx === 0 && hasOscillation) {
@@ -844,10 +1019,14 @@
       });
 
       const resolved = resolveMultiHandGesture(handEntries, detection.id);
-      feedGesture(resolved ? resolved.id : null, resolved ? resolved.score : 0, now, { fastConfirm });
+      if (voteBuffer.length >= VOTE_WINDOW) voteBuffer.shift();
+      voteBuffer.push(resolved ? { id: resolved.id, score: resolved.score } : { id: null, score: 0 });
+      const smoothed = majorityVoteGesture(voteBuffer);
+
+      feedGesture(smoothed.id, smoothed.score, now, { fastConfirm });
     }
 
-    /** Exige estabilidad breve antes de confirmar una seña (ritmo ágil, adaptado a cada tipo de seña). */
+    /** Exige estabilidad breve (~320 ms tras voto por mayoría) antes de confirmar la seña. */
     function feedGesture(id, score, now, { fastConfirm = false } = {}) {
       if (id && id === detection.id) {
         detection.lastSeen = now;
@@ -914,7 +1093,6 @@
           ? 'Pulsa “Enviar y leer al funcionario” cuando la oración esté lista.'
           : 'Baja las manos 2 s para enviar y leer automáticamente.';
         sentNote.hidden = false;
-        // Seguridad: la seña de auxilio se envía de inmediato, sin esperar la pausa
         if (gesture.urgent) sendSentence({ auto: true });
       } else {
         renderSentence();
@@ -939,19 +1117,30 @@
       if (!('speechSynthesis' in window) || typeof window.SpeechSynthesisUtterance === 'undefined') {
         return false;
       }
+      if (speechTimer) {
+        clearTimeout(speechTimer);
+        speechTimer = null;
+      }
       const synth = window.speechSynthesis;
-      synth.cancel(); // evita colas trabadas
+      synth.cancel();
       const utterance = new window.SpeechSynthesisUtterance(text);
       const voice = pickSpanishVoice();
       utterance.voice = voice;
       utterance.lang = voice ? voice.lang : 'es-PE';
       if (!voice && synth.getVoices && synth.getVoices().length) utterance.lang = 'es-ES';
       utterance.rate = 0.95;
-      setTimeout(() => synth.speak(utterance), 60);
+      speechTimer = setTimeout(() => {
+        speechTimer = null;
+        synth.speak(utterance);
+      }, 60);
       return true;
     }
 
     function cancelSpeech() {
+      if (speechTimer) {
+        clearTimeout(speechTimer);
+        speechTimer = null;
+      }
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     }
 
@@ -996,7 +1185,7 @@
       const bridge = window.SenaSegura;
       if (bridge && typeof bridge.setChannel === 'function') {
         const wasUrgentGesture = lastConfirmed && lastConfirmed.id === 'auxilio';
-        bridge.setChannel('lsp'); // oculta este panel
+        bridge.setChannel('lsp');
         if (!wasUrgentGesture && typeof bridge.appendChatMessage === 'function') {
           bridge.appendChatMessage(CHAT_SENDER, 'Solicito un intérprete humano (escalado desde Cámara IA).', 'user');
         }
@@ -1115,11 +1304,19 @@
     const releaseOnExit = () => {
       stopCamera({ keepStatus: true });
       cancelSpeech();
+      if (handLandmarker && typeof handLandmarker.close === 'function') {
+        try {
+          handLandmarker.close();
+        } catch (_) {
+          /* instancia ya liberada */
+        }
+        handLandmarker = null;
+        landmarkerPromise = null;
+      }
     };
     window.addEventListener('beforeunload', releaseOnExit);
     window.addEventListener('pagehide', releaseOnExit);
 
-    // Precarga la lista de voces (algunos navegadores la cargan de forma asíncrona)
     if ('speechSynthesis' in window && typeof window.speechSynthesis.getVoices === 'function') {
       window.speechSynthesis.getVoices();
     }

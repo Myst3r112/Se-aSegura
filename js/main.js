@@ -53,7 +53,7 @@
           label: 'Monto / Operación (Ventanilla)',
           shortLabel: 'Monto',
           value: 'S/ 150.00',
-          roleNote: 'Solo lectura para el ciudadano',
+          roleNote: 'Registrado por ventanilla',
           isAmount: true
         }
       ],
@@ -82,7 +82,7 @@
           label: 'Referencia (Ventanilla)',
           shortLabel: 'Referencia',
           value: 'Parte N.° 2026-041',
-          roleNote: 'Solo lectura para el ciudadano'
+          roleNote: 'Registrado por ventanilla'
         }
       ],
       procedures: [
@@ -110,7 +110,7 @@
           label: 'Área / Triaje (Ventanilla)',
           shortLabel: 'Área',
           value: 'Triaje · Prioridad II',
-          roleNote: 'Solo lectura para el ciudadano'
+          roleNote: 'Registrado por ventanilla'
         }
       ],
       procedures: [
@@ -138,7 +138,7 @@
           label: 'Expediente (Ventanilla)',
           shortLabel: 'Expediente',
           value: '00412-2026',
-          roleNote: 'Solo lectura para el ciudadano'
+          roleNote: 'Registrado por ventanilla'
         }
       ],
       procedures: [
@@ -585,11 +585,80 @@
     return `SEG-${randomPart}`;
   }
 
+  const QR_GENERATOR_CDN = 'https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/qrcode.js';
+  let qrLibraryPromise = null;
+
   /**
-   * Genera un código QR determinista en nodo SVG para códigos dinámicos de 8 dígitos.
+   * Carga qrcode-generator (jsDelivr) estrictamente bajo demanda al cerrar sesión.
+   */
+  function ensureQrLibrary() {
+    if (typeof window.qrcode === 'function') return Promise.resolve(true);
+    if (qrLibraryPromise) return qrLibraryPromise;
+
+    qrLibraryPromise = new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = QR_GENERATOR_CDN;
+      script.async = true;
+      script.crossOrigin = 'anonymous';
+      script.addEventListener('load', () => resolve(typeof window.qrcode === 'function'), { once: true });
+      script.addEventListener('error', () => {
+        qrLibraryPromise = null;
+        resolve(false);
+      }, { once: true });
+      document.head.appendChild(script);
+    });
+
+    return qrLibraryPromise;
+  }
+
+  /**
+   * Genera un código QR ISO/IEC 18004 escaneable en SVG puro (o matriz determinista offline).
    */
   function buildDynamicQrSvg(code) {
     const svgNs = 'http://www.w3.org/2000/svg';
+
+    if (typeof window.qrcode === 'function') {
+      try {
+        const qr = window.qrcode(0, 'M');
+        qr.addData(String(code));
+        qr.make();
+
+        const moduleCount = qr.getModuleCount();
+        const quietZone = 2;
+        const total = moduleCount + quietZone * 2;
+
+        const svg = document.createElementNS(svgNs, 'svg');
+        svg.setAttribute('width', '148');
+        svg.setAttribute('height', '148');
+        svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
+        svg.setAttribute('role', 'img');
+        svg.setAttribute('aria-label', `Código QR verificable ${code}`);
+
+        const bg = document.createElementNS(svgNs, 'rect');
+        bg.setAttribute('width', String(total));
+        bg.setAttribute('height', String(total));
+        bg.setAttribute('fill', '#FFFFFF');
+        svg.appendChild(bg);
+
+        let pathData = '';
+        for (let r = 0; r < moduleCount; r += 1) {
+          for (let c = 0; c < moduleCount; c += 1) {
+            if (qr.isDark(r, c)) {
+              pathData += `M${c + quietZone},${r + quietZone}h1v1h-1z`;
+            }
+          }
+        }
+
+        const path = document.createElementNS(svgNs, 'path');
+        path.setAttribute('d', pathData);
+        path.setAttribute('fill', '#0A2540');
+        svg.appendChild(path);
+        return svg;
+      } catch (_) {
+        // Continúa con matriz SVG determinista de respaldo si el generador fallara.
+      }
+    }
+
     const size = 21;
     const cell = 6;
     const margin = 11;
@@ -732,14 +801,15 @@
     const btnEditDni = document.getElementById('btn-edit-dni');
     const btnEditAmount = document.getElementById('btn-edit-amount');
     const sensitiveEditForm = document.getElementById('sensitive-edit-form');
-    const editGroup1 = document.getElementById('edit-group-1');
-    const editGroup2 = document.getElementById('edit-group-2');
     const editLabel1 = document.getElementById('edit-label-1');
-    const editLabel2 = document.getElementById('edit-label-2');
     const editField1 = document.getElementById('edit-field-1');
-    const editField2 = document.getElementById('edit-field-2');
     const sensitiveEditError = document.getElementById('sensitive-edit-error');
     const btnCancelEditData = document.getElementById('btn-cancel-edit-data');
+    const consoleStaffEditForm = document.getElementById('console-staff-edit-form');
+    const editLabel2 = document.getElementById('edit-label-2');
+    const editField2 = document.getElementById('edit-field-2');
+    const consoleStaffEditError = document.getElementById('console-staff-edit-error');
+    const btnCancelStaffData = document.getElementById('btn-cancel-staff-data');
     const chatForm = document.getElementById('sim-chat-form');
     const chatInput = document.getElementById('sim-chat-input');
     const btnVoiceDictation = document.getElementById('btn-voice-dictation');
@@ -776,8 +846,6 @@
     let connectingStepTimer = null;
     let dictTimer = null;
     let chatEpoch = 0;
-    let editingFieldIndex = 0;
-    let editTriggerBtn = null;
 
     function enterOperateScreen({ focusTarget = true } = {}) {
       if (appWelcome) appWelcome.hidden = true;
@@ -1028,21 +1096,35 @@
       }
     }
 
-    function closeSensitiveEditForm(restoreFocus = false) {
+    function closeCitizenDniForm(restoreFocus = false) {
       if (!sensitiveEditForm) return;
       sensitiveEditForm.hidden = true;
-      if (editGroup1) editGroup1.hidden = false;
-      if (editGroup2) editGroup2.hidden = true;
       if (sensitiveEditError) {
         sensitiveEditError.hidden = true;
         sensitiveEditError.textContent = '';
       }
-      if (btnEditDni) btnEditDni.setAttribute('aria-expanded', 'false');
-      if (btnEditAmount) btnEditAmount.setAttribute('aria-expanded', 'false');
-      if (restoreFocus && editTriggerBtn && typeof editTriggerBtn.focus === 'function') {
-        editTriggerBtn.focus();
+      if (btnEditDni) {
+        btnEditDni.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) btnEditDni.focus();
       }
-      editTriggerBtn = null;
+    }
+
+    function closeConsoleStaffForm(restoreFocus = false) {
+      if (!consoleStaffEditForm) return;
+      consoleStaffEditForm.hidden = true;
+      if (consoleStaffEditError) {
+        consoleStaffEditError.hidden = true;
+        consoleStaffEditError.textContent = '';
+      }
+      if (btnEditAmount) {
+        btnEditAmount.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) btnEditAmount.focus();
+      }
+    }
+
+    function closeSensitiveEditForm(restoreFocus = false) {
+      closeCitizenDniForm(restoreFocus);
+      closeConsoleStaffForm(false);
     }
 
     function updateConsolePriorityContext() {
@@ -1400,24 +1482,36 @@
       btnExitEmergency.addEventListener('click', deactivateEmergency);
     }
 
+    function selectEmergencyOption({ type = null, crisis = null }) {
+      emergencyTypeBtns.forEach((b) => {
+        const active = Boolean(type) && b.dataset.emergencyType === type;
+        b.classList.toggle('is-selected', active);
+        b.setAttribute('aria-pressed', String(active));
+      });
+      crisisCards.forEach((c) => {
+        const active = Boolean(crisis) && c.dataset.crisis === crisis;
+        c.classList.toggle('is-selected', active);
+        c.setAttribute('aria-pressed', String(active));
+      });
+
+      state.emergencyType = type || null;
+      state.selectedCrisis = crisis || null;
+      state.criticalAlertActive = true;
+      if (state.channel !== 'lsp') setChannel('lsp');
+
+      updateConsolePriorityContext();
+      updateCriticalBanner();
+      updateSessionMeta();
+      updateInterpreterCaption();
+    }
+
     emergencyTypeBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
-        emergencyTypeBtns.forEach((b) => {
-          const active = b === btn;
-          b.classList.toggle('is-selected', active);
-          b.setAttribute('aria-pressed', String(active));
-        });
-        state.emergencyType = btn.dataset.emergencyType;
-        state.criticalAlertActive = true;
-        if (state.channel !== 'lsp') setChannel('lsp');
-
-        updateConsolePriorityContext();
-        updateCriticalBanner();
-        updateSessionMeta();
-
+        const type = btn.dataset.emergencyType;
+        selectEmergencyOption({ type });
         appendMessage(
           'Alerta de Emergencia',
-          `Tipo seleccionado: ${state.emergencyType}. Prioridad máxima asignada en Consola del Intérprete (<30 s).`,
+          `Tipo seleccionado: ${type}. Prioridad máxima asignada en Consola del Intérprete (<30 s).`,
           'user'
         );
       });
@@ -1425,22 +1519,11 @@
 
     crisisCards.forEach((card) => {
       card.addEventListener('click', () => {
-        crisisCards.forEach((c) => {
-          const active = c === card;
-          c.classList.toggle('is-selected', active);
-          c.setAttribute('aria-pressed', String(active));
-        });
-        state.selectedCrisis = card.dataset.crisis;
-        state.criticalAlertActive = true;
-        if (state.channel !== 'lsp') setChannel('lsp');
-
-        updateConsolePriorityContext();
-        updateCriticalBanner();
-        updateSessionMeta();
-
+        const crisis = card.dataset.crisis;
+        selectEmergencyOption({ crisis });
         appendMessage(
           'Alerta de Crisis',
-          `Símbolo rápido activado: ${state.selectedCrisis}. Videollamada HD >30 fps enlazada con prioridad.`,
+          `Símbolo rápido activado: ${crisis}. Videollamada HD >30 fps enlazada con prioridad.`,
           'user'
         );
       });
@@ -1627,85 +1710,125 @@
       });
     }
 
-    if (sensitiveEditForm && editField1 && editField2) {
-      let editOpenedAt = 0;
+    function placeholderForField(field) {
+      if (!field) return '';
+      const name = (field.shortLabel || field.label || '').toLowerCase();
+      if (name.includes('dni')) return 'Ej. 00000000';
+      if (name.includes('monto') || field.isAmount) return 'Ej. 150.00';
+      if (name.includes('referencia')) return 'Ej. Parte N.° 2026-041';
+      if (name.includes('área')) return 'Ej. Triaje · Prioridad II';
+      if (name.includes('expediente')) return 'Ej. 00412-2026';
+      return '';
+    }
 
-      function placeholderForField(field) {
-        if (!field) return '';
-        const name = (field.shortLabel || field.label || '').toLowerCase();
-        if (name.includes('dni')) return 'Ej. 00000000';
-        if (name.includes('monto') || field.isAmount) return 'Ej. 150.00';
-        if (name.includes('referencia')) return 'Ej. Parte N.° 2026-041';
-        if (name.includes('área')) return 'Ej. Triaje · Prioridad II';
-        if (name.includes('expediente')) return 'Ej. 00412-2026';
-        return '';
-      }
-
-      function openSensitiveEdit(index, triggerBtn) {
-        if (!sensitiveEditForm.hidden && editingFieldIndex === index) {
-          closeSensitiveEditForm(false);
-          return;
-        }
-        const field = state.sensitiveFields[index];
-        if (!field) return;
-
-        editingFieldIndex = index;
-        editTriggerBtn = triggerBtn;
-
-        const isSecond = index === 1;
-        if (editGroup1) editGroup1.hidden = isSecond;
-        if (editGroup2) editGroup2.hidden = !isSecond;
-
-        const activeLabel = isSecond ? editLabel2 : editLabel1;
-        const activeInput = isSecond ? editField2 : editField1;
-        if (activeLabel) activeLabel.textContent = field.label;
-        if (activeInput) {
-          activeInput.placeholder = placeholderForField(field);
-          activeInput.value = field.value;
-        }
-        if (sensitiveEditError) {
-          sensitiveEditError.hidden = true;
-          sensitiveEditError.textContent = '';
-        }
-
-        editOpenedAt = performance.now();
-        sensitiveEditForm.hidden = false;
-        if (btnEditDni) btnEditDni.setAttribute('aria-expanded', String(!isSecond));
-        if (btnEditAmount) btnEditAmount.setAttribute('aria-expanded', String(isSecond));
-
-        setTimeout(() => {
-          if (!sensitiveEditForm.hidden && activeInput) activeInput.focus();
-        }, 60);
-      }
+    // Edición ciudadana exclusiva del DNI en Ventanilla
+    if (sensitiveEditForm && editField1) {
+      let dniEditOpenedAt = 0;
 
       if (btnEditDni) {
-        btnEditDni.addEventListener('click', () => openSensitiveEdit(0, btnEditDni));
-      }
-      if (btnEditAmount) {
-        btnEditAmount.addEventListener('click', () => openSensitiveEdit(1, btnEditAmount));
+        btnEditDni.addEventListener('click', () => {
+          if (!sensitiveEditForm.hidden) {
+            closeCitizenDniForm(false);
+            return;
+          }
+          const field = state.sensitiveFields[0];
+          if (!field) return;
+          if (editLabel1) editLabel1.textContent = field.label;
+          editField1.placeholder = placeholderForField(field);
+          editField1.value = field.value;
+          if (sensitiveEditError) {
+            sensitiveEditError.hidden = true;
+            sensitiveEditError.textContent = '';
+          }
+          dniEditOpenedAt = performance.now();
+          sensitiveEditForm.hidden = false;
+          btnEditDni.setAttribute('aria-expanded', 'true');
+          setTimeout(() => {
+            if (!sensitiveEditForm.hidden) editField1.focus();
+          }, 60);
+        });
       }
 
       sensitiveEditForm.addEventListener('submit', (e) => {
         e.preventDefault();
-        if (performance.now() - editOpenedAt < 150) return;
+        if (performance.now() - dniEditOpenedAt < 150) return;
+        const field = state.sensitiveFields[0];
+        if (!field) return;
 
-        const field = state.sensitiveFields[editingFieldIndex];
-        const inputEl = editingFieldIndex === 1 ? editField2 : editField1;
-        if (!field || !inputEl) return;
+        const raw = editField1.value.trim();
+        let errorMsg = '';
+        if (raw) {
+          const digits = raw.replace(/\D/g, '').slice(0, 8);
+          if (!digits) {
+            errorMsg = 'Ingresa solo números para el DNI (hasta 8 dígitos).';
+          } else {
+            field.value = digits;
+          }
+        }
 
-        const raw = inputEl.value.trim();
+        renderSensitiveData();
+
+        if (errorMsg && sensitiveEditError) {
+          sensitiveEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
+          sensitiveEditError.hidden = false;
+          editField1.focus();
+          return;
+        }
+
+        closeCitizenDniForm(true);
+        appendMessage('Sistema SeñaSegura', `DNI del ciudadano actualizado (${field.value}).`, 'staff');
+      });
+
+      sensitiveEditForm.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeCitizenDniForm(true);
+        }
+      });
+    }
+
+    if (btnCancelEditData) {
+      btnCancelEditData.addEventListener('click', () => closeCitizenDniForm(true));
+    }
+
+    // Ajuste exclusivo del personal en Consola (Monto / Referencia / Área / Expediente)
+    if (consoleStaffEditForm && editField2) {
+      let staffEditOpenedAt = 0;
+
+      if (btnEditAmount) {
+        btnEditAmount.addEventListener('click', () => {
+          if (!consoleStaffEditForm.hidden) {
+            closeConsoleStaffForm(false);
+            return;
+          }
+          const field = state.sensitiveFields[1];
+          if (!field) return;
+          if (editLabel2) editLabel2.textContent = field.label;
+          editField2.placeholder = placeholderForField(field);
+          editField2.value = field.value;
+          if (consoleStaffEditError) {
+            consoleStaffEditError.hidden = true;
+            consoleStaffEditError.textContent = '';
+          }
+          staffEditOpenedAt = performance.now();
+          consoleStaffEditForm.hidden = false;
+          btnEditAmount.setAttribute('aria-expanded', 'true');
+          setTimeout(() => {
+            if (!consoleStaffEditForm.hidden) editField2.focus();
+          }, 60);
+        });
+      }
+
+      consoleStaffEditForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (performance.now() - staffEditOpenedAt < 150) return;
+        const field = state.sensitiveFields[1];
+        if (!field) return;
+
+        const raw = editField2.value.trim();
         let errorMsg = '';
 
-        if (editingFieldIndex === 0) {
-          if (raw) {
-            const digits = raw.replace(/\D/g, '').slice(0, 8);
-            if (!digits) {
-              errorMsg = 'Ingresa solo números para el DNI (hasta 8 dígitos).';
-            } else {
-              field.value = digits;
-            }
-          }
-        } else if (field.isAmount) {
+        if (field.isAmount) {
           if (raw) {
             const cleaned = raw.replace(/^\s*s\s*\/?\s*/i, '').replace(/\s+/g, '').replace(',', '.');
             const num = Number(cleaned);
@@ -1721,30 +1844,31 @@
 
         renderSensitiveData();
 
-        if (errorMsg && sensitiveEditError) {
-          sensitiveEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
-          sensitiveEditError.hidden = false;
-          inputEl.focus();
+        if (errorMsg && consoleStaffEditError) {
+          consoleStaffEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
+          consoleStaffEditError.hidden = false;
+          editField2.focus();
           return;
         }
 
-        closeSensitiveEditForm(true);
-        const updateNote = editingFieldIndex === 0
-          ? `DNI del ciudadano actualizado (${field.value}).`
-          : `${field.label} actualizado por ventanilla (${field.value}).`;
-        appendMessage('Sistema SeñaSegura', updateNote, 'staff');
+        closeConsoleStaffForm(true);
+        appendMessage(
+          'Personal de ventanilla (Consola)',
+          `${field.label} actualizado en ventanilla (${field.value}).`,
+          'staff'
+        );
       });
 
-      sensitiveEditForm.addEventListener('keydown', (e) => {
+      consoleStaffEditForm.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
           e.preventDefault();
-          closeSensitiveEditForm(true);
+          closeConsoleStaffForm(true);
         }
       });
     }
 
-    if (btnCancelEditData) {
-      btnCancelEditData.addEventListener('click', () => closeSensitiveEditForm(true));
+    if (btnCancelStaffData) {
+      btnCancelStaffData.addEventListener('click', () => closeConsoleStaffForm(true));
     }
 
     // Consola del Intérprete: estado, alerta crítica, PiP, apoyo y bloc de notas (Figma P8, P9)
@@ -2067,6 +2191,13 @@
       if (pdfSector) pdfSector.textContent = `Atención finalizada · Sector: ${state.sector} (${finishedProcedure})`;
       if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
       if (pdfQr) pdfQr.replaceChildren(qrSvgNode.cloneNode(true));
+
+      ensureQrLibrary().then((loaded) => {
+        if (!loaded || state.lastReceiptCode !== code) return;
+        const verifiedQr = buildDynamicQrSvg(code);
+        if (qrBox) qrBox.replaceChildren(verifiedQr);
+        if (pdfQr) pdfQr.replaceChildren(verifiedQr.cloneNode(true));
+      });
 
       // Precargar el código generado en el verificador web para prueba inmediata
       const verifierInput = document.getElementById('verifier-code-input');

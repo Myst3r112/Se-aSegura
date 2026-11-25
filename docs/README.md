@@ -7,7 +7,7 @@
 
 ## 1. Arquitectura y Estructura de Directorios
 
-El proyecto está implementado con **HTML5 semántico**, **CSS3 puro** (variables `:root`) y **JavaScript estándar (ES6+)** sin frameworks de UI ni bundlers (con librerías open-source ligeras por CDN cargadas bajo demanda: `@mediapipe/tasks-vision` y `qrcode-generator`), 100 % compatible de forma directa con **GitHub Pages**.
+El proyecto está implementado con **HTML5 semántico**, **CSS3 puro** (variables `:root`) y **JavaScript estándar (ES6+)** sin frameworks de UI ni bundlers (con `@mediapipe/tasks-vision` importado vía ESM bajo demanda al activar cámara y codificación ISO/IEC 18004 local para el QR SVG), 100 % compatible con **GitHub Pages**.
 
 ```text
 SeñaSegura/
@@ -21,7 +21,7 @@ SeñaSegura/
 ├── css/
 │   └── styles.css              # Tokens oficiales, layout responsive, Alto Contraste y @media print
 ├── js/
-│   ├── main.js                 # Lógica modular compartida en Vanilla JS (ES6+) para index.html y app.html (incluye QR SVG con qrcode-generator bajo demanda)
+│   ├── main.js                 # Lógica modular compartida en Vanilla JS (ES6+) para index.html y app.html (incluye codificador QR ISO/IEC 18004 en SVG puro)
 │   └── vision-ai.js            # Cámara IA (LSP): @mediapipe/tasks-vision (HandLandmarker 3D bajo demanda), 2 manos, voto por mayoría y dactilológico LSP (A-Y)
 ├── assets/
 │   ├── fonts/                  # Atkinson Hyperlegible (400 y 700 woff2)
@@ -80,7 +80,7 @@ Extraídos del sistema de diseño de SeñaSegura en Figma (`Atkinson Hyperlegibl
   - **Consola del Intérprete (P8–P10):** Banner de alerta crítica con aceptación/descarte, ajuste exclusivo del personal para el campo operativo de ventanilla (`Monto`, `Referencia`, `Área` o `Expediente`), turnos sincronizados, **feed en vivo de Mensajes de Ventanilla**, autovista PiP minimizable, bloc de notas, respaldo y **Glosario Técnico LSP (P10)** buscable con favoritos.
   - **Videollamada HD y Contingencia (HU-017, HU-018, HU-021, HU-023, HU-040):** Controles de micrófono, cámara, ángulo, pantalla completa con subtítulo en vivo y botón discreto `Simular microcorte` en la barra inferior.
 - **Cierre, Calificación, Trazabilidad y Verificador Web (P6 · HU-025, HU-026, HU-029, HU-031, HU-032):**
-  - Generación de código único de 8 dígitos (`SEG-XXXXXXXX`) con botón de copiado rápido, código QR ISO/IEC 18004 real escaneable en SVG puro (construido vía `document.createElementNS` usando `qrcode-generator@2.0.4` cargado bajo demanda, con matriz SVG de respaldo offline), descarga de constancia, vista previa PDF con descarga e impresión directa (`@media print`), **calificación opcional de la experiencia en cierre (P6)** y purga local inmediata (incluyendo detención y limpieza de Cámara IA).
+  - Generación de código único de 8 dígitos (`SEG-XXXXXXXX`) con botón de copiado rápido, código QR ISO/IEC 18004 escaneable en SVG puro (calculado localmente en `js/main.js` vía `document.createElementNS` sin dependencias ni peticiones de red), descarga de constancia, vista previa PDF con descarga e impresión directa (`@media print`), **calificación opcional de la experiencia en cierre (P6)** y purga local inmediata (incluyendo detención y limpieza de Cámara IA).
   - Verificador web capaz de validar el ejemplo base (`SEG-84920` o `84920`) y los códigos generados en sesión con estado visual diferenciado.
 - **Respaldo Normativo, FAQ y Formulario B2G/B2B (HU-042, HU-043, HU-044, HU-048):**
   - Respaldo explícito a la **Ley N.° 29535** (Lengua de Señas Peruana), **Ley N.° 29733** (Protección de Datos Personales) y política de **No grabación de video**, con modal de *Ficha de Conformidad*.

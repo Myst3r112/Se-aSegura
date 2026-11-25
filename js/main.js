@@ -585,110 +585,252 @@
     return `SEG-${randomPart}`;
   }
 
-  const QR_GENERATOR_CDN = 'https://cdn.jsdelivr.net/npm/qrcode-generator@2.0.4/qrcode.js';
-  let qrLibraryPromise = null;
+  const QR_GF_EXP = new Uint8Array(512);
+  const QR_GF_LOG = new Uint8Array(256);
+  (() => {
+    let val = 1;
+    for (let i = 0; i < 255; i += 1) {
+      QR_GF_EXP[i] = val;
+      QR_GF_LOG[val] = i;
+      val <<= 1;
+      if (val & 0x100) val ^= 0x11d;
+    }
+    for (let i = 255; i < 512; i += 1) {
+      QR_GF_EXP[i] = QR_GF_EXP[i - 255];
+    }
+  })();
 
-  /**
-   * Carga qrcode-generator (jsDelivr) estrictamente bajo demanda al cerrar sesión.
-   */
-  function ensureQrLibrary() {
-    if (typeof window.qrcode === 'function') return Promise.resolve(true);
-    if (qrLibraryPromise) return qrLibraryPromise;
+  // Códigos de formato ISO/IEC 18004 (ECC Level M = 00, máscaras 0..7 con XOR 0x5412)
+  const QR_FORMAT_M = [0x5412, 0x5125, 0x5e7c, 0x5b4b, 0x45f9, 0x40ce, 0x4f97, 0x4aa0];
 
-    qrLibraryPromise = new Promise((resolve) => {
-      const script = document.createElement('script');
-      script.src = QR_GENERATOR_CDN;
-      script.async = true;
-      script.crossOrigin = 'anonymous';
-      script.addEventListener('load', () => resolve(typeof window.qrcode === 'function'), { once: true });
-      script.addEventListener('error', () => {
-        qrLibraryPromise = null;
-        resolve(false);
-      }, { once: true });
-      document.head.appendChild(script);
-    });
+  function qrGfMul(a, b) {
+    return a === 0 || b === 0 ? 0 : QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]];
+  }
 
-    return qrLibraryPromise;
+  function qrRsRemainder(data, ecCount) {
+    let gen = [1];
+    for (let i = 0; i < ecCount; i += 1) {
+      const nxt = new Array(gen.length + 1).fill(0);
+      const root = QR_GF_EXP[i];
+      for (let j = 0; j < gen.length; j += 1) {
+        nxt[j] ^= gen[j];
+        nxt[j + 1] ^= qrGfMul(gen[j], root);
+      }
+      gen = nxt;
+    }
+    const msg = data.concat(new Array(ecCount).fill(0));
+    for (let i = 0; i < data.length; i += 1) {
+      const coef = msg[i];
+      if (coef !== 0) {
+        for (let j = 0; j < gen.length; j += 1) {
+          msg[i + j] ^= qrGfMul(gen[j], coef);
+        }
+      }
+    }
+    return msg.slice(data.length);
   }
 
   /**
-   * Genera un código QR ISO/IEC 18004 escaneable en SVG puro (o matriz determinista offline).
+   * Codifica un texto breve (<=26 bytes) en una matriz QR ISO/IEC 18004 (V1/V2 Nivel M).
+   * Cero dependencias externas y cero errores en redes offline o restringidas.
    */
-  function buildDynamicQrSvg(code) {
-    const svgNs = 'http://www.w3.org/2000/svg';
+  function encodeIsoQrMatrix(text) {
+    const raw = Array.from(String(text)).map((ch) => ch.charCodeAt(0) & 0xff);
+    if (raw.length > 26) return null;
 
-    if (typeof window.qrcode === 'function') {
-      try {
-        const qr = window.qrcode(0, 'M');
-        qr.addData(String(code));
-        qr.make();
+    const ver = raw.length <= 14 ? 1 : 2;
+    const size = 17 + 4 * ver;
+    const dataLen = ver === 1 ? 16 : 28;
+    const ecLen = ver === 1 ? 10 : 16;
 
-        const moduleCount = qr.getModuleCount();
-        const quietZone = 2;
-        const total = moduleCount + quietZone * 2;
+    const bits = [];
+    const pushBits = (val, n) => {
+      for (let b = n - 1; b >= 0; b -= 1) bits.push((val >> b) & 1);
+    };
+    pushBits(0b0100, 4); // Modo byte
+    pushBits(raw.length, 8);
+    raw.forEach((b) => pushBits(b, 8));
+    pushBits(0, Math.min(4, dataLen * 8 - bits.length));
+    while (bits.length % 8 !== 0) bits.push(0);
 
-        const svg = document.createElementNS(svgNs, 'svg');
-        svg.setAttribute('width', '148');
-        svg.setAttribute('height', '148');
-        svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
-        svg.setAttribute('role', 'img');
-        svg.setAttribute('aria-label', `Código QR verificable ${code}`);
+    const codewords = [];
+    for (let i = 0; i < bits.length; i += 8) {
+      let byte = 0;
+      for (let b = 0; b < 8; b += 1) byte = (byte << 1) | bits[i + b];
+      codewords.push(byte);
+    }
+    const pads = [0xec, 0x11];
+    let padIdx = 0;
+    while (codewords.length < dataLen) {
+      codewords.push(pads[padIdx & 1]);
+      padIdx += 1;
+    }
 
-        const bg = document.createElementNS(svgNs, 'rect');
-        bg.setAttribute('width', String(total));
-        bg.setAttribute('height', String(total));
-        bg.setAttribute('fill', '#FFFFFF');
-        svg.appendChild(bg);
+    const full = codewords.concat(qrRsRemainder(codewords, ecLen));
+    const stream = [];
+    full.forEach((byte) => {
+      for (let b = 7; b >= 0; b -= 1) stream.push((byte >> b) & 1);
+    });
+    const totalDataBits = ver === 1 ? 208 : 359;
+    while (stream.length < totalDataBits) stream.push(0);
 
-        let pathData = '';
-        for (let r = 0; r < moduleCount; r += 1) {
-          for (let c = 0; c < moduleCount; c += 1) {
-            if (qr.isDark(r, c)) {
-              pathData += `M${c + quietZone},${r + quietZone}h1v1h-1z`;
-            }
-          }
+    const base = Array.from({ length: size }, () => new Uint8Array(size));
+    const func = Array.from({ length: size }, () => new Uint8Array(size));
+    const setFn = (r, c, v) => {
+      if (r >= 0 && r < size && c >= 0 && c < size) {
+        base[r][c] = v ? 1 : 0;
+        func[r][c] = 1;
+      }
+    };
+
+    const drawFinder = (r0, c0) => {
+      for (let dr = -1; dr <= 7; dr += 1) {
+        for (let dc = -1; dc <= 7; dc += 1) {
+          const dark =
+            dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6 &&
+            (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4));
+          setFn(r0 + dr, c0 + dc, dark);
         }
+      }
+    };
+    drawFinder(0, 0);
+    drawFinder(0, size - 7);
+    drawFinder(size - 7, 0);
 
-        const path = document.createElementNS(svgNs, 'path');
-        path.setAttribute('d', pathData);
-        path.setAttribute('fill', '#0A2540');
-        svg.appendChild(path);
-        return svg;
-      } catch (_) {
-        // Continúa con matriz SVG determinista de respaldo si el generador fallara.
+    if (ver === 2) {
+      for (let dr = -2; dr <= 2; dr += 1) {
+        for (let dc = -2; dc <= 2; dc += 1) {
+          setFn(18 + dr, 18 + dc, Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0));
+        }
       }
     }
 
-    const size = 21;
-    const cell = 6;
-    const margin = 11;
-    const total = size * cell + margin * 2;
-    let seed = 0;
-    for (let i = 0; i < code.length; i += 1) {
-      seed = (seed * 31 + code.charCodeAt(i)) >>> 0;
+    for (let i = 8; i < size - 8; i += 1) {
+      setFn(6, i, i % 2 === 0);
+      setFn(i, 6, i % 2 === 0);
     }
 
-    function isFinder(r, c) {
-      const inTopLeft = r < 7 && c < 7;
-      const inTopRight = r < 7 && c >= size - 7;
-      const inBottomLeft = r >= size - 7 && c < 7;
-      return inTopLeft || inTopRight || inBottomLeft;
+    for (let i = 0; i <= 8; i += 1) {
+      if (!func[8][i]) setFn(8, i, 0);
+      if (!func[i][8]) setFn(i, 8, 0);
+    }
+    for (let i = size - 8; i < size; i += 1) {
+      if (!func[8][i]) setFn(8, i, 0);
+    }
+    for (let i = size - 7; i < size; i += 1) {
+      if (!func[i][8]) setFn(i, 8, 0);
+    }
+    setFn(4 * ver + 9, 8, 1); // módulo oscuro fijo
+
+    // Ubica flujo de bits en zigzag de abajo-derecha hacia arriba-izquierda
+    let bi = 0;
+    let up = true;
+    for (let col = size - 1; col > 0; col -= 2) {
+      if (col === 6) col -= 1;
+      for (let step = 0; step < size; step += 1) {
+        const r = up ? size - 1 - step : step;
+        for (let off = 0; off < 2; off += 1) {
+          const c = col - off;
+          if (!func[r][c]) {
+            base[r][c] = stream[bi] || 0;
+            bi += 1;
+          }
+        }
+      }
+      up = !up;
     }
 
-    function finderFilled(r, c) {
-      const lr = r < 7 ? r : r - (size - 7);
-      const lc = c < 7 ? c : c - (size - 7);
-      if (lr === 0 || lr === 6 || lc === 0 || lc === 6) return true;
-      if (lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4) return true;
-      return false;
+    const maskPredicates = [
+      (r, c) => (r + c) % 2 === 0,
+      (r) => r % 2 === 0,
+      (_, c) => c % 3 === 0,
+      (r, c) => (r + c) % 3 === 0,
+      (r, c) => (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0,
+      (r, c) => ((r * c) % 2) + ((r * c) % 3) === 0,
+      (r, c) => (((r * c) % 2) + ((r * c) % 3)) % 2 === 0,
+      (r, c) => (((r + c) % 2) + ((r * c) % 3)) % 2 === 0
+    ];
+
+    const writeFormat = (grid, fmtBits) => {
+      const copy1 = [
+        [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
+        [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
+      ];
+      for (let i = 0; i < 15; i += 1) {
+        const bit = (fmtBits >> (14 - i)) & 1;
+        const [r1, c1] = copy1[i];
+        grid[r1][c1] = bit;
+        if (i < 7) {
+          grid[size - 1 - i][8] = bit;
+        } else {
+          grid[8][size - 15 + i] = bit;
+        }
+      }
+    };
+
+    const penaltyScore = (grid) => {
+      let score = 0;
+      let darkCount = 0;
+      for (let r = 0; r < size; r += 1) {
+        let rowRun = 1;
+        let colRun = 1;
+        for (let c = 0; c < size; c += 1) {
+          if (grid[r][c]) darkCount += 1;
+          if (c > 0) {
+            if (grid[r][c] === grid[r][c - 1]) rowRun += 1;
+            else {
+              if (rowRun >= 5) score += rowRun - 2;
+              rowRun = 1;
+            }
+            if (grid[c][r] === grid[c - 1][r]) colRun += 1;
+            else {
+              if (colRun >= 5) score += colRun - 2;
+              colRun = 1;
+            }
+          }
+          if (r > 0 && c > 0 && grid[r][c] === grid[r - 1][c] && grid[r][c] === grid[r][c - 1] && grid[r][c] === grid[r - 1][c - 1]) {
+            score += 3;
+          }
+        }
+        if (rowRun >= 5) score += rowRun - 2;
+        if (colRun >= 5) score += colRun - 2;
+      }
+      const darkPct = (darkCount * 100) / (size * size);
+      score += Math.floor(Math.abs(darkPct - 50) / 5) * 10;
+      return score;
+    };
+
+    let bestGrid = null;
+    let bestScore = Infinity;
+    for (let m = 0; m < 8; m += 1) {
+      const pred = maskPredicates[m];
+      const masked = base.map((row, r) => row.map((v, c) => (func[r][c] ? v : v ^ (pred(r, c) ? 1 : 0))));
+      writeFormat(masked, QR_FORMAT_M[m]);
+      const sc = penaltyScore(masked);
+      if (sc < bestScore) {
+        bestScore = sc;
+        bestGrid = masked;
+      }
     }
+    return bestGrid;
+  }
+
+  /**
+   * Genera un código QR ISO/IEC 18004 escaneable en nodo SVG puro (DOM explícito).
+   */
+  function buildDynamicQrSvg(code) {
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const matrix = encodeIsoQrMatrix(code);
+    const size = matrix ? matrix.length : 21;
+    const quietZone = 2;
+    const total = size + quietZone * 2;
 
     const svg = document.createElementNS(svgNs, 'svg');
     svg.setAttribute('width', '148');
     svg.setAttribute('height', '148');
     svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
     svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', `Código QR ${code}`);
+    svg.setAttribute('aria-label', `Código QR verificable ${code}`);
 
     const bg = document.createElementNS(svgNs, 'rect');
     bg.setAttribute('width', String(total));
@@ -696,27 +838,19 @@
     bg.setAttribute('fill', '#FFFFFF');
     svg.appendChild(bg);
 
+    let pathData = '';
     for (let r = 0; r < size; r += 1) {
       for (let c = 0; c < size; c += 1) {
-        let dark = false;
-        if (isFinder(r, c)) {
-          dark = finderFilled(r, c);
-        } else {
-          seed = (seed * 1664525 + 1013904223) >>> 0;
-          dark = (seed & 3) !== 0;
-        }
-        if (dark) {
-          const rect = document.createElementNS(svgNs, 'rect');
-          rect.setAttribute('x', String(margin + c * cell));
-          rect.setAttribute('y', String(margin + r * cell));
-          rect.setAttribute('width', String(cell));
-          rect.setAttribute('height', String(cell));
-          rect.setAttribute('fill', '#0A2540');
-          svg.appendChild(rect);
+        if (matrix && matrix[r][c]) {
+          pathData += `M${c + quietZone},${r + quietZone}h1v1h-1z`;
         }
       }
     }
 
+    const path = document.createElementNS(svgNs, 'path');
+    path.setAttribute('d', pathData);
+    path.setAttribute('fill', '#0A2540');
+    svg.appendChild(path);
     return svg;
   }
 
@@ -2191,13 +2325,6 @@
       if (pdfSector) pdfSector.textContent = `Atención finalizada · Sector: ${state.sector} (${finishedProcedure})`;
       if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
       if (pdfQr) pdfQr.replaceChildren(qrSvgNode.cloneNode(true));
-
-      ensureQrLibrary().then((loaded) => {
-        if (!loaded || state.lastReceiptCode !== code) return;
-        const verifiedQr = buildDynamicQrSvg(code);
-        if (qrBox) qrBox.replaceChildren(verifiedQr);
-        if (pdfQr) pdfQr.replaceChildren(verifiedQr.cloneNode(true));
-      });
 
       // Precargar el código generado en el verificador web para prueba inmediata
       const verifierInput = document.getElementById('verifier-code-input');

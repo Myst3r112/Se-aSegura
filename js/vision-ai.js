@@ -247,8 +247,14 @@
       id = 'letra_w';
     } else if (I && M && !R && !K) {
       const tipGapIM = rel(8, 12);
-      const pipGapIM = rel(6, 10);
-      if (tipGapIM < pipGapIM * 0.88 || tipGapIM < 0.16) {
+      // Producto punto lateral (5->9 vs 8->12) para detectar cruce real en R frente a U paralela
+      const latDot =
+        ((W[9].x - W[5].x) * (W[12].x - W[8].x) +
+          (W[9].y - W[5].y) * (W[12].y - W[8].y) +
+          ((W[9].z || 0) - (W[5].z || 0)) * ((W[12].z || 0) - (W[8].z || 0))) /
+        (palmW * palmW);
+      const zCross = Math.abs((W[8].z || 0) - (W[12].z || 0)) / palmW > 0.14 && tipGapIM < 0.22;
+      if (latDot <= 0 || zCross) {
         id = 'letra_r';
       } else if (tipGapIM >= 0.28 && thumbToMiddlePip < 0.50 && thumbToMiddleMcp < 0.56) {
         id = 'letra_k';
@@ -261,7 +267,7 @@
       const lAngle = angleDeg(W[4], W[2], W[5]);
       if (thumbSpread && lAngle >= 45 && thumbToIndexMcp > 0.70) {
         id = 'letra_l';
-      } else if (rel(4, 12) < 0.42 && rel(4, 16) < 0.52 && !thumbSpread) {
+      } else if (midInfo.reachTip >= 1.04 && rel(4, 12) < 0.42 && rel(4, 16) < 0.54 && !thumbSpread) {
         id = 'letra_d';
       } else {
         id = 'indice';
@@ -282,11 +288,11 @@
         id = 'letra_o';
       } else if (
         pinchThumbIndex >= 0.42 &&
-        pinchThumbIndex <= 1.28 &&
+        pinchThumbIndex <= 1.35 &&
         idxInfo.reachTip > 1.12 &&
         midInfo.reachTip > 1.12 &&
         rel(8, 12) < 0.46 &&
-        thumbToIndexMcp > 0.54
+        rel(4, 0) > 1.02
       ) {
         id = 'letra_c';
       } else if (

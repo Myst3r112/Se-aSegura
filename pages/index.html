@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=10">
-  <script src="../js/main.js?v=10" defer></script>
-  <script src="../js/vision-ai.js?v=10" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=11">
+  <script src="../js/main.js?v=11" defer></script>
+  <script src="../js/vision-ai.js?v=11" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -565,8 +565,10 @@
                   </div>
 
                   <div class="vision-simulation" id="vision-simulation" hidden>
-                    <p class="vision-simulation-title" id="vision-simulation-title">Señas de prueba (sin cámara)</p>
+                    <p class="vision-simulation-title" id="vision-simulation-title">Señas rápidas de ventanilla (sin cámara)</p>
                     <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
+                    <p class="vision-simulation-subtitle" id="vision-letters-title">Deletreo LSP (16 letras A–Y)</p>
+                    <div class="vision-letters-bar" id="vision-letters-bar" role="group" aria-labelledby="vision-letters-title"></div>
                   </div>
 
                   <div class="vision-output" id="vision-output">
@@ -580,7 +582,7 @@
 
                     <div class="vision-stability">
                       <div class="vision-stability-head">
-                        <span id="vision-progress-label">Estabilidad de la seña (350 ms)</span>
+                        <span id="vision-progress-label">Estabilidad de la seña (320 ms)</span>
                         <span id="vision-progress-value">0%</span>
                       </div>
                       <div class="vision-progress" id="vision-progress" role="progressbar" aria-labelledby="vision-progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
@@ -652,7 +654,7 @@
                   </p>
                   <ul class="textmode-tips">
                     <li>Toca una plantilla rápida para responder en un clic.</li>
-                    <li>Edita o copia tu DNI y monto antes de confirmar.</li>
+                    <li>Edita o copia tu DNI y verifica el monto antes de confirmar.</li>
                   </ul>
                   <div class="textmode-switch-actions">
                     <button type="button" class="btn btn-primary" data-switch-channel="lsp">
@@ -1307,10 +1309,14 @@
           </div>
 
           <div class="form-consent">
-            <label class="checkbox-label">
+            <div class="checkbox-label">
               <input type="checkbox" id="field-consent" name="consent" required aria-describedby="err-consent">
-              <span>He leído y acepto la Política de Privacidad y el tratamiento de mis datos para coordinar la demo. *</span>
-            </label>
+              <span class="checkbox-text">
+                <label for="field-consent">He leído y acepto la </label>
+                <button type="button" class="link-inline-btn" id="btn-demo-privacy">Política de Privacidad</button>
+                <label for="field-consent"> y el tratamiento de mis datos para coordinar la demo. *</label>
+              </span>
+            </div>
             <span class="field-error" id="err-consent" role="alert"></span>
           </div>
 
@@ -1577,10 +1583,16 @@
         <p>Los datos de contacto se utilizan para coordinar una demostración institucional. Ley N.° 29733.</p>
       </div>
 
-      <button type="button" class="btn btn-primary" data-close-modal="modal-privacy">
-        <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
-        <span>Cerrar privacidad</span>
-      </button>
+      <div class="modal-actions-row">
+        <button type="button" class="btn btn-primary" data-close-modal="modal-privacy">
+          <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+          <span>Cerrar privacidad</span>
+        </button>
+        <button type="button" class="btn btn-secondary" id="btn-print-privacy">
+          <img src="../assets/icons/download.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+          <span>Imprimir / Guardar PDF</span>
+        </button>
+      </div>
     </div>
   </dialog>
 

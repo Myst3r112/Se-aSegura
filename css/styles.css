@@ -1303,6 +1303,7 @@ html[data-contrast="high"] .btn-emergency-exit:hover {
 .crisis-card.is-selected {
   background-color: var(--color-emergency);
   color: #FFFFFF;
+  box-shadow: 0 0 0 3px var(--color-success);
 }
 
 html[data-contrast="high"] .crisis-card {
@@ -1315,6 +1316,7 @@ html[data-contrast="high"] .crisis-card.is-selected {
   background-color: #D92626;
   color: var(--color-text);
   border-color: var(--color-border);
+  box-shadow: 0 0 0 3px #22C55E;
 }
 
 /* Guía compacta de 3 pasos sobre el simulador */
@@ -2822,6 +2824,30 @@ html[data-contrast="high"] .field-error {
   cursor: pointer;
 }
 
+.checkbox-text {
+  line-height: 1.5;
+}
+
+.checkbox-text label {
+  cursor: pointer;
+}
+
+.link-inline-btn {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+html[data-contrast="high"] .link-inline-btn {
+  color: var(--color-focus);
+}
+
 .checkbox-label input[type="checkbox"] {
   width: 24px;
   height: 24px;
@@ -3670,12 +3696,12 @@ html[data-contrast="high"] .vision-btn.btn-emergency {
   color: var(--color-text);
 }
 
-/* Respaldo: cuadrícula de 9 gestos (1 y 2 manos + dinámicos) */
+/* Respaldo: señas rápidas compactas y teclado alfabético LSP en fila */
 .vision-simulation {
   display: flex;
   flex-direction: column;
-  gap: var(--space-12);
-  padding: var(--space-16);
+  gap: 10px;
+  padding: 12px;
   background-color: var(--color-surface);
   border: 2px dashed var(--color-primary);
   border-radius: var(--radius-12);
@@ -3685,15 +3711,26 @@ html[data-contrast="high"] .vision-simulation {
   border-color: var(--color-border);
 }
 
-.vision-simulation-title {
+.vision-simulation-title,
+.vision-simulation-subtitle {
   margin: 0;
   font-weight: 700;
+  font-size: 0.9375rem;
+}
+
+.vision-simulation-subtitle {
+  margin-top: 4px;
+  color: var(--color-muted);
+}
+
+html[data-contrast="high"] .vision-simulation-subtitle {
+  color: var(--color-text);
 }
 
 .vision-gesture-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
-  gap: var(--space-12);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 172px), 1fr));
+  gap: 8px;
 }
 
 .vision-gesture-btn {
@@ -3701,9 +3738,9 @@ html[data-contrast="high"] .vision-simulation {
   flex-direction: column;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 4px;
-  min-height: 56px;
-  padding: 12px;
+  gap: 2px;
+  min-height: 46px;
+  padding: 8px 10px;
   text-align: left;
   border-radius: var(--radius-12);
   border: 2px solid var(--color-primary);
@@ -3722,18 +3759,38 @@ html[data-contrast="high"] .vision-simulation {
 }
 
 .vision-gesture-emoji {
-  font-size: 1.75rem;
-  line-height: 1.2;
+  font-size: 1.375rem;
+  line-height: 1.15;
 }
 
 .vision-gesture-label {
+  font-size: 0.875rem;
   font-weight: 700;
   color: var(--color-primary);
 }
 
 .vision-gesture-text {
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   color: var(--color-muted);
+}
+
+.vision-letters-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vision-letter-chip {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 10px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 1rem;
+  font-weight: 700;
+  border-radius: var(--radius-8);
 }
 
 html[data-contrast="high"] .vision-gesture-btn {
@@ -3751,7 +3808,8 @@ html[data-contrast="high"] .vision-gesture-btn:hover {
 }
 
 html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-label,
-html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-text {
+html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-text,
+html[data-contrast="high"] .vision-letter-chip:hover {
   color: var(--color-bg);
 }
 
@@ -4029,7 +4087,7 @@ html[data-contrast="high"] .app-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -4123,6 +4181,18 @@ html[data-contrast="high"] .app-workspace {
   gap: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--color-border);
+}
+
+.app-operate-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.btn-change-sector {
+  min-height: 44px;
+  padding: 6px 12px;
 }
 
 .app-channel-switch {
@@ -4398,13 +4468,14 @@ html[data-contrast="high"] .app-bottom-bar {
 
 /* Impresión de Ticket / Constancia */
 @media print {
-  body > *:not(#modal-closure):not(#modal-pdf-preview),
+  body > *:not(#modal-closure):not(#modal-pdf-preview):not(#modal-privacy),
   dialog.app-modal:not([open]) {
     display: none !important;
   }
 
   #modal-closure[open],
-  #modal-pdf-preview[open] {
+  #modal-pdf-preview[open],
+  #modal-privacy[open] {
     position: static;
     width: 100%;
     max-height: none;
@@ -4418,7 +4489,9 @@ html[data-contrast="high"] .app-bottom-bar {
   #modal-closure [data-close-modal],
   #modal-pdf-preview .modal-actions-row,
   #modal-pdf-preview .pdf-demo-note,
-  #modal-pdf-preview [data-close-modal] {
+  #modal-pdf-preview [data-close-modal],
+  #modal-privacy .modal-actions-row,
+  #modal-privacy [data-close-modal] {
     display: none !important;
   }
 }

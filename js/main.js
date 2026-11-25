@@ -860,6 +860,7 @@
     const viewConsola = document.getElementById('sim-view-consola');
     const btnConsoleBack = document.getElementById('btn-console-back');
     const btnAppConsole = document.getElementById('btn-app-console');
+    const btnChangeSector = document.getElementById('btn-change-sector');
     const appWelcome = document.getElementById('app-welcome');
     const appOperate = document.getElementById('app-operate');
     const btnWelcomeEmergency = document.getElementById('btn-welcome-emergency');
@@ -1023,6 +1024,28 @@
 
     if (btnConsoleBack) {
       btnConsoleBack.addEventListener('click', () => switchSimulatorView('ventanilla'));
+    }
+
+    if (btnChangeSector) {
+      btnChangeSector.addEventListener('click', () => {
+        chatEpoch += 1;
+        stopDictation();
+        if (state.connecting) cancelConnecting();
+        state.sessionActive = false;
+        if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
+        closeSensitiveEditForm(false);
+        switchSimulatorView('ventanilla');
+        document.dispatchEvent(new CustomEvent('senasegura:purge'));
+        updateOneTapButton();
+        updateLiveBadge();
+        updateStepsGuide();
+        updateSessionMeta();
+        enterWelcomeScreen();
+        const activeSectorBtn = appWelcome
+          ? appWelcome.querySelector('.pref-chip[data-sim-sector].is-active') || btnOneTap
+          : btnOneTap;
+        if (activeSectorBtn) activeSectorBtn.focus();
+      });
     }
 
     function renderChat() {
@@ -1654,6 +1677,13 @@
     crisisCards.forEach((card) => {
       card.addEventListener('click', () => {
         const crisis = card.dataset.crisis;
+        if (typeof navigator.vibrate === 'function') {
+          try {
+            navigator.vibrate(80);
+          } catch (_) {
+            /* vibración no permitida sin gesto o soporte */
+          }
+        }
         selectEmergencyOption({ crisis });
         appendMessage(
           'Alerta de Crisis',
@@ -2016,6 +2046,7 @@
         state.criticalAccepted = false;
         state.criticalFromConsoleSim = !state.emergencyActive;
         updateCriticalBanner();
+        playEmergencyTone();
         if (btnAcceptCritical) btnAcceptCritical.focus();
       });
     }
@@ -2351,32 +2382,174 @@
     const btnClosePdfPreview = document.getElementById('btn-close-pdf-preview');
     let copyCodeTimer = null;
 
-    function downloadReceiptFile() {
-      const record = receiptRegistry.get(state.lastReceiptCode);
+    const JSPDF_CDN_URL = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js';
+    let jspdfLoadPromise = null;
+    let downloadingReceipt = false;
+
+    function ensureJsPdf() {
+      if (window.jspdf && typeof window.jspdf.jsPDF === 'function') {
+        return Promise.resolve(true);
+      }
+      if (navigator.onLine === false) {
+        return Promise.resolve(false);
+      }
+      if (jspdfLoadPromise) return jspdfLoadPromise;
+
+      jspdfLoadPromise = new Promise((resolve) => {
+        const script = document.createElement('script');
+        script.src = JSPDF_CDN_URL;
+        script.async = true;
+        script.crossOrigin = 'anonymous';
+        script.addEventListener('load', () => {
+          resolve(Boolean(window.jspdf && typeof window.jspdf.jsPDF === 'function'));
+        }, { once: true });
+        script.addEventListener('error', () => {
+          jspdfLoadPromise = null;
+          resolve(false);
+        }, { once: true });
+        document.head.appendChild(script);
+      });
+      return jspdfLoadPromise;
+    }
+
+    function downloadReceiptTxt(code, record) {
       const content = [
         'SEÑASEGURA · CONSTANCIA DE ATENCIÓN ACCESIBLE',
         '==============================================',
-        `Código único : ${record ? record.code : state.lastReceiptCode}`,
-        `Sector       : ${record ? record.sector : state.sector}`,
-        `Trámite      : ${record ? record.procedure : state.procedure}`,
-        `Canal        : ${record ? record.channel : 'Lengua de Señas Peruana'}`,
-        `Estado       : ${record ? record.status : 'Cierre confirmado'}`,
-        `Fecha/Hora   : ${record ? record.timestamp : new Date().toLocaleString('es-PE')}`,
+        `Código único   : ${code}`,
+        `Sector / Sede  : ${record ? record.sector : state.sector}`,
+        `Trámite        : ${record ? record.procedure : state.procedure}`,
+        `Canal          : ${record ? record.channel : 'Lengua de Señas Peruana'}`,
+        'ID Intérprete  : INT-LSP-042',
+        `Estado         : ${record ? record.status : 'Cierre confirmado'}`,
+        `Fecha/Hora     : ${record ? record.timestamp : new Date().toLocaleString('es-PE')}`,
         '----------------------------------------------',
-        'Privacidad   : Sin grabación de video.',
-        'Purga local  : Chat eliminado del dispositivo (Ley N.° 29733).',
-        'Marco legal  : Ley N.° 29535 (Lengua de Señas Peruana).'
+        'Privacidad     : Sin grabación de video.',
+        'Purga local    : Chat eliminado del dispositivo (Ley N.° 29733).',
+        'Marco legal    : Ley N.° 29535 (Lengua de Señas Peruana).'
       ].join('\n');
 
       const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `constancia-${state.lastReceiptCode}.txt`;
+      a.download = `constancia-${code}.txt`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+    }
+
+    async function downloadReceiptFile() {
+      if (downloadingReceipt) return;
+      downloadingReceipt = true;
+      const code = state.lastReceiptCode || 'SEG-84920418';
+      const record = receiptRegistry.get(code);
+
+      try {
+        const pdfReady = await ensureJsPdf();
+        if (pdfReady && window.jspdf && typeof window.jspdf.jsPDF === 'function') {
+          const { jsPDF } = window.jspdf;
+          const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+          doc.setFillColor(10, 37, 64);
+          doc.rect(0, 0, 210, 34, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(18);
+          doc.text('SeñaSegura · Constancia de Atención', 16, 17);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(10);
+          doc.text('Plataforma accesible en Lengua de Señas Peruana (Ley N.° 29535)', 16, 25);
+
+          doc.setTextColor(15, 23, 42);
+          doc.setFillColor(248, 250, 252);
+          doc.setDrawColor(203, 213, 225);
+          doc.roundedRect(16, 44, 178, 22, 3, 3, 'FD');
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(10);
+          doc.text('CÓDIGO ÚNICO DE VERIFICACIÓN', 22, 52);
+          doc.setTextColor(15, 76, 129);
+          doc.setFontSize(18);
+          doc.text(code, 22, 61);
+
+          const sectorVal = record ? record.sector : state.sector;
+          const procVal = record ? record.procedure : state.procedure;
+          const chanVal = record ? record.channel : 'Lengua de Señas Peruana';
+          const statusVal = record ? record.status : 'Cierre confirmado';
+          const timeVal = record ? record.timestamp : new Date().toLocaleString('es-PE');
+
+          doc.setTextColor(15, 23, 42);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(11);
+          const rows = [
+            ['Fecha y hora:', timeVal],
+            ['Sede / Sector:', sectorVal],
+            ['Trámite:', procVal],
+            ['Canal de atención:', chanVal],
+            ['ID de intérprete:', 'INT-LSP-042'],
+            ['Estado de cierre:', statusVal]
+          ];
+          let y = 78;
+          rows.forEach(([k, v]) => {
+            doc.setFont('helvetica', 'bold');
+            doc.text(k, 16, y);
+            doc.setFont('helvetica', 'normal');
+            doc.text(doc.splitTextToSize(String(v), 78), 60, y);
+            y += 10;
+          });
+
+          const qrMatrix = encodeIsoQrMatrix(code);
+          if (qrMatrix) {
+            const qSize = qrMatrix.length;
+            const qrOriginX = 148;
+            const qrOriginY = 74;
+            const modMm = 1.65;
+            const padMm = 3;
+            const boxMm = qSize * modMm + padMm * 2;
+            doc.setFillColor(255, 255, 255);
+            doc.setDrawColor(203, 213, 225);
+            doc.rect(qrOriginX, qrOriginY, boxMm, boxMm, 'FD');
+            doc.setFillColor(10, 37, 64);
+            for (let r = 0; r < qSize; r += 1) {
+              for (let c = 0; c < qSize; c += 1) {
+                if (qrMatrix[r][c]) {
+                  doc.rect(qrOriginX + padMm + c * modMm, qrOriginY + padMm + r * modMm, modMm, modMm, 'F');
+                }
+              }
+            }
+            doc.setTextColor(71, 85, 105);
+            doc.setFontSize(8.5);
+            doc.text('QR verificable (ISO 18004)', qrOriginX, qrOriginY + boxMm + 5);
+          }
+
+          doc.setDrawColor(21, 128, 61);
+          doc.setFillColor(240, 253, 244);
+          doc.roundedRect(16, 146, 178, 28, 3, 3, 'FD');
+          doc.setTextColor(21, 128, 61);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(10);
+          doc.text('PRIVACIDAD Y PROTECCIÓN DE DATOS', 22, 154);
+          doc.setTextColor(15, 23, 42);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9.5);
+          doc.text(
+            'Sin grabación de video ni almacenamiento de chat en el navegador. Purga local aplicada al cierre conforme a la Ley N.° 29733 y la Ley N.° 29535.',
+            22,
+            161,
+            { maxWidth: 166 }
+          );
+
+          doc.save(`constancia-${code}.pdf`);
+          return;
+        }
+      } catch (err) {
+        console.warn('[Constancia PDF]', err);
+      } finally {
+        downloadingReceipt = false;
+      }
+
+      downloadReceiptTxt(code, record);
     }
 
     if (btnDownloadReceipt) {
@@ -2512,9 +2685,8 @@
       }
     }
 
-    form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      let raw = input.value.trim().toUpperCase();
+    function verifyReceiptCode(rawInput) {
+      let raw = String(rawInput || '').trim().toUpperCase();
       if (/^\d{8}$/.test(raw) || raw === '84920') {
         raw = `SEG-${raw}`;
       }
@@ -2571,7 +2743,24 @@
         }
         if (resultFooter) resultFooter.textContent = 'Formato esperado: SEG-XXXXXXXX';
       }
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      verifyReceiptCode(input.value);
     });
+
+    const queryCode = new URLSearchParams(window.location.search).get('verificar');
+    if (queryCode && queryCode.trim()) {
+      let normalizedQuery = queryCode.trim().toUpperCase();
+      if (/^\d{8}$/.test(normalizedQuery) || normalizedQuery === '84920') {
+        normalizedQuery = `SEG-${normalizedQuery}`;
+      }
+      if (receiptRegistry.has(normalizedQuery) || /^SEG-\d{8}$/.test(normalizedQuery)) {
+        input.value = normalizedQuery;
+        verifyReceiptCode(normalizedQuery);
+      }
+    }
   }
 
   /* =========================================================
@@ -2752,6 +2941,8 @@
   function initModals() {
     const openConformity = document.getElementById('btn-open-conformity');
     const openPrivacy = document.getElementById('btn-open-privacy');
+    const openDemoPrivacy = document.getElementById('btn-demo-privacy');
+    const btnPrintPrivacy = document.getElementById('btn-print-privacy');
     const openSupportFloating = document.getElementById('btn-floating-support');
     const openSupportFooter = document.getElementById('btn-footer-support');
 
@@ -2760,6 +2951,17 @@
     }
     if (openPrivacy) {
       openPrivacy.addEventListener('click', () => openDialog('modal-privacy', openPrivacy));
+    }
+    if (openDemoPrivacy) {
+      openDemoPrivacy.addEventListener('click', (e) => {
+        e.preventDefault();
+        openDialog('modal-privacy', openDemoPrivacy);
+      });
+    }
+    if (btnPrintPrivacy) {
+      btnPrintPrivacy.addEventListener('click', () => {
+        window.print();
+      });
     }
     if (openSupportFloating) {
       openSupportFloating.addEventListener('click', () => openDialog('modal-support', openSupportFloating));

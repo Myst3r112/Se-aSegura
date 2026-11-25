@@ -1,14 +1,15 @@
 /**
  * SeñaSegura · Módulo "Cámara IA (LSP)" (Vanilla JS ES6+)
  *
- * - @mediapipe/tasks-vision (FilesetResolver + HandLandmarker) se importa mediante ESM dinámico
- *   SOLO cuando la persona pulsa "Activar Cámara". No existe ningún <script> de IA en el HTML.
+ * - Motor dual resiliente cargado ESTRICTAMENTE bajo demanda al pulsar "Activar Cámara" (0 peticiones
+ *   externas en la carga inicial para mantener Lighthouse intacto):
+ *   · Motor A (principal): @mediapipe/tasks-vision@0.10.14 (FilesetResolver + HandLandmarker GPU/CPU).
+ *   · Motor B (respaldo automático): @mediapipe/hands@0.4.1675469240 si falla ESM/WASM/WebGL/CDN.
  * - Todo el procesamiento de video ocurre en el dispositivo: no se graba ni se envía video.
  * - Motor interno 3D basado en `worldLandmarks`, ángulos entre falanges, distancias normalizadas,
  *   suavizado temporal por mayoría (ventana deslizante) y trayectoria en 18 frames:
  *   señas de ventanilla (1 y 2 manos) + alfabeto dactilológico LSP (A, B, C, D, E, F, I, K, L, O, R, S, U, V, W, Y).
- * - Si no hay cámara, se deniega el permiso o falla el CDN, se activa una cuadrícula de respaldo
- *   con exactamente el mismo flujo de traducción.
+ * - Si no hay cámara, se deniega el permiso o fallan ambos motores, se activa la vista compacta de prueba.
  *
  * Integración con js/main.js mediante:
  *   - window.SenaSegura (puente: setChannel, appendChatMessage, activateEmergency)
@@ -20,11 +21,14 @@
   /* =========================================================
      1. CONSTANTES
      ========================================================= */
-  const TASKS_VISION_VERSION = '0.10.22';
+  const TASKS_VISION_VERSION = '0.10.14';
   const VISION_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/vision_bundle.mjs`;
   const VISION_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/wasm`;
   const HAND_MODEL_URL =
     'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+  const LEGACY_HANDS_BASE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/';
+  const LEGACY_HANDS_SCRIPT_URL = `${LEGACY_HANDS_BASE_URL}hands.js`;
 
   const CONFIRM_MS = 320; // confirmación ágil tras estabilizarse por mayoría
   const CONFIRM_FAST_MS = 210; // saludo activo (palma en movimiento)
@@ -36,6 +40,7 @@
   const VOTE_WINDOW = 6; // ventana deslizante (5-7 frames) para voto por mayoría
   const AUTO_SEND_PAUSE_MS = 2000; // manos abajo este tiempo -> envío y voz automáticos
   const LOAD_TIMEOUT_MS = 25000;
+  const SCRIPT_TIMEOUT_MS = 15000;
 
   const CHAT_SENDER = 'Ciudadano (Cámara IA)';
 
@@ -517,10 +522,11 @@
   });
 
   /* =========================================================
-     3. CARGA DINÁMICA DE @mediapipe/tasks-vision (BAJO DEMANDA)
+     3. CARGA DINÁMICA DE MOTORES DE VISIÓN (BAJO DEMANDA)
      ========================================================= */
   let visionModulePromise = null;
   let loadedHandConnections = HAND_CONNECTIONS_FALLBACK;
+  const scriptPromises = new Map();
 
   function withTimeout(promise, ms) {
     return new Promise((resolve, reject) => {
@@ -536,6 +542,36 @@
         }
       );
     });
+  }
+
+  function loadLegacyScript(src) {
+    if (scriptPromises.has(src)) return scriptPromises.get(src);
+
+    const promise = new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      const timer = setTimeout(() => fail(new Error(`script-timeout: ${src}`)), SCRIPT_TIMEOUT_MS);
+
+      function fail(err) {
+        clearTimeout(timer);
+        el.remove();
+        scriptPromises.delete(src);
+        reject(err);
+      }
+
+      el.src = src;
+      el.async = true;
+      el.crossOrigin = 'anonymous';
+      el.setAttribute('data-vision-src', src);
+      el.onload = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      el.onerror = () => fail(new Error(`script-network: ${src}`));
+      document.head.appendChild(el);
+    });
+
+    scriptPromises.set(src, promise);
+    return promise;
   }
 
   async function loadTasksVision() {
@@ -554,6 +590,16 @@
       loadedHandConnections = mod.HandLandmarker.HAND_CONNECTIONS;
     }
     return mod;
+  }
+
+  async function loadLegacyHandsModule() {
+    await loadLegacyScript(LEGACY_HANDS_SCRIPT_URL);
+    if (typeof window.Hands !== 'function') {
+      throw new Error('legacy-hands-unavailable');
+    }
+    if (Array.isArray(window.HAND_CONNECTIONS)) {
+      loadedHandConnections = window.HAND_CONNECTIONS;
+    }
   }
 
   /* =========================================================
@@ -578,6 +624,7 @@
     const btnEscalate = $('btn-vision-escalate');
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
+    const lettersBar = $('vision-letters-bar');
     const guideList = $('vision-guide-list');
     const sentenceEl = $('vision-sentence');
     const lastDetectEl = $('vision-last-detect');
@@ -605,12 +652,14 @@
     let mode = 'idle'; // idle | loading | live | simulation
     let sessionToken = 0;
     let stream = null;
-    let handLandmarker = null;
-    let landmarkerPromise = null;
+    let visionEngine = null; // { type: 'tasks', landmarker } | { type: 'legacy', hands }
+    let enginePromise = null;
     let running = false;
     let rafId = 0;
+    let isLegacyProcessing = false;
     let lastVideoTime = -1;
     let lastSendAt = 0;
+    let lastDetectTs = 0;
     let lastConfirmed = null;
     let lastProgressPct = -1;
     let handsDownSince = null;
@@ -736,6 +785,7 @@
     function stopCamera({ keepStatus = false } = {}) {
       sessionToken += 1;
       running = false;
+      isLegacyProcessing = false;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
       releaseStream();
@@ -753,96 +803,172 @@
       resetOutput();
     }
 
-    function openCamera() {
+    async function openCamera() {
       if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
         const err = new Error('unsupported');
         err.name = 'UnsupportedError';
-        return Promise.reject(err);
+        throw err;
       }
-      return navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: { ideal: 16 / 9 } },
-        audio: false
-      });
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+      } catch (err) {
+        const retryable =
+          err &&
+          (err.name === 'OverconstrainedError' ||
+            err.name === 'ConstraintNotSatisfiedError' ||
+            err.name === 'NotFoundError' ||
+            err.name === 'DevicesNotFoundError');
+        if (retryable) {
+          console.warn('[Cámara IA]', err);
+          return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+        throw err;
+      }
     }
 
     function cameraErrorMessage(err) {
+      if (window.location.protocol === 'file:' || (!window.isSecureContext && err && err.name === 'UnsupportedError')) {
+        return 'No se puede usar la cámara desde archivo local (file://). Abre SeñaSegura mediante HTTPS o localhost.';
+      }
       switch (err && err.name) {
         case 'NotAllowedError':
         case 'PermissionDeniedError':
         case 'SecurityError':
-          return 'Se denegó el permiso de cámara.';
+          return 'Permiso de cámara denegado. Habilita el acceso a la cámara en tu navegador.';
         case 'NotFoundError':
         case 'DevicesNotFoundError':
         case 'OverconstrainedError':
-          return 'No se encontró una cámara disponible en este dispositivo.';
+        case 'ConstraintNotSatisfiedError':
+          return 'No se encontró una cámara disponible o compatible en este dispositivo.';
         case 'NotReadableError':
         case 'TrackStartError':
         case 'AbortError':
           return 'La cámara está en uso por otra aplicación o no responde.';
         case 'UnsupportedError':
-          return 'Este navegador o conexión no permite usar la cámara (se requiere HTTPS o localhost).';
+          return 'Este navegador o protocolo no permite usar la cámara (se requiere HTTPS o localhost).';
         default:
           return 'No se pudo iniciar la cámara.';
       }
     }
 
-    function modelErrorMessage() {
-      return navigator.onLine === false
-        ? 'Sin conexión a internet: no se pudo descargar el modelo de visión.'
-        : 'No se pudo descargar el modelo de visión. Revisa tu conexión.';
+    function modelErrorMessage(err) {
+      if (navigator.onLine === false) {
+        return 'Sin conexión a internet (red): no se pudo descargar el modelo de visión.';
+      }
+      if (window.location.protocol === 'file:') {
+        return 'Protocolo file:// bloquea el motor de IA. Sirve el proyecto en HTTPS o localhost.';
+      }
+      if (err && String(err.message || '').includes('timeout')) {
+        return 'Tiempo de espera agotado al descargar el modelo de visión por red lenta.';
+      }
+      return 'No se pudo inicializar el modelo de visión por red o navegador.';
     }
 
-    function getHandLandmarker() {
-      if (landmarkerPromise) return landmarkerPromise;
-      landmarkerPromise = (async () => {
-        const { FilesetResolver, HandLandmarker } = await loadTasksVision();
-        const vision = await withTimeout(FilesetResolver.forVisionTasks(VISION_WASM_URL), LOAD_TIMEOUT_MS);
-        const options = {
-          baseOptions: {
-            modelAssetPath: HAND_MODEL_URL,
-            delegate: 'GPU'
-          },
-          runningMode: 'VIDEO',
-          numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5
-        };
+    async function createTasksEngine() {
+      const { FilesetResolver, HandLandmarker } = await loadTasksVision();
+      const vision = await withTimeout(FilesetResolver.forVisionTasks(VISION_WASM_URL), LOAD_TIMEOUT_MS);
+      const options = {
+        baseOptions: {
+          modelAssetPath: HAND_MODEL_URL,
+          delegate: 'GPU'
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      };
 
-        try {
-          return await withTimeout(HandLandmarker.createFromOptions(vision, options), LOAD_TIMEOUT_MS);
-        } catch (_) {
-          // Respaldo automático a CPU si WebGL/GPU no está disponible en el dispositivo
-          return withTimeout(
-            HandLandmarker.createFromOptions(vision, {
-              ...options,
-              baseOptions: { ...options.baseOptions, delegate: 'CPU' }
-            }),
-            LOAD_TIMEOUT_MS
-          );
-        }
-      })().catch((err) => {
-        landmarkerPromise = null; // permite reintentar
-        throw err;
+      try {
+        const landmarker = await withTimeout(HandLandmarker.createFromOptions(vision, options), LOAD_TIMEOUT_MS);
+        return { type: 'tasks', landmarker };
+      } catch (gpuErr) {
+        console.warn('[Cámara IA]', gpuErr);
+        const landmarker = await withTimeout(
+          HandLandmarker.createFromOptions(vision, {
+            ...options,
+            baseOptions: { ...options.baseOptions, delegate: 'CPU' }
+          }),
+          LOAD_TIMEOUT_MS
+        );
+        return { type: 'tasks', landmarker };
+      }
+    }
+
+    async function createLegacyEngine() {
+      await loadLegacyHandsModule();
+      const instance = new window.Hands({
+        locateFile: (file) => LEGACY_HANDS_BASE_URL + file
       });
-      return landmarkerPromise;
+      const lowPower =
+        window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
+      instance.setOptions({
+        maxNumHands: 2,
+        modelComplexity: lowPower ? 0 : 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      instance.onResults((legacyRes) => {
+        if (!running || !legacyRes) return;
+        const adapted = {
+          landmarks: Array.isArray(legacyRes.multiHandLandmarks) ? legacyRes.multiHandLandmarks : [],
+          worldLandmarks: [],
+          handedness: Array.isArray(legacyRes.multiHandedness)
+            ? legacyRes.multiHandedness.map((entry) => [entry])
+            : []
+        };
+        handleResults(adapted, performance.now());
+      });
+      await withTimeout(instance.initialize(), LOAD_TIMEOUT_MS);
+      return { type: 'legacy', hands: instance };
+    }
+
+    function getVisionEngine() {
+      if (enginePromise) return enginePromise;
+      if (navigator.onLine === false) {
+        return Promise.reject(new Error('offline'));
+      }
+      enginePromise = createTasksEngine()
+        .catch((tasksErr) => {
+          console.warn('[Cámara IA]', tasksErr);
+          return createLegacyEngine();
+        })
+        .catch((fallbackErr) => {
+          console.warn('[Cámara IA]', fallbackErr);
+          enginePromise = null;
+          throw fallbackErr;
+        });
+      return enginePromise;
     }
 
     function waitForVideoReady() {
       return new Promise((resolve, reject) => {
-        if (video.readyState >= 2 && video.videoWidth) {
+        if (video.readyState >= 1 && video.videoWidth > 0) {
           resolve();
           return;
         }
+        const events = ['loadedmetadata', 'loadeddata', 'canplay'];
+        let settled = false;
+        const cleanup = () => {
+          events.forEach((ev) => video.removeEventListener(ev, onReady));
+        };
         const timer = setTimeout(() => {
-          video.removeEventListener('loadeddata', onReady);
+          if (settled) return;
+          settled = true;
+          cleanup();
           reject(new Error('video-timeout'));
         }, 8000);
         function onReady() {
+          if (settled || !video.videoWidth) return;
+          settled = true;
           clearTimeout(timer);
+          cleanup();
           resolve();
         }
-        video.addEventListener('loadeddata', onReady, { once: true });
+        events.forEach((ev) => video.addEventListener(ev, onReady));
       });
     }
 
@@ -863,8 +989,8 @@
       setStatus('loading');
       btnStart.focus();
 
-      // Permiso de cámara y descarga bajo demanda del modelo 3D en paralelo
-      const [camResult, libResult] = await Promise.allSettled([openCamera(), getHandLandmarker()]);
+      // Permiso de cámara y descarga bajo demanda del motor dual en paralelo
+      const [camResult, libResult] = await Promise.allSettled([openCamera(), getVisionEngine()]);
 
       if (token !== sessionToken) {
         if (camResult.status === 'fulfilled') {
@@ -874,23 +1000,29 @@
       }
 
       if (camResult.status === 'rejected') {
+        console.warn('[Cámara IA]', camResult.reason);
         enterSimulation(`${cameraErrorMessage(camResult.reason)} Usa la prueba sin cámara para continuar.`);
         return;
       }
       stream = camResult.value;
 
       if (libResult.status === 'rejected') {
-        enterSimulation(`${modelErrorMessage()} Usa la prueba sin cámara para continuar.`);
+        console.warn('[Cámara IA]', libResult.reason);
+        enterSimulation(`${modelErrorMessage(libResult.reason)} Usa la prueba sin cámara para continuar.`);
         return;
       }
-      handLandmarker = libResult.value;
+      visionEngine = libResult.value;
 
       try {
         video.srcObject = stream;
         video.muted = true;
-        const playPromise = video.play();
-        if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
-        await waitForVideoReady();
+        video.playsInline = true;
+        video.setAttribute('playsinline', '');
+        const readyPromise = waitForVideoReady();
+        await video.play().catch((playErr) => {
+          console.warn('[Cámara IA]', playErr);
+        });
+        await readyPromise;
         if (token !== sessionToken) return;
 
         const vw = video.videoWidth || 1280;
@@ -899,19 +1031,21 @@
         canvas.height = vh;
         if (stage) stage.style.aspectRatio = `${vw} / ${vh}`;
         running = true;
+        isLegacyProcessing = false;
         lastVideoTime = -1;
         lastSendAt = 0;
         setStatus('live');
         rafId = requestAnimationFrame(loop);
-      } catch (_) {
+      } catch (err) {
+        console.warn('[Cámara IA]', err);
         if (token !== sessionToken) return;
         enterSimulation('No se pudo mostrar el video de la cámara. Usa la prueba sin cámara para continuar.');
       }
     }
 
-    /** Bucle con requestAnimationFrame llamando detectForVideo(video, now). */
+    /** Bucle resiliente para Motor A (detectForVideo con timestamp entero creciente) y Motor B. */
     function loop() {
-      if (!running || !handLandmarker) return;
+      if (!running || !visionEngine) return;
       rafId = requestAnimationFrame(loop);
       if (video.readyState < 2 || video.paused || video.ended) return;
 
@@ -921,13 +1055,31 @@
       lastVideoTime = video.currentTime;
       lastSendAt = now;
 
-      try {
-        const results = handLandmarker.detectForVideo(video, now);
-        handleResults(results, now);
-      } catch (_) {
-        if (running) {
-          enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+      if (visionEngine.type === 'tasks') {
+        try {
+          const ts = Math.max(lastDetectTs + 1, Math.round(now));
+          lastDetectTs = ts;
+          const results = visionEngine.landmarker.detectForVideo(video, ts);
+          handleResults(results, ts);
+        } catch (err) {
+          console.warn('[Cámara IA]', err);
+          if (running) {
+            enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+          }
         }
+      } else if (visionEngine.type === 'legacy' && !isLegacyProcessing) {
+        isLegacyProcessing = true;
+        visionEngine.hands
+          .send({ image: video })
+          .catch((err) => {
+            console.warn('[Cámara IA]', err);
+            if (running) {
+              enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+            }
+          })
+          .then(() => {
+            isLegacyProcessing = false;
+          });
       }
     }
 
@@ -1202,28 +1354,37 @@
       }
     }
 
-    /* ---------- Cuadrícula de respaldo y guía (única fuente: GESTURES) ---------- */
+    /* ---------- Cuadrícula compacta (ventanilla + teclado A–Y) y guía (única fuente: GESTURES) ---------- */
     GESTURES.forEach((gesture) => {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = `vision-gesture-btn${gesture.urgent ? ' is-urgent' : ''}`;
       btn.setAttribute('data-gesture', gesture.id);
 
-      const emoji = document.createElement('span');
-      emoji.className = 'vision-gesture-emoji';
-      emoji.setAttribute('aria-hidden', 'true');
-      emoji.textContent = gesture.emoji;
+      if (gesture.kind === 'letter' && lettersBar) {
+        btn.className = 'vision-gesture-btn vision-letter-chip';
+        btn.setAttribute('aria-label', gesture.label);
+        btn.title = `${gesture.label}: ${gesture.hint}`;
+        btn.textContent = gesture.letter;
+        lettersBar.appendChild(btn);
+      } else {
+        btn.className = `vision-gesture-btn${gesture.urgent ? ' is-urgent' : ''}`;
 
-      const label = document.createElement('span');
-      label.className = 'vision-gesture-label';
-      label.textContent = gesture.label;
+        const emoji = document.createElement('span');
+        emoji.className = 'vision-gesture-emoji';
+        emoji.setAttribute('aria-hidden', 'true');
+        emoji.textContent = gesture.emoji;
 
-      const text = document.createElement('span');
-      text.className = 'vision-gesture-text';
-      text.textContent = gesture.kind === 'letter' ? `Añade “${gesture.letter}”` : gesture.phrase;
+        const label = document.createElement('span');
+        label.className = 'vision-gesture-label';
+        label.textContent = gesture.label;
 
-      btn.append(emoji, label, text);
-      simGrid.appendChild(btn);
+        const text = document.createElement('span');
+        text.className = 'vision-gesture-text';
+        text.textContent = gesture.kind === 'letter' ? `Añade “${gesture.letter}”` : gesture.phrase;
+
+        btn.append(emoji, label, text);
+        simGrid.appendChild(btn);
+      }
 
       if (guideList) {
         const li = document.createElement('li');
@@ -1246,7 +1407,7 @@
     });
 
     /* ---------- Eventos ---------- */
-    simGrid.addEventListener('click', (e) => {
+    (simBox || simGrid).addEventListener('click', (e) => {
       const btn = e.target.closest('.vision-gesture-btn[data-gesture]');
       if (!btn) return;
       const confidence = Math.round(90 + Math.random() * 8);
@@ -1310,15 +1471,21 @@
     const releaseOnExit = () => {
       stopCamera({ keepStatus: true });
       cancelSpeech();
-      if (handLandmarker && typeof handLandmarker.close === 'function') {
+      if (visionEngine && visionEngine.landmarker && typeof visionEngine.landmarker.close === 'function') {
         try {
-          handLandmarker.close();
+          visionEngine.landmarker.close();
         } catch (_) {
           /* instancia ya liberada */
         }
-        handLandmarker = null;
-        landmarkerPromise = null;
+      } else if (visionEngine && visionEngine.hands && typeof visionEngine.hands.close === 'function') {
+        try {
+          visionEngine.hands.close();
+        } catch (_) {
+          /* instancia ya liberada */
+        }
       }
+      visionEngine = null;
+      enginePromise = null;
     };
     window.addEventListener('beforeunload', releaseOnExit);
     window.addEventListener('pagehide', releaseOnExit);

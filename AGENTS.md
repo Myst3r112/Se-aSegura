@@ -12,7 +12,7 @@ Toda persona o agente que modifique este repositorio debe cumplir obligatoriamen
 - Cargar los scripts locales exclusivamente en `<head>` usando `defer` y respetando el orden:
   1. `<script src="../js/main.js?v=N" defer></script>`
   2. `<script src="../js/vision-ai.js?v=N" defer></script>`
-- **Carga bajo demanda obligatoria:** librerías externas pesadas de IA/visión (como `@mediapipe/tasks-vision` para `HandLandmarker`) **NUNCA** deben agregarse como `<script>` en HTML ni cargarse al iniciar la página; solo pueden importarse dinámicamente cuando el usuario activa *"Activar Cámara"* en `js/vision-ai.js`. Los códigos QR de cierre se generan localmente con codificación ISO/IEC 18004 en SVG puro sin llamadas de red.
+- **Carga bajo demanda obligatoria:** librerías externas pesadas de IA/visión (`@mediapipe/tasks-vision` para `HandLandmarker`, `PoseLandmarker` y `FaceLandmarker`, además de `jspdf`) **NUNCA** deben agregarse como `<script>` en HTML ni cargarse al iniciar la página; solo pueden importarse dinámicamente bajo demanda al activar *"Activar Cámara"* o al descargar la constancia PDF. Los códigos QR de cierre se generan localmente con codificación ISO/IEC 18004 (V1–V6 Nivel M para URL `?verificar=`) en SVG puro sin llamadas de red.
 - Mantener `<link rel="preload">` para las fuentes locales `woff2`, `fetchpriority="high"` únicamente en la imagen principal del Hero y `loading="lazy" decoding="async"` en las imágenes debajo del pliegue y modales.
 
 ## 3. Seguridad Frontend y Manipulación del DOM
@@ -21,7 +21,7 @@ Toda persona o agente que modifique este repositorio debe cumplir obligatoriamen
 
 ## 4. Calidad de Código, UX (Heurísticas Nielsen) y Control de Recursos
 - Aplicar principio **DRY**: mantener una única fuente de verdad para catálogos/gestos (p. ej. `GESTURES` en `js/vision-ai.js`, `SIM_SECTORS` en `js/main.js`) y reutilizar utilidades existentes como `bindTablistArrows()` y `closeDialog()`.
-- Separar funciones puras del acceso al DOM (`classifyHand`, `resolveMultiHandGesture`, `detectHorizontalOscillation`, `composeSentence`) manteniendo una interfaz mínima (H8, sin selectores técnicos ni entrenamiento en vivo para el usuario final).
+- Separar funciones puras del acceso al DOM (`classifyHand`, `resolveMultiHandGesture`, `computePalmOrientation3D`, `computeSpatialContext`, `analyzeNonManualExpressions`, `analyzeTrajectory3D`, `majorityVoteGesture`, `composeSentence`) manteniendo una interfaz mínima (H8, sin selectores técnicos ni entrenamiento en vivo para el usuario final).
 - Preservar claridad de roles (H2: *DNI del ciudadano* editable por el ciudadano en Ventanilla; *Monto / Operación* estrictamente de solo lectura en la vista ciudadana y editable únicamente desde la **Consola del Intérprete / Personal**) y visibilidad de estado (H1: subtítulo en vivo `#sim-interpreter-caption`).
 - Liberar obligatoriamente recursos temporales al cambiar contexto, salir o purgar sesión: cancelar `setTimeout`/`setInterval` (usando tokens/épocas para evitar respuestas tardías en el chat), detener pistas `MediaStream` de cámara, cancelar `speechSynthesis` y cerrar instancias de `AudioContext` tras emitir alertas.
 - Mantener cero errores/advertencias en consola y eliminar cualquier regla CSS o código JS muerto.

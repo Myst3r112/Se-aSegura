@@ -630,18 +630,48 @@
     return msg.slice(data.length);
   }
 
+  const QR_VERSIONS_M = [
+    { ver: 1, size: 21, maxBytes: 14, totalData: 16, ecPerBlock: 10, blocks: [16], align: [], rem: 0 },
+    { ver: 2, size: 25, maxBytes: 26, totalData: 28, ecPerBlock: 16, blocks: [28], align: [6, 18], rem: 7 },
+    { ver: 3, size: 29, maxBytes: 42, totalData: 44, ecPerBlock: 26, blocks: [44], align: [6, 22], rem: 7 },
+    { ver: 4, size: 33, maxBytes: 62, totalData: 64, ecPerBlock: 18, blocks: [32, 32], align: [6, 26], rem: 7 },
+    { ver: 5, size: 37, maxBytes: 84, totalData: 86, ecPerBlock: 24, blocks: [43, 43], align: [6, 30], rem: 7 },
+    { ver: 6, size: 41, maxBytes: 106, totalData: 108, ecPerBlock: 16, blocks: [27, 27, 27, 27], align: [6, 34], rem: 7 }
+  ];
+
+  function encodeUtf8Bytes(text) {
+    if (typeof TextEncoder === 'function') {
+      return Array.from(new TextEncoder().encode(String(text)));
+    }
+    return Array.from(String(text)).map((ch) => ch.charCodeAt(0) & 0xff);
+  }
+
   /**
-   * Codifica un texto breve (<=26 bytes) en una matriz QR ISO/IEC 18004 (V1/V2 Nivel M).
+   * Construye la URL de verificación directa para el QR del comprobante.
+   * Garantiza compatibilidad <=106 bytes (QR V1–V6 Nivel M).
+   */
+  function buildReceiptVerifyUrl(code) {
+    const querySuffix = `?verificar=${encodeURIComponent(code)}#marco-legal`;
+    try {
+      const fullUrl = new URL(`index.html${querySuffix}`, window.location.href).href;
+      if (encodeUtf8Bytes(fullUrl).length <= 106) return fullUrl;
+    } catch (_) {
+      /* URL relativa de respaldo en contextos no estándar */
+    }
+    const shortUrl = `pages/index.html${querySuffix}`;
+    return encodeUtf8Bytes(shortUrl).length <= 106 ? shortUrl : code;
+  }
+
+  /**
+   * Codifica texto o URL (<=106 bytes UTF-8) en matriz QR ISO/IEC 18004 (V1–V6 Nivel M).
    * Cero dependencias externas y cero errores en redes offline o restringidas.
    */
   function encodeIsoQrMatrix(text) {
-    const raw = Array.from(String(text)).map((ch) => ch.charCodeAt(0) & 0xff);
-    if (raw.length > 26) return null;
+    const raw = encodeUtf8Bytes(text);
+    const spec = QR_VERSIONS_M.find((v) => raw.length <= v.maxBytes);
+    if (!spec) return null;
 
-    const ver = raw.length <= 14 ? 1 : 2;
-    const size = 17 + 4 * ver;
-    const dataLen = ver === 1 ? 16 : 28;
-    const ecLen = ver === 1 ? 10 : 16;
+    const { ver, size, totalData: dataLen, ecPerBlock: ecLen, blocks, align, rem } = spec;
 
     const bits = [];
     const pushBits = (val, n) => {
@@ -666,12 +696,32 @@
       padIdx += 1;
     }
 
-    const full = codewords.concat(qrRsRemainder(codewords, ecLen));
+    // División en bloques y entrelazado estándar ISO/IEC 18004 (V1–V6)
+    let offset = 0;
+    const dataBlocks = blocks.map((count) => {
+      const slice = codewords.slice(offset, offset + count);
+      offset += count;
+      return slice;
+    });
+    const ecBlocks = dataBlocks.map((blk) => qrRsRemainder(blk, ecLen));
+    const full = [];
+    const maxDataLen = Math.max(...blocks);
+    for (let i = 0; i < maxDataLen; i += 1) {
+      dataBlocks.forEach((blk) => {
+        if (i < blk.length) full.push(blk[i]);
+      });
+    }
+    for (let i = 0; i < ecLen; i += 1) {
+      ecBlocks.forEach((ec) => {
+        if (i < ec.length) full.push(ec[i]);
+      });
+    }
+
     const stream = [];
     full.forEach((byte) => {
       for (let b = 7; b >= 0; b -= 1) stream.push((byte >> b) & 1);
     });
-    const totalDataBits = ver === 1 ? 208 : 359;
+    const totalDataBits = full.length * 8 + rem;
     while (stream.length < totalDataBits) stream.push(0);
 
     const base = Array.from({ length: size }, () => new Uint8Array(size));
@@ -697,10 +747,18 @@
     drawFinder(0, size - 7);
     drawFinder(size - 7, 0);
 
-    if (ver === 2) {
-      for (let dr = -2; dr <= 2; dr += 1) {
-        for (let dc = -2; dc <= 2; dc += 1) {
-          setFn(18 + dr, 18 + dc, Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0));
+    for (let i = 0; i < align.length; i += 1) {
+      for (let j = 0; j < align.length; j += 1) {
+        const ar = align[i];
+        const ac = align[j];
+        const inTopLeft = ar <= 8 && ac <= 8;
+        const inTopRight = ar <= 8 && ac >= size - 9;
+        const inBottomLeft = ar >= size - 9 && ac <= 8;
+        if (inTopLeft || inTopRight || inBottomLeft) continue;
+        for (let dr = -2; dr <= 2; dr += 1) {
+          for (let dc = -2; dc <= 2; dc += 1) {
+            setFn(ar + dr, ac + dc, Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0));
+          }
         }
       }
     }
@@ -818,9 +876,9 @@
   /**
    * Genera un código QR ISO/IEC 18004 escaneable en nodo SVG puro (DOM explícito).
    */
-  function buildDynamicQrSvg(code) {
+  function buildDynamicQrSvg(payload, labelCode = payload) {
     const svgNs = 'http://www.w3.org/2000/svg';
-    const matrix = encodeIsoQrMatrix(code);
+    const matrix = encodeIsoQrMatrix(payload);
     const size = matrix ? matrix.length : 21;
     const quietZone = 2;
     const total = size + quietZone * 2;
@@ -830,7 +888,7 @@
     svg.setAttribute('height', '148');
     svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
     svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', `Código QR verificable ${code}`);
+    svg.setAttribute('aria-label', `Código QR verificable ${labelCode}`);
 
     const bg = document.createElementNS(svgNs, 'rect');
     bg.setAttribute('width', String(total));
@@ -2345,7 +2403,8 @@
       const pdfChannel = document.getElementById('pdf-preview-channel');
       const pdfQr = document.getElementById('pdf-preview-qr');
 
-      const qrSvgNode = buildDynamicQrSvg(code);
+      const verifyUrl = buildReceiptVerifyUrl(code);
+      const qrSvgNode = buildDynamicQrSvg(verifyUrl, code);
       if (codeEl) codeEl.textContent = code;
       if (qrBox) qrBox.replaceChildren(qrSvgNode);
       if (qrCaption) {
@@ -2499,14 +2558,15 @@
             y += 10;
           });
 
-          const qrMatrix = encodeIsoQrMatrix(code);
+          const verifyUrl = buildReceiptVerifyUrl(code);
+          const qrMatrix = encodeIsoQrMatrix(verifyUrl);
           if (qrMatrix) {
             const qSize = qrMatrix.length;
             const qrOriginX = 148;
             const qrOriginY = 74;
-            const modMm = 1.65;
+            const boxMm = 46;
             const padMm = 3;
-            const boxMm = qSize * modMm + padMm * 2;
+            const modMm = (boxMm - padMm * 2) / qSize;
             doc.setFillColor(255, 255, 255);
             doc.setDrawColor(203, 213, 225);
             doc.rect(qrOriginX, qrOriginY, boxMm, boxMm, 'FD');
@@ -2520,7 +2580,7 @@
             }
             doc.setTextColor(71, 85, 105);
             doc.setFontSize(8.5);
-            doc.text('QR verificable (ISO 18004)', qrOriginX, qrOriginY + boxMm + 5);
+            doc.text('Escanea para verificar (ISO 18004)', qrOriginX, qrOriginY + boxMm + 5);
           }
 
           doc.setDrawColor(21, 128, 61);

@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=8">
-  <script src="../js/main.js?v=8" defer></script>
-  <script src="../js/vision-ai.js?v=8" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=9">
+  <script src="../js/main.js?v=9" defer></script>
+  <script src="../js/vision-ai.js?v=9" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -169,10 +169,11 @@
           </div>
 
           <div class="hero-actions" data-support-avoid>
-            <a href="#simulador" class="btn btn-primary">
+            <a href="app.html" class="btn btn-primary">
               <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
-              <span>Probar Simulador Interactivo</span>
+              <span>Abrir Plataforma Completa (Modo Ventanilla)</span>
             </a>
+            <a href="#simulador" class="btn-soft">Probar el simulador aquí</a>
             <a href="#demo" class="btn btn-secondary">
               <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
               <span>Solicitar Demo Institucional</span>
@@ -302,6 +303,14 @@
           Explora una atención bimodal de principio a fin. Esta demostración usa datos ficticios: no inicia una videollamada ni almacena información personal.
         </p>
 
+        <div class="sim-app-cta">
+          <a href="app.html" class="btn btn-primary">
+            <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+            <span>Abrir Plataforma Completa (Modo Ventanilla)</span>
+          </a>
+          <p class="sim-app-cta-note">Pantalla completa para la tablet de ventanilla, sin textos promocionales.</p>
+        </div>
+
         <div class="simulator-tablet" id="simulator-tablet">
           <!-- Selector de Vistas -->
           <div class="sim-view-tabs" role="tablist" aria-label="Vistas del simulador">
@@ -340,13 +349,6 @@
                   <img src="../assets/icons/check.svg" alt="" width="20" height="20" class="icon-svg icon-check" id="sim-network-icon">
                   <span id="sim-network-label">Red Operativa</span>
                 </div>
-                <button
-                  type="button"
-                  class="btn-contingency"
-                  id="btn-simulate-outage"
-                  title="Simular caída temporal de conectividad y reconexión automática">
-                  Simular microcorte
-                </button>
               </div>
             </div>
 
@@ -521,13 +523,10 @@
             <div class="sim-main-grid" id="sim-main-grid">
               <!-- Columna Video -->
               <div class="sim-video-column" id="sim-video-column">
-                <!-- Panel Cámara IA (Gestos): MediaPipe se inyecta SOLO al pulsar "Activar Cámara IA" -->
+                <!-- Panel Cámara IA (LSP): MediaPipe se inyecta SOLO al pulsar "Activar Cámara" -->
                 <section class="vision-panel" id="vision-panel" hidden aria-labelledby="vision-title" data-support-avoid>
                   <div class="vision-top-bar">
-                    <div class="vision-head">
-                      <h4 class="vision-title" id="vision-title">Cámara IA (Gestos)</h4>
-                      <p class="vision-privacy">El video se procesa en tu dispositivo. No se graba ni se envía.</p>
-                    </div>
+                    <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
 
                     <div class="vision-status-group">
                       <span class="vision-hands-count" id="vision-hands-count" hidden aria-live="polite" aria-label="Manos detectadas: 0 de 2">Manos: 0 / 2</span>
@@ -551,78 +550,37 @@
                     <video id="vision-video" class="vision-video" autoplay playsinline muted disablepictureinpicture aria-label="Vista previa de tu cámara"></video>
                     <canvas id="vision-canvas" class="vision-canvas" width="1280" height="720" aria-hidden="true"></canvas>
                     <div class="vision-placeholder" id="vision-placeholder">
-                      <p id="vision-placeholder-text">Pulsa “Activar Cámara IA” y muestra una o ambas manos frente a la cámara.</p>
+                      <p id="vision-placeholder-text">Pulsa “Activar Cámara” y muestra una o ambas manos. El video se procesa en tu dispositivo: no se graba ni se envía.</p>
                     </div>
                   </div>
 
                   <div class="vision-actions" role="group" aria-label="Controles de Cámara IA">
                     <button type="button" class="btn btn-primary vision-btn" id="btn-vision-start">
                       <svg class="vision-btn-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5H14C15.1 5 16 5.9 16 7V17C16 18.1 15.1 19 14 19H4C2.9 19 2 18.1 2 17V7C2 5.9 2.9 5 4 5Z"/><path d="M16 10L22 6V18L16 14"/></svg>
-                      <span>Activar Cámara IA</span>
-                    </button>
-                    <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-stop" disabled>
-                      <span>Detener Cámara</span>
+                      <span>Activar Cámara</span>
                     </button>
                     <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-simulate">
-                      <span>Probar gestos sin cámara</span>
+                      <span>Probar sin cámara</span>
                     </button>
                   </div>
 
-                  <details class="vision-guide" id="vision-guide">
-                    <summary class="vision-guide-summary">Ver gestos reconocidos (1 y 2 manos)</summary>
-                    <ul class="vision-guide-list" id="vision-guide-list"></ul>
-                  </details>
-
-                  <details class="vision-trainer" id="vision-trainer">
-                    <summary class="vision-trainer-summary">Entrenar seña personalizada (IA local)</summary>
-                    <div class="vision-trainer-body">
-                      <div class="vision-trainer-form">
-                        <label for="vision-custom-label" class="vision-trainer-label">Frase o nombre de la seña</label>
-                        <input
-                          type="text"
-                          id="vision-custom-label"
-                          class="vision-trainer-input"
-                          maxlength="80"
-                          placeholder="Ej. Necesito mi estado de cuenta">
-                      </div>
-                      <div class="vision-trainer-actions">
-                        <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-capture" disabled>
-                          <span>Capturar seña (12 muestras)</span>
-                        </button>
-                        <button type="button" class="btn-soft" id="btn-vision-clear-custom" hidden>
-                          Limpiar señas
-                        </button>
-                      </div>
-                      <div class="vision-trainer-progress-wrap" id="vision-trainer-progress-wrap" hidden>
-                        <div class="vision-progress" id="vision-trainer-progress" role="progressbar" aria-label="Progreso de captura de muestras" aria-valuemin="0" aria-valuemax="12" aria-valuenow="0">
-                          <div class="vision-progress-fill" id="vision-trainer-progress-fill"></div>
-                        </div>
-                      </div>
-                      <p class="vision-trainer-status" id="vision-trainer-status" role="status" aria-live="polite">
-                        Activa la cámara en vivo para entrenar una seña con 12 muestras locales.
-                      </p>
-                      <ul class="vision-custom-list" id="vision-custom-list" aria-label="Señas personalizadas guardadas"></ul>
-                    </div>
-                  </details>
-
                   <div class="vision-simulation" id="vision-simulation" hidden>
-                    <p class="vision-simulation-title" id="vision-simulation-title">Gestos de prueba (modo simulación)</p>
+                    <p class="vision-simulation-title" id="vision-simulation-title">Señas de prueba (sin cámara)</p>
                     <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
                   </div>
 
                   <div class="vision-output" id="vision-output">
                     <div class="vision-live" id="vision-live" aria-live="polite" aria-atomic="true">
-                      <p class="vision-output-label">Gesto detectado</p>
-                      <p class="vision-gesture-name" id="vision-gesture-name">Sin gesto confirmado</p>
-                      <p class="vision-phrase" id="vision-phrase">Muestra un gesto y mantenlo 0,6 s para traducirlo.</p>
-                      <p class="vision-confidence" id="vision-confidence">Confianza: —</p>
+                      <p class="vision-output-label" id="vision-sentence-label">Oración traducida en vivo (LSP → Español)</p>
+                      <p class="vision-sentence is-empty" id="vision-sentence">Muestra una seña y mantenla un instante para empezar la oración.</p>
+                      <p class="vision-last-detect" id="vision-last-detect">Última seña: — · Confianza: —</p>
                       <p class="vision-sent-note" id="vision-sent-note" hidden></p>
-                      <p class="vision-urgent-hint" id="vision-urgent-hint" hidden>Seña de auxilio detectada. Pulsa el botón rojo para conectar con un intérprete humano.</p>
+                      <p class="vision-urgent-hint" id="vision-urgent-hint" hidden>Seña de auxilio detectada y enviada. Pulsa el botón rojo para conectar con un intérprete humano.</p>
                     </div>
 
                     <div class="vision-stability">
                       <div class="vision-stability-head">
-                        <span id="vision-progress-label">Estabilidad del gesto (600 ms)</span>
+                        <span id="vision-progress-label">Estabilidad de la seña (350 ms)</span>
                         <span id="vision-progress-value">0%</span>
                       </div>
                       <div class="vision-progress" id="vision-progress" role="progressbar" aria-labelledby="vision-progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
@@ -630,17 +588,13 @@
                       </div>
                     </div>
 
-                    <div class="vision-output-options">
-                      <label class="vision-autospeak-toggle" for="vision-autospeak">
-                        <input type="checkbox" id="vision-autospeak">
-                        <span>Voz automática al funcionario</span>
-                      </label>
-                    </div>
-
                     <div class="vision-output-actions">
                       <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-speak" disabled>
                         <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
-                        <span>Reproducir voz al funcionario</span>
+                        <span>Enviar y leer al funcionario</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-undo" disabled>
+                        <span>Deshacer</span>
                       </button>
                       <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
                         <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
@@ -648,6 +602,11 @@
                       </button>
                     </div>
                   </div>
+
+                  <details class="vision-guide" id="vision-guide">
+                    <summary class="vision-guide-summary">Ver señas reconocidas</summary>
+                    <ul class="vision-guide-list" id="vision-guide-list"></ul>
+                  </details>
                 </section>
 
                 <div class="video-stage" id="sim-video-stage">
@@ -679,6 +638,8 @@
                     <span>El audio y el chat asistido siguen activos.</span>
                   </div>
                 </div>
+
+                <p class="interpreter-caption" id="sim-interpreter-caption" role="status" aria-live="polite">Intérprete LSP · En espera. Pulsa “Iniciar Atención” para conectar.</p>
 
                 <!-- Tarjeta amigable de Modo Texto / Lectura (sin overlay oscuro sobre foto) -->
                 <section class="textmode-card" id="sim-textmode-card" hidden aria-labelledby="textmode-card-title">
@@ -782,24 +743,34 @@
 
                 <div class="sensitive-data-card">
                   <div class="sensitive-data-values" id="sim-sensitive-data">
-                    <p>DNI: 00000000</p>
-                    <p>Monto: S/ 150.00</p>
+                    <div class="sensitive-row">
+                      <span class="sensitive-role">DNI del ciudadano</span>
+                      <p class="sensitive-value">00000000</p>
+                    </div>
+                    <div class="sensitive-row">
+                      <span class="sensitive-role">Monto / Operación (Ventanilla)</span>
+                      <p class="sensitive-value">S/ 150.00</p>
+                      <span class="sensitive-note">Solo lectura para el ciudadano</span>
+                    </div>
                   </div>
                   <div class="sensitive-data-actions">
                     <button type="button" class="btn-soft" id="btn-copy-data">
                       Copiar datos
                     </button>
-                    <button type="button" class="btn-soft" id="btn-edit-data" aria-expanded="false" aria-controls="sensitive-edit-form">
-                      Editar DNI y Monto
+                    <button type="button" class="btn-soft" id="btn-edit-dni" aria-expanded="false" aria-controls="sensitive-edit-form">
+                      Editar mi DNI
+                    </button>
+                    <button type="button" class="btn-soft" id="btn-edit-amount" aria-expanded="false" aria-controls="sensitive-edit-form">
+                      Ajustar monto (Personal)
                     </button>
                   </div>
                   <form class="sensitive-edit-form" id="sensitive-edit-form" hidden>
-                    <div class="sensitive-edit-field">
-                      <label for="edit-field-1" id="edit-label-1">DNI</label>
+                    <div class="sensitive-edit-field" id="edit-group-1">
+                      <label for="edit-field-1" id="edit-label-1">DNI del ciudadano</label>
                       <input type="text" id="edit-field-1" class="chat-input" placeholder="Ej. 00000000" autocomplete="off" maxlength="32">
                     </div>
-                    <div class="sensitive-edit-field">
-                      <label for="edit-field-2" id="edit-label-2">Monto</label>
+                    <div class="sensitive-edit-field" id="edit-group-2" hidden>
+                      <label for="edit-field-2" id="edit-label-2">Monto / Operación (Ventanilla)</label>
                       <input type="text" id="edit-field-2" class="chat-input" placeholder="Ej. 150.00" autocomplete="off" maxlength="40">
                     </div>
                     <span class="field-error" id="sensitive-edit-error" role="alert" hidden></span>
@@ -846,9 +817,18 @@
             <!-- Barra de privacidad al pie del simulador -->
             <div class="sim-privacy-footer" data-support-avoid>
               <p>Sin grabación de video · Purga local al finalizar · Ley N.° 29733</p>
-              <button type="button" class="btn-soft" id="btn-finish-session">
-                Finalizar atención y obtener constancia
-              </button>
+              <div class="sim-footer-actions">
+                <button
+                  type="button"
+                  class="btn-contingency"
+                  id="btn-simulate-outage"
+                  title="Simular caída temporal de conectividad y reconexión automática">
+                  Simular microcorte
+                </button>
+                <button type="button" class="btn-soft" id="btn-finish-session">
+                  Finalizar atención y obtener constancia
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1631,6 +1611,8 @@
           loading="lazy"
           decoding="async">
       </div>
+
+      <p class="interpreter-caption" id="fullscreen-interpreter-caption" role="status" aria-live="polite">Intérprete LSP · En espera. Pulsa “Iniciar Atención” para conectar.</p>
 
       <div class="fullscreen-footer">
         <button type="button" class="btn btn-primary" data-close-modal="modal-fullscreen">

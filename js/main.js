@@ -46,10 +46,16 @@
     Banco: {
       subtitle: 'Banco · Datos de ejemplo',
       prompt: 'Por favor, confirma tu DNI y el monto de la operación.',
-      editBtnLabel: 'Editar DNI y Monto',
+      staffBtnLabel: 'Ajustar monto (Personal)',
       dataFields: [
-        { label: 'DNI', value: '00000000' },
-        { label: 'Monto', value: 'S/ 150.00' }
+        { label: 'DNI del ciudadano', shortLabel: 'DNI', value: '00000000' },
+        {
+          label: 'Monto / Operación (Ventanilla)',
+          shortLabel: 'Monto',
+          value: 'S/ 150.00',
+          roleNote: 'Solo lectura para el ciudadano',
+          isAmount: true
+        }
       ],
       procedures: [
         'Consulta de saldo y retiro',
@@ -59,7 +65,7 @@
       templates: [
         {
           label: 'Confirmar DNI y monto',
-          getText: (fields) => `Confirmo mi ${fields[0].label}: ${fields[0].value} y ${fields[1].label.toLowerCase()} ${fields[1].value}.`
+          getText: (fields) => `Confirmo mi DNI: ${fields[0].value} y monto ${fields[1].value}.`
         },
         { label: 'Repetir en LSP', text: 'Por favor, repite en Lengua de Señas Peruana.' },
         { label: 'Pedir constancia', text: 'Necesito constancia impresa de la operación.' }
@@ -69,10 +75,15 @@
     Comisaría: {
       subtitle: 'Comisaría · Datos de ejemplo',
       prompt: 'Indícanos el motivo de tu denuncia o constancia policial.',
-      editBtnLabel: 'Editar datos',
+      staffBtnLabel: 'Ajustar referencia (Personal)',
       dataFields: [
-        { label: 'DNI', value: '00000000' },
-        { label: 'Referencia', value: 'Parte N.° 2026-041' }
+        { label: 'DNI del ciudadano', shortLabel: 'DNI', value: '00000000' },
+        {
+          label: 'Referencia (Ventanilla)',
+          shortLabel: 'Referencia',
+          value: 'Parte N.° 2026-041',
+          roleNote: 'Solo lectura para el ciudadano'
+        }
       ],
       procedures: [
         'Registro de denuncia policial',
@@ -82,7 +93,7 @@
       templates: [
         {
           label: 'Registrar denuncia',
-          getText: (fields) => `Deseo registrar una denuncia con intérprete LSP (${fields[0].label}: ${fields[0].value} · ${fields[1].label}: ${fields[1].value}).`
+          getText: (fields) => `Deseo registrar una denuncia con intérprete LSP (DNI: ${fields[0].value} · ${fields[1].shortLabel}: ${fields[1].value}).`
         },
         { label: 'Constancia por pérdida', text: 'Necesito constancia por pérdida de DNI.' },
         { label: 'Atención prioritaria', text: 'Solicito atención prioritaria por emergencia.' }
@@ -92,10 +103,15 @@
     Salud: {
       subtitle: 'Centro de Salud · Datos de ejemplo',
       prompt: 'Confirma tus síntomas principales y si presentas alergias.',
-      editBtnLabel: 'Editar datos',
+      staffBtnLabel: 'Ajustar área (Personal)',
       dataFields: [
-        { label: 'DNI', value: '00000000' },
-        { label: 'Área', value: 'Triaje · Prioridad II' }
+        { label: 'DNI del ciudadano', shortLabel: 'DNI', value: '00000000' },
+        {
+          label: 'Área / Triaje (Ventanilla)',
+          shortLabel: 'Área',
+          value: 'Triaje · Prioridad II',
+          roleNote: 'Solo lectura para el ciudadano'
+        }
       ],
       procedures: [
         'Triaje y consulta médica general',
@@ -105,7 +121,7 @@
       templates: [
         {
           label: 'Solicitar intérprete LSP',
-          getText: (fields) => `Tengo dolor agudo y necesito intérprete LSP (${fields[0].label}: ${fields[0].value} · ${fields[1].label}: ${fields[1].value}).`
+          getText: (fields) => `Tengo dolor agudo y necesito intérprete LSP (DNI: ${fields[0].value} · ${fields[1].shortLabel}: ${fields[1].value}).`
         },
         { label: 'Sin alergias', text: 'No presento alergias conocidas a medicamentos.' },
         { label: 'Escribir horarios', text: 'Por favor, escribe los horarios de la receta.' }
@@ -115,10 +131,15 @@
     Municipal: {
       subtitle: 'Municipalidad · Datos de ejemplo',
       prompt: 'Indica el número de expediente o trámite municipal.',
-      editBtnLabel: 'Editar datos',
+      staffBtnLabel: 'Ajustar expediente (Personal)',
       dataFields: [
-        { label: 'DNI', value: '00000000' },
-        { label: 'Expediente', value: '00412-2026' }
+        { label: 'DNI del ciudadano', shortLabel: 'DNI', value: '00000000' },
+        {
+          label: 'Expediente (Ventanilla)',
+          shortLabel: 'Expediente',
+          value: '00412-2026',
+          roleNote: 'Solo lectura para el ciudadano'
+        }
       ],
       procedures: [
         'Mesa de partes y seguimiento',
@@ -128,12 +149,12 @@
       templates: [
         {
           label: 'Consultar expediente',
-          getText: (fields) => `Consulto el estado de mi ${fields[1].label.toLowerCase()} ${fields[1].value} (${fields[0].label}: ${fields[0].value}).`
+          getText: (fields) => `Consulto el estado de mi expediente ${fields[1].value} (DNI: ${fields[0].value}).`
         },
         { label: 'Ayuda en texto claro', text: 'Necesito ayuda con el formulario en texto claro.' },
         {
           label: 'Confirmar datos',
-          getText: (fields) => `Confirmo mis datos (${fields[0].label}: ${fields[0].value} · ${fields[1].label}: ${fields[1].value}) para mesa de partes.`
+          getText: (fields) => `Confirmo mis datos (DNI: ${fields[0].value} · ${fields[1].shortLabel}: ${fields[1].value}) para mesa de partes.`
         }
       ],
       dictationSample: 'Expediente 00412-2026 verificado en mesa de partes accesible.'
@@ -635,6 +656,10 @@
     const viewVentanilla = document.getElementById('sim-view-ventanilla');
     const viewConsola = document.getElementById('sim-view-consola');
     const btnConsoleBack = document.getElementById('btn-console-back');
+    const btnAppConsole = document.getElementById('btn-app-console');
+    const appWelcome = document.getElementById('app-welcome');
+    const appOperate = document.getElementById('app-operate');
+    const btnWelcomeEmergency = document.getElementById('btn-welcome-emergency');
 
     const stepsGuide = document.getElementById('sim-steps-guide');
     const stepItems = stepsGuide ? stepsGuide.querySelectorAll('.sim-step-item[data-sim-step]') : [];
@@ -642,6 +667,7 @@
     const sessionMeta = document.getElementById('sim-session-meta');
     const btnOneTap = document.getElementById('btn-one-tap-start');
     const btnOneTapLabel = document.getElementById('btn-one-tap-label');
+    const idleOneTapText = (btnOneTapLabel && btnOneTapLabel.textContent.trim()) || 'Iniciar Atención (One-Tap)';
     const btnEmergency = document.getElementById('btn-emergency-mode');
     const btnExitEmergency = document.getElementById('btn-exit-emergency');
     const emergencyPanel = document.getElementById('emergency-panel');
@@ -668,6 +694,8 @@
     const cameraOffOverlay = document.getElementById('sim-camera-off-overlay');
     const cameraAngleLabel = document.getElementById('sim-camera-angle');
     const liveBadge = document.getElementById('sim-live-badge');
+    const interpreterCaption = document.getElementById('sim-interpreter-caption');
+    const fullscreenCaption = document.getElementById('fullscreen-interpreter-caption');
 
     const btnToggleTurn = document.getElementById('btn-toggle-turn');
     const simTurnLabel = document.getElementById('sim-turn-label');
@@ -701,8 +729,11 @@
     const consoleChatFeed = document.getElementById('console-chat-feed');
     const quickTemplatesBox = document.getElementById('sim-quick-templates');
     const btnCopyData = document.getElementById('btn-copy-data');
-    const btnEditData = document.getElementById('btn-edit-data');
+    const btnEditDni = document.getElementById('btn-edit-dni');
+    const btnEditAmount = document.getElementById('btn-edit-amount');
     const sensitiveEditForm = document.getElementById('sensitive-edit-form');
+    const editGroup1 = document.getElementById('edit-group-1');
+    const editGroup2 = document.getElementById('edit-group-2');
     const editLabel1 = document.getElementById('edit-label-1');
     const editLabel2 = document.getElementById('edit-label-2');
     const editField1 = document.getElementById('edit-field-1');
@@ -745,6 +776,21 @@
     let connectingStepTimer = null;
     let dictTimer = null;
     let chatEpoch = 0;
+    let editingFieldIndex = 0;
+    let editTriggerBtn = null;
+
+    function enterOperateScreen({ focusTarget = true } = {}) {
+      if (appWelcome) appWelcome.hidden = true;
+      if (appOperate) {
+        appOperate.hidden = false;
+        if (focusTarget) appOperate.focus({ preventScroll: true });
+      }
+    }
+
+    function enterWelcomeScreen() {
+      if (appOperate) appOperate.hidden = true;
+      if (appWelcome) appWelcome.hidden = false;
+    }
 
     function switchSimulatorView(viewName) {
       state.simView = viewName;
@@ -756,12 +802,22 @@
         tab.classList.toggle('is-active', active);
         tab.setAttribute('aria-selected', String(active));
       });
+      if (btnAppConsole) {
+        btnAppConsole.setAttribute('aria-pressed', String(!isVentanilla));
+        btnAppConsole.textContent = isVentanilla ? 'Consola Intérprete' : 'Volver a Ventanilla';
+      }
     }
 
     viewTabs.forEach((tab) => {
       tab.addEventListener('click', () => switchSimulatorView(tab.dataset.simView));
     });
     bindTablistArrows(viewTabs, (tab) => switchSimulatorView(tab.dataset.simView));
+
+    if (btnAppConsole) {
+      btnAppConsole.addEventListener('click', () => {
+        switchSimulatorView(state.simView === 'consola' ? 'ventanilla' : 'consola');
+      });
+    }
 
     if (btnConsoleBack) {
       btnConsoleBack.addEventListener('click', () => switchSimulatorView('ventanilla'));
@@ -789,9 +845,39 @@
       });
     }
 
+    function updateInterpreterCaption() {
+      let captionText = 'Intérprete LSP · En espera. Pulsa “Iniciar Atención” para conectar.';
+      if (state.emergencyActive) {
+        const parts = [state.emergencyType, state.selectedCrisis].filter(Boolean).join(' · ');
+        captionText = parts
+          ? `Intérprete LSP → Ciudadano (EMERGENCIA): “Canal prioritario activo (${parts}). Atención en vivo (<30 s).”`
+          : 'Intérprete LSP → Ciudadano (EMERGENCIA): “Prioridad máxima activa (<30 s). Indica tu urgencia o toca un símbolo.”';
+      } else if (state.connecting) {
+        captionText = 'Intérprete LSP · Conectando intérprete humano prioritario (<30 s)…';
+      } else if (state.sessionActive) {
+        if (state.turnDirection === 'lsp') {
+          const staffMsgs = state.chatMessages.filter((m) => m.type !== 'user');
+          const lastStaff = staffMsgs.length ? staffMsgs[staffMsgs.length - 1].text : '';
+          if (staffMsgs.length <= 2 && state.sector === 'Banco' && state.sensitiveFields[1]) {
+            captionText = `Intérprete LSP → Ciudadano: “Hola, el personal solicita confirmar tu DNI y el monto de ${state.sensitiveFields[1].value}.”`;
+          } else {
+            captionText = `Intérprete LSP → Ciudadano: “${lastStaff || 'Interpretando en vivo para ti.'}”`;
+          }
+        } else {
+          const userMsgs = state.chatMessages.filter((m) => m.type === 'user');
+          const lastUser = userMsgs.length ? userMsgs[userMsgs.length - 1].text : '';
+          captionText = `Ciudadano → Funcionario (${state.sector}): “${lastUser || 'Interpretando tu respuesta a voz en tiempo real.'}”`;
+        }
+      }
+
+      if (interpreterCaption) interpreterCaption.textContent = captionText;
+      if (fullscreenCaption) fullscreenCaption.textContent = captionText;
+    }
+
     function appendMessage(sender, text, type = 'staff') {
       state.chatMessages.push({ sender, text, type });
       renderChat();
+      updateInterpreterCaption();
     }
 
     function updateStepsGuide() {
@@ -823,11 +909,20 @@
         if (labelEl) labelEl.textContent = 'Atención en curso (En línea)';
       } else {
         btnOneTap.disabled = false;
-        if (labelEl) labelEl.textContent = 'Iniciar Atención (One-Tap)';
+        if (labelEl) labelEl.textContent = idleOneTapText;
       }
     }
 
     function scrollToActiveChannel(focusInput = false) {
+      if (appOperate) {
+        if (focusInput && state.channel === 'camara') {
+          const btnVisionStart = document.getElementById('btn-vision-start');
+          if (btnVisionStart && !btnVisionStart.disabled) btnVisionStart.focus({ preventScroll: true });
+        } else if (focusInput && state.channel === 'texto' && chatInput) {
+          chatInput.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (state.channel === 'camara') {
         if (visionPanel) visionPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
         if (focusInput) {
@@ -875,6 +970,7 @@
         btnConsoleToEs.classList.toggle('btn-secondary', isLsp);
         btnConsoleToEs.setAttribute('aria-pressed', String(!isLsp));
       }
+      updateInterpreterCaption();
     }
 
     function updateSessionMeta() {
@@ -892,33 +988,61 @@
 
     function renderSensitiveData() {
       const fields = state.sensitiveFields;
-      [sensitiveDataBox, consoleDataBox].forEach((container) => {
-        if (!container) return;
-        container.textContent = '';
+      if (sensitiveDataBox) {
+        sensitiveDataBox.textContent = '';
+        fields.forEach((field) => {
+          const row = document.createElement('div');
+          row.className = 'sensitive-row';
+
+          const roleEl = document.createElement('span');
+          roleEl.className = 'sensitive-role';
+          roleEl.textContent = field.label;
+
+          const valEl = document.createElement('p');
+          valEl.className = 'sensitive-value';
+          valEl.textContent = field.value;
+
+          row.append(roleEl, valEl);
+          if (field.roleNote) {
+            const noteEl = document.createElement('span');
+            noteEl.className = 'sensitive-note';
+            noteEl.textContent = field.roleNote;
+            row.appendChild(noteEl);
+          }
+          sensitiveDataBox.appendChild(row);
+        });
+      }
+
+      if (consoleDataBox) {
+        consoleDataBox.textContent = '';
         fields.forEach((field) => {
           const p = document.createElement('p');
-          p.textContent = `${field.label}: ${field.value}`;
-          container.appendChild(p);
+          p.textContent = `${field.shortLabel || field.label}: ${field.value}`;
+          consoleDataBox.appendChild(p);
         });
-      });
+      }
 
       const config = SIM_SECTORS[state.sector];
-      if (btnEditData && config) {
-        btnEditData.textContent = config.editBtnLabel || 'Editar datos';
+      if (btnEditAmount && config) {
+        btnEditAmount.textContent = config.staffBtnLabel || 'Ajustar monto (Personal)';
       }
     }
 
     function closeSensitiveEditForm(restoreFocus = false) {
       if (!sensitiveEditForm) return;
       sensitiveEditForm.hidden = true;
+      if (editGroup1) editGroup1.hidden = false;
+      if (editGroup2) editGroup2.hidden = true;
       if (sensitiveEditError) {
         sensitiveEditError.hidden = true;
         sensitiveEditError.textContent = '';
       }
-      if (btnEditData) {
-        btnEditData.setAttribute('aria-expanded', 'false');
-        if (restoreFocus) btnEditData.focus();
+      if (btnEditDni) btnEditDni.setAttribute('aria-expanded', 'false');
+      if (btnEditAmount) btnEditAmount.setAttribute('aria-expanded', 'false');
+      if (restoreFocus && editTriggerBtn && typeof editTriggerBtn.focus === 'function') {
+        editTriggerBtn.focus();
       }
+      editTriggerBtn = null;
     }
 
     function updateConsolePriorityContext() {
@@ -1048,6 +1172,7 @@
       updateLiveBadge();
       updateOneTapButton();
       updateStepsGuide();
+      updateInterpreterCaption();
     }
 
     // Delegación para plantillas rápidas (sincronizadas con valores editados en vivo)
@@ -1091,12 +1216,15 @@
       updateLiveBadge();
       updateStepsGuide();
       updateSessionMeta();
+      updateInterpreterCaption();
     }
 
-    // Inicio One-Tap (HU-001 a HU-005): feedback real, cuenta regresiva y scroll suave
+    // Inicio One-Tap (HU-001 a HU-005): feedback real, cuenta regresiva y transición a operación
     if (btnOneTap) {
       btnOneTap.addEventListener('click', () => {
         if (state.connecting) return;
+
+        enterOperateScreen({ focusTarget: false });
 
         if (state.sessionActive) {
           scrollToActiveChannel(true);
@@ -1125,6 +1253,7 @@
         updateLiveBadge();
         updateStepsGuide();
         updateSessionMeta();
+        updateInterpreterCaption();
         scrollToActiveChannel(false);
 
         connectingStepTimer = setTimeout(() => {
@@ -1156,6 +1285,9 @@
     if (btnCancelConnect) {
       btnCancelConnect.addEventListener('click', () => {
         cancelConnecting();
+        if (appWelcome && !state.sessionActive && !state.emergencyActive) {
+          enterWelcomeScreen();
+        }
         if (btnOneTap) btnOneTap.focus();
       });
     }
@@ -1170,6 +1302,8 @@
     // Modo Emergencia <30 s (HU-009, HU-011, HU-014, HU-015, Figma P2)
     function activateEmergency() {
       if (state.connecting) cancelConnecting();
+      if (state.simView === 'consola') switchSimulatorView('ventanilla');
+      enterOperateScreen({ focusTarget: false });
       if (state.channel !== 'lsp') {
         setChannel('lsp');
       }
@@ -1187,6 +1321,7 @@
       updateCriticalBanner();
       playEmergencyTone();
       updateSessionMeta();
+      updateInterpreterCaption();
 
       let secondsLeft = 3;
       if (emergencyInterval) clearInterval(emergencyInterval);
@@ -1242,6 +1377,7 @@
       updateLiveBadge();
       updateStepsGuide();
       updateSessionMeta();
+      updateInterpreterCaption();
     }
 
     if (btnEmergency) {
@@ -1251,6 +1387,12 @@
         } else {
           activateEmergency();
         }
+      });
+    }
+
+    if (btnWelcomeEmergency) {
+      btnWelcomeEmergency.addEventListener('click', () => {
+        activateEmergency();
       });
     }
 
@@ -1324,6 +1466,7 @@
       const isText = ch === 'texto';
 
       if (videoStage) videoStage.hidden = !isLsp;
+      if (interpreterCaption) interpreterCaption.hidden = !isLsp;
       if (videoBadgesRow) videoBadgesRow.hidden = !isLsp;
       if (callControls) callControls.hidden = !isLsp;
       if (visionPanel) visionPanel.hidden = !isCamera;
@@ -1334,6 +1477,7 @@
       if (channelBadgeText) channelBadgeText.textContent = `Canal activo: ${CHANNEL_INFO[ch].badge}`;
 
       updateSessionMeta();
+      updateInterpreterCaption();
 
       // Avisa al módulo de visión (detiene la cámara al salir de "Cámara IA (Gestos)")
       document.dispatchEvent(new CustomEvent('senasegura:channelchange', {
@@ -1483,91 +1627,112 @@
       });
     }
 
-    if (btnEditData && sensitiveEditForm && editField1 && editField2) {
+    if (sensitiveEditForm && editField1 && editField2) {
       let editOpenedAt = 0;
 
-      function placeholderForField(label) {
-        if (label === 'DNI') return 'Ej. 00000000';
-        if (label === 'Monto') return 'Ej. 150.00';
-        if (label === 'Referencia') return 'Ej. Parte N.° 2026-041';
-        if (label === 'Área') return 'Ej. Triaje · Prioridad II';
-        if (label === 'Expediente') return 'Ej. 00412-2026';
+      function placeholderForField(field) {
+        if (!field) return '';
+        const name = (field.shortLabel || field.label || '').toLowerCase();
+        if (name.includes('dni')) return 'Ej. 00000000';
+        if (name.includes('monto') || field.isAmount) return 'Ej. 150.00';
+        if (name.includes('referencia')) return 'Ej. Parte N.° 2026-041';
+        if (name.includes('área')) return 'Ej. Triaje · Prioridad II';
+        if (name.includes('expediente')) return 'Ej. 00412-2026';
         return '';
       }
 
-      btnEditData.addEventListener('click', () => {
-        const willOpen = sensitiveEditForm.hidden;
-        if (!willOpen) {
+      function openSensitiveEdit(index, triggerBtn) {
+        if (!sensitiveEditForm.hidden && editingFieldIndex === index) {
           closeSensitiveEditForm(false);
           return;
         }
-        const [f1, f2] = state.sensitiveFields;
-        if (editLabel1 && f1) editLabel1.textContent = f1.label;
-        if (editLabel2 && f2) editLabel2.textContent = f2.label;
-        editField1.placeholder = f1 ? placeholderForField(f1.label) : '';
-        editField2.placeholder = f2 ? placeholderForField(f2.label) : '';
-        editField1.value = f1 ? f1.value : '';
-        editField2.value = f2 ? f2.value : '';
+        const field = state.sensitiveFields[index];
+        if (!field) return;
+
+        editingFieldIndex = index;
+        editTriggerBtn = triggerBtn;
+
+        const isSecond = index === 1;
+        if (editGroup1) editGroup1.hidden = isSecond;
+        if (editGroup2) editGroup2.hidden = !isSecond;
+
+        const activeLabel = isSecond ? editLabel2 : editLabel1;
+        const activeInput = isSecond ? editField2 : editField1;
+        if (activeLabel) activeLabel.textContent = field.label;
+        if (activeInput) {
+          activeInput.placeholder = placeholderForField(field);
+          activeInput.value = field.value;
+        }
         if (sensitiveEditError) {
           sensitiveEditError.hidden = true;
           sensitiveEditError.textContent = '';
         }
+
         editOpenedAt = performance.now();
         sensitiveEditForm.hidden = false;
-        btnEditData.setAttribute('aria-expanded', 'true');
+        if (btnEditDni) btnEditDni.setAttribute('aria-expanded', String(!isSecond));
+        if (btnEditAmount) btnEditAmount.setAttribute('aria-expanded', String(isSecond));
+
         setTimeout(() => {
-          if (!sensitiveEditForm.hidden) editField1.focus();
+          if (!sensitiveEditForm.hidden && activeInput) activeInput.focus();
         }, 60);
-      });
+      }
+
+      if (btnEditDni) {
+        btnEditDni.addEventListener('click', () => openSensitiveEdit(0, btnEditDni));
+      }
+      if (btnEditAmount) {
+        btnEditAmount.addEventListener('click', () => openSensitiveEdit(1, btnEditAmount));
+      }
 
       sensitiveEditForm.addEventListener('submit', (e) => {
         e.preventDefault();
         if (performance.now() - editOpenedAt < 150) return;
 
-        const inputs = [editField1, editField2];
-        const errors = [];
-        let firstInvalidEl = null;
+        const field = state.sensitiveFields[editingFieldIndex];
+        const inputEl = editingFieldIndex === 1 ? editField2 : editField1;
+        if (!field || !inputEl) return;
 
-        state.sensitiveFields.forEach((field, idx) => {
-          const inputEl = inputs[idx];
-          if (!inputEl) return;
-          const raw = inputEl.value.trim();
+        const raw = inputEl.value.trim();
+        let errorMsg = '';
 
-          if (field.label === 'DNI') {
-            if (!raw) return; // conserva el valor anterior
+        if (editingFieldIndex === 0) {
+          if (raw) {
             const digits = raw.replace(/\D/g, '').slice(0, 8);
             if (!digits) {
-              errors.push('Ingresa solo números para el DNI (hasta 8 dígitos).');
-              if (!firstInvalidEl) firstInvalidEl = inputEl;
+              errorMsg = 'Ingresa solo números para el DNI (hasta 8 dígitos).';
             } else {
               field.value = digits;
             }
-          } else if (field.label === 'Monto') {
-            if (!raw) return; // conserva el valor anterior
+          }
+        } else if (field.isAmount) {
+          if (raw) {
             const cleaned = raw.replace(/^\s*s\s*\/?\s*/i, '').replace(/\s+/g, '').replace(',', '.');
             const num = Number(cleaned);
             if (!/^\d+(\.\d+)?$/.test(cleaned) || !Number.isFinite(num) || num < 0) {
-              errors.push('Ingresa un monto numérico válido (ej. 150.00).');
-              if (!firstInvalidEl) firstInvalidEl = inputEl;
+              errorMsg = 'Ingresa un monto numérico válido (ej. 150.00).';
             } else {
               field.value = `S/ ${num.toFixed(2)}`;
             }
-          } else if (raw) {
-            field.value = raw;
           }
-        });
+        } else if (raw) {
+          field.value = raw;
+        }
 
         renderSensitiveData();
 
-        if (errors.length && sensitiveEditError) {
-          sensitiveEditError.textContent = `${errors[0]} Se conservó el formato válido.`;
+        if (errorMsg && sensitiveEditError) {
+          sensitiveEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
           sensitiveEditError.hidden = false;
-          if (firstInvalidEl) firstInvalidEl.focus();
+          inputEl.focus();
           return;
         }
 
         closeSensitiveEditForm(true);
-        appendMessage('Sistema SeñaSegura', 'Datos actualizados para verificación visual.', 'staff');
+        const updateNote = editingFieldIndex === 0
+          ? `DNI del ciudadano actualizado (${field.value}).`
+          : `${field.label} actualizado por ventanilla (${field.value}).`;
+        appendMessage('Sistema SeñaSegura', updateNote, 'staff');
       });
 
       sensitiveEditForm.addEventListener('keydown', (e) => {
@@ -1605,6 +1770,7 @@
         state.criticalFromConsoleSim = false;
         state.sessionActive = true;
         if (state.channel !== 'lsp') setChannel('lsp');
+        enterOperateScreen({ focusTarget: false });
         if (emergencyPanel) emergencyPanel.hidden = false;
         if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
         if (emergencyQueueTimer) {
@@ -1876,6 +2042,8 @@
       setInterpreterStatus('Disponible');
       updateSectorContext(state.sector);
       updateOneTapButton();
+      enterWelcomeScreen();
+      switchSimulatorView('ventanilla');
       // Purga local: el módulo de Cámara IA libera la cámara y limpia su salida
       document.dispatchEvent(new CustomEvent('senasegura:purge'));
 
@@ -2029,6 +2197,7 @@
       setChannel,
       appendChatMessage(sender, text, type = 'user') {
         state.sessionActive = true;
+        enterOperateScreen({ focusTarget: false });
         appendMessage(sender, text, type);
         updateOneTapButton();
         updateLiveBadge();

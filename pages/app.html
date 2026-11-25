@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="es" data-contrast="normal" data-font-scale="100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0F4C81">
+  <meta name="description" content="SeñaSegura · Plataforma operativa de ventanilla: atención accesible en Lengua de Señas Peruana (LSP), Cámara IA y Texto / Lectura, con Modo Emergencia en menos de 30 segundos.">
+  <title>SeñaSegura · Plataforma Operativa (Modo Ventanilla)</title>
+  <link rel="icon" href="../favicon.ico" type="image/x-icon">
+  <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="../css/styles.css?v=9">
+  <script src="../js/main.js?v=9" defer></script>
+  <script src="../js/vision-ai.js?v=9" defer></script>
+</head>
+<body id="inicio" class="app-page">
+  <a class="skip-link" href="#app-main">Saltar al contenido principal</a>
+
+  <!-- CABECERA COMPACTA DE 1 FILA (Figma P1) -->
+  <header class="app-header">
+    <div class="app-header-row">
+      <a href="app.html" class="brand-logo" aria-label="SeñaSegura, plataforma de ventanilla">SeñaSegura</a>
+
+      <div class="status-pill status-pill-bordered" id="header-network-pill" aria-live="polite">
+        <img src="../assets/icons/check.svg" alt="" width="20" height="20" class="icon-svg icon-check">
+        <span>Red Operativa</span>
+      </div>
+
+      <div class="app-header-controls" role="group" aria-label="Controles de accesibilidad">
+        <button
+          type="button"
+          class="contrast-toggle"
+          id="btn-contrast-toggle"
+          role="switch"
+          aria-checked="false"
+          aria-label="Activar o desactivar modo Alto Contraste">
+          <span class="contrast-label">Alto Contraste</span>
+          <span class="switch-track" aria-hidden="true">
+            <span class="switch-thumb"></span>
+          </span>
+        </button>
+        <button type="button" class="btn-scale-step" id="btn-font-decrease" aria-label="Reducir tamaño de texto">A−</button>
+        <button type="button" class="btn-scale-step" id="btn-font-increase" aria-label="Aumentar tamaño de texto">A+</button>
+      </div>
+
+      <div class="app-header-actions">
+        <button type="button" class="btn btn-emergency app-emergency-btn" id="btn-emergency-mode" aria-pressed="false">
+          <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+          <span>Emergencia (&lt;30 s)</span>
+        </button>
+        <button type="button" class="btn-soft" id="btn-app-console" aria-pressed="false">Consola Intérprete</button>
+        <a href="index.html" class="btn-soft">Inicio (Web)</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="app-main" class="app-main">
+    <div class="app-shell">
+      <!-- VISTA VENTANILLA: bienvenida (P1) → atención operativa (P2–P6) -->
+      <div class="sim-workspace app-workspace" id="sim-view-ventanilla">
+        <section class="app-welcome" id="app-welcome" aria-labelledby="app-welcome-title" tabindex="-1">
+          <div class="app-welcome-head">
+            <h1 id="app-welcome-title" class="display-title">Bienvenido. Elige cómo comunicarte</h1>
+            <p class="section-lead">Sin registro y sin grabación de video. Puedes cambiar de canal durante la atención.</p>
+          </div>
+
+          <div class="channel-cards-grid" role="group" aria-label="Canal de comunicación">
+            <button type="button" class="pref-chip channel-card is-active" data-channel="lsp" aria-pressed="true">
+              <span class="channel-card-title">Intérprete LSP</span>
+              <span class="channel-card-sub">Videollamada humana en vivo</span>
+            </button>
+            <button type="button" class="pref-chip channel-card" data-channel="camara" aria-pressed="false" aria-controls="vision-panel">
+              <span class="channel-card-title">Cámara IA</span>
+              <span class="channel-card-sub">Señas cotidianas a texto y voz</span>
+            </button>
+            <button type="button" class="pref-chip channel-card" data-channel="texto" aria-pressed="false" aria-controls="sim-textmode-card">
+              <span class="channel-card-title">Texto / Lectura</span>
+              <span class="channel-card-sub">Chat asistido y voz a texto</span>
+            </button>
+          </div>
+
+          <div class="sim-sector-row app-welcome-sector">
+            <div class="pref-group" role="group" aria-label="Sede o sector institucional">
+              <span class="pref-label">Sede</span>
+              <button type="button" class="pref-chip is-active" data-sim-sector="Banco" aria-pressed="true">Banco</button>
+              <button type="button" class="pref-chip" data-sim-sector="Comisaría" aria-pressed="false">Comisaría</button>
+              <button type="button" class="pref-chip" data-sim-sector="Salud" aria-pressed="false">Salud</button>
+              <button type="button" class="pref-chip" data-sim-sector="Municipal" aria-pressed="false">Municipal</button>
+            </div>
+
+            <div class="pref-group pref-procedure">
+              <label for="sim-procedure-select" class="pref-label">Trámite</label>
+              <select id="sim-procedure-select" class="sim-select" aria-label="Seleccionar trámite institucional">
+                <option value="Consulta de saldo y retiro">Consulta de saldo y retiro</option>
+                <option value="Apertura de cuenta">Apertura de cuenta</option>
+                <option value="Bloqueo o reposición de tarjeta">Bloqueo o reposición de tarjeta</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="app-welcome-actions">
+            <button type="button" class="btn btn-primary" id="btn-one-tap-start">
+              <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+              <span id="btn-one-tap-label">Iniciar Atención</span>
+            </button>
+            <button type="button" class="btn btn-emergency" id="btn-welcome-emergency">
+              <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+              <span>Modo Emergencia</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="app-operate" id="app-operate" hidden aria-label="Atención en curso" tabindex="-1">
+          <div class="app-operate-top">
+            <p class="sim-session-meta" id="sim-session-meta">Sin login · Sesión lista para iniciar</p>
+            <div class="pref-group app-channel-switch" role="group" aria-label="Cambiar canal de comunicación">
+              <span class="pref-label">Canal</span>
+              <button type="button" class="pref-chip is-active" data-channel="lsp" aria-pressed="true">Intérprete LSP</button>
+              <button type="button" class="pref-chip" data-channel="camara" aria-pressed="false" aria-controls="vision-panel">Cámara IA</button>
+              <button type="button" class="pref-chip" data-channel="texto" aria-pressed="false" aria-controls="sim-textmode-card">Texto / Lectura</button>
+            </div>
+          </div>
+
+          <div class="contingency-banner" id="contingency-banner" hidden role="status" aria-live="assertive">
+            <span class="contingency-spinner" aria-hidden="true"></span>
+            <span id="contingency-message">Microcorte de red detectado. Reconectando canal seguro sin perder el historial…</span>
+          </div>
+
+            <!-- Panel de Modo Emergencia (HU-009, HU-011, HU-014, HU-015, Figma P2) -->
+            <div class="emergency-panel" id="emergency-panel" hidden role="region" aria-label="Panel de emergencia prioritaria">
+              <div class="emergency-banner">
+                <div class="emergency-banner-text">
+                  <strong>MODO EMERGENCIA ACTIVO · PRIORIDAD MÁXIMA</strong>
+                  <span id="emergency-queue-timer">Saltando cola general · Conectando intérprete LSP en &lt;30 s…</span>
+                </div>
+                <button type="button" class="btn-emergency-exit" id="btn-exit-emergency">
+                  Salir de emergencia
+                </button>
+              </div>
+
+              <div class="emergency-types-section">
+                <p class="emergency-prompt">Selecciona el tipo de emergencia prioritaria:</p>
+                <div class="emergency-types-row" role="group" aria-label="Tipos de emergencia prioritaria">
+                  <button type="button" class="emergency-type-btn" data-emergency-type="Policial (105)" aria-pressed="false">
+                    <span class="emergency-type-name">Policial (105)</span>
+                    <span class="emergency-type-sub">Denuncia o riesgo inmediato</span>
+                  </button>
+                  <button type="button" class="emergency-type-btn" data-emergency-type="Médica (106)" aria-pressed="false">
+                    <span class="emergency-type-name">Médica (106)</span>
+                    <span class="emergency-type-sub">Urgencia o atención de salud</span>
+                  </button>
+                  <button type="button" class="emergency-type-btn" data-emergency-type="Violencia de Género (100)" aria-pressed="false">
+                    <span class="emergency-type-name">Violencia de Género (100)</span>
+                    <span class="emergency-type-sub">Línea de protección y ayuda</span>
+                  </button>
+                </div>
+              </div>
+
+              <p class="emergency-prompt">O toca un símbolo rápido (≥80×80 px):</p>
+              <div class="crisis-grid" role="group" aria-label="Símbolos rápidos de crisis">
+                <button type="button" class="crisis-card" data-crisis="Salud" aria-pressed="false">
+                  <svg width="80" height="80" viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                    <rect x="8" y="8" width="64" height="64" rx="16" fill="#FEE2E2" stroke="#D92626" stroke-width="3"/>
+                    <path d="M40 22V58M22 40H58" stroke="#D92626" stroke-width="8" stroke-linecap="round"/>
+                  </svg>
+                  <span>Salud</span>
+                </button>
+                <button type="button" class="crisis-card" data-crisis="Policía" aria-pressed="false">
+                  <svg width="80" height="80" viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                    <rect x="8" y="8" width="64" height="64" rx="16" fill="#FEE2E2" stroke="#D92626" stroke-width="3"/>
+                    <path d="M40 18L60 28V42C60 53.5 51.5 62.5 40 66C28.5 62.5 20 53.5 20 42V28L40 18Z" stroke="#D92626" stroke-width="4" fill="white"/>
+                    <path d="M40 31V44M40 52V52.5" stroke="#D92626" stroke-width="5" stroke-linecap="round"/>
+                  </svg>
+                  <span>Policía</span>
+                </button>
+                <button type="button" class="crisis-card" data-crisis="Incendio" aria-pressed="false">
+                  <svg width="80" height="80" viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                    <rect x="8" y="8" width="64" height="64" rx="16" fill="#FEE2E2" stroke="#D92626" stroke-width="3"/>
+                    <path d="M41 18C41 27 52 31 52 44C52 52.5 46.5 59 40 59C33.5 59 28 52.5 28 44C28 36 33 31 35 26C36 30 39 31 41 18Z" fill="white" stroke="#D92626" stroke-width="4" stroke-linejoin="round"/>
+                    <path d="M40 43C42.5 45.5 44 48 44 51C44 53.5 42.2 55.5 40 55.5C37.8 55.5 36 53.5 36 51C36 48 37.5 45.5 40 43Z" fill="#D92626"/>
+                  </svg>
+                  <span>Incendio</span>
+                </button>
+                <button type="button" class="crisis-card" data-crisis="Peligro / Violencia" aria-pressed="false">
+                  <svg width="80" height="80" viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                    <rect x="8" y="8" width="64" height="64" rx="16" fill="#FEE2E2" stroke="#D92626" stroke-width="3"/>
+                    <path d="M40 20L62 58H18L40 20Z" fill="white" stroke="#D92626" stroke-width="4" stroke-linejoin="round"/>
+                    <path d="M40 34V46M40 52V52.5" stroke="#D92626" stroke-width="4.5" stroke-linecap="round"/>
+                  </svg>
+                  <span>Peligro / Violencia</span>
+                </button>
+              </div>
+            </div>
+
+
+            <!-- Video HD y Mensajería Asistida -->
+            <div class="sim-main-grid" id="sim-main-grid">
+              <!-- Columna Video -->
+              <div class="sim-video-column" id="sim-video-column">
+                <!-- Panel Cámara IA (LSP): MediaPipe se inyecta SOLO al pulsar "Activar Cámara" -->
+                <section class="vision-panel" id="vision-panel" hidden aria-labelledby="vision-title" data-support-avoid>
+                  <div class="vision-top-bar">
+                    <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
+
+                    <div class="vision-status-group">
+                      <span class="vision-hands-count" id="vision-hands-count" hidden aria-live="polite" aria-label="Manos detectadas: 0 de 2">Manos: 0 / 2</span>
+                      <div class="vision-status" id="vision-status" data-state="idle" role="status">
+                        <span class="vision-status-icon" aria-hidden="true">
+                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                            <g data-state-icon="idle"><circle cx="12" cy="12" r="8"/><path d="M8 8L16 16"/></g>
+                            <g data-state-icon="loading"><path d="M12 3V7M12 17V21M3 12H7M17 12H21M5.6 5.6L8.4 8.4M15.6 15.6L18.4 18.4M5.6 18.4L8.4 15.6M15.6 8.4L18.4 5.6"/></g>
+                            <g data-state-icon="live"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></g>
+                            <g data-state-icon="simulation"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9H15M9 12H15M9 15H12"/></g>
+                          </svg>
+                        </span>
+                        <span class="vision-status-text" id="vision-status-text">Cámara inactiva</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <p class="vision-notice" id="vision-notice" role="status" hidden></p>
+
+                  <div class="vision-stage" id="vision-stage">
+                    <video id="vision-video" class="vision-video" autoplay playsinline muted disablepictureinpicture aria-label="Vista previa de tu cámara"></video>
+                    <canvas id="vision-canvas" class="vision-canvas" width="1280" height="720" aria-hidden="true"></canvas>
+                    <div class="vision-placeholder" id="vision-placeholder">
+                      <p id="vision-placeholder-text">Pulsa “Activar Cámara” y muestra una o ambas manos. El video se procesa en tu dispositivo: no se graba ni se envía.</p>
+                    </div>
+                  </div>
+
+                  <div class="vision-actions" role="group" aria-label="Controles de Cámara IA">
+                    <button type="button" class="btn btn-primary vision-btn" id="btn-vision-start">
+                      <svg class="vision-btn-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5H14C15.1 5 16 5.9 16 7V17C16 18.1 15.1 19 14 19H4C2.9 19 2 18.1 2 17V7C2 5.9 2.9 5 4 5Z"/><path d="M16 10L22 6V18L16 14"/></svg>
+                      <span>Activar Cámara</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-simulate">
+                      <span>Probar sin cámara</span>
+                    </button>
+                  </div>
+
+                  <div class="vision-simulation" id="vision-simulation" hidden>
+                    <p class="vision-simulation-title" id="vision-simulation-title">Señas de prueba (sin cámara)</p>
+                    <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
+                  </div>
+
+                  <div class="vision-output" id="vision-output">
+                    <div class="vision-live" id="vision-live" aria-live="polite" aria-atomic="true">
+                      <p class="vision-output-label" id="vision-sentence-label">Oración traducida en vivo (LSP → Español)</p>
+                      <p class="vision-sentence is-empty" id="vision-sentence">Muestra una seña y mantenla un instante para empezar la oración.</p>
+                      <p class="vision-last-detect" id="vision-last-detect">Última seña: — · Confianza: —</p>
+                      <p class="vision-sent-note" id="vision-sent-note" hidden></p>
+                      <p class="vision-urgent-hint" id="vision-urgent-hint" hidden>Seña de auxilio detectada y enviada. Pulsa el botón rojo para conectar con un intérprete humano.</p>
+                    </div>
+
+                    <div class="vision-stability">
+                      <div class="vision-stability-head">
+                        <span id="vision-progress-label">Estabilidad de la seña (350 ms)</span>
+                        <span id="vision-progress-value">0%</span>
+                      </div>
+                      <div class="vision-progress" id="vision-progress" role="progressbar" aria-labelledby="vision-progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <div class="vision-progress-fill" id="vision-progress-fill"></div>
+                      </div>
+                    </div>
+
+                    <div class="vision-output-actions">
+                      <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-speak" disabled>
+                        <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
+                        <span>Enviar y leer al funcionario</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-undo" disabled>
+                        <span>Deshacer</span>
+                      </button>
+                      <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
+                        <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
+                        <span>Escalar a Intérprete Humano (&lt;30 s)</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <details class="vision-guide" id="vision-guide">
+                    <summary class="vision-guide-summary">Ver señas reconocidas</summary>
+                    <ul class="vision-guide-list" id="vision-guide-list"></ul>
+                  </details>
+                </section>
+
+                <div class="video-stage" id="sim-video-stage">
+                  <img
+                    src="../assets/images/interprete-lsp.png"
+                    alt="Video demostrativo de intérprete de Lengua de Señas Peruana en HD"
+                    class="video-stage-img"
+                    id="sim-video-img"
+                    loading="lazy"
+                    decoding="async">
+
+                  <div class="video-overlay-top">
+                    <span class="video-camera-tag" id="sim-camera-angle">Cámara: Frontal · Intérprete LSP</span>
+                    <span class="video-live-badge is-ready" id="sim-live-badge">LISTO PARA INICIAR</span>
+                  </div>
+
+                  <div class="video-connecting-overlay" id="sim-connecting-overlay" hidden role="status" aria-live="polite">
+                    <span class="connecting-spinner" aria-hidden="true"></span>
+                    <p class="connecting-title" id="sim-connecting-title">Buscando intérprete LSP · Estimado &lt; 30 s</p>
+                    <p class="connecting-subtitle" id="sim-connecting-countdown">Conectando en 2 s…</p>
+                    <div class="connecting-actions">
+                      <button type="button" class="btn btn-secondary" id="btn-cancel-connect">Cancelar</button>
+                      <button type="button" class="btn btn-emergency" id="btn-escalate-connect">Convertir en Urgente</button>
+                    </div>
+                  </div>
+
+                  <div class="video-camera-off-overlay" id="sim-camera-off-overlay" hidden>
+                    <p>Cámara del usuario pausada</p>
+                    <span>El audio y el chat asistido siguen activos.</span>
+                  </div>
+                </div>
+
+                <p class="interpreter-caption" id="sim-interpreter-caption" role="status" aria-live="polite">Intérprete LSP · En espera. Pulsa “Iniciar Atención” para conectar.</p>
+
+                <!-- Tarjeta amigable de Modo Texto / Lectura (sin overlay oscuro sobre foto) -->
+                <section class="textmode-card" id="sim-textmode-card" hidden aria-labelledby="textmode-card-title">
+                  <div class="textmode-card-header">
+                    <span class="textmode-pill">Modo Texto / Lectura Activo</span>
+                    <h4 class="h2-title" id="textmode-card-title">Atención cotidiana en texto claro</h4>
+                  </div>
+                  <p class="textmode-card-desc">
+                    Usa el panel de <strong>Mensajería Asistida</strong> a la derecha para escribir, tocar una plantilla rápida o usar el dictado de voz. Es autónomo e inmediato: no requiere videollamada ni cámara.
+                  </p>
+                  <ul class="textmode-tips">
+                    <li>Toca una plantilla rápida para responder en un clic.</li>
+                    <li>Edita o copia tu DNI y monto antes de confirmar.</li>
+                  </ul>
+                  <div class="textmode-switch-actions">
+                    <button type="button" class="btn btn-primary" data-switch-channel="lsp">
+                      <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+                      <span>Cambiar a Intérprete LSP</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-switch-channel="camara">
+                      <span>Cambiar a Cámara IA (Gestos)</span>
+                    </button>
+                  </div>
+                </section>
+
+                <div class="video-badges-row" id="sim-video-badges">
+                  <div class="status-pill">
+                    <img src="../assets/icons/signal.svg" alt="" width="20" height="20" class="icon-svg icon-primary">
+                    <span id="sim-fps-badge">&gt;30 fps HD</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="status-pill turn-toggle-pill"
+                    id="btn-toggle-turn"
+                    aria-label="Cambiar indicador de turno de interpretación">
+                    <img src="../assets/icons/translate.svg" alt="" width="20" height="20" class="icon-svg icon-primary">
+                    <span id="sim-turn-label">Interpretando a LSP</span>
+                  </button>
+                </div>
+
+                <div class="call-controls" id="sim-call-controls" role="group" aria-label="Controles de videollamada">
+                  <button
+                    type="button"
+                    class="btn-call-control"
+                    id="btn-call-mic"
+                    aria-pressed="false"
+                    aria-label="Silenciar o activar micrófono"
+                    title="Micrófono">
+                    <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-call-control"
+                    id="btn-call-camera"
+                    aria-pressed="false"
+                    aria-label="Desactivar o activar cámara"
+                    title="Cámara">
+                    <img src="../assets/icons/camera.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-call-control"
+                    id="btn-call-switch"
+                    aria-label="Cambiar cámara frontal o de documentos"
+                    title="Cambiar cámara">
+                    <img src="../assets/icons/switch.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-call-control"
+                    id="btn-call-fullscreen"
+                    aria-label="Abrir simulador en pantalla completa"
+                    title="Pantalla completa">
+                    <img src="../assets/icons/fullscreen.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-call-control btn-call-hangup"
+                    id="btn-call-hangup"
+                    aria-label="Finalizar atención y generar comprobante"
+                    title="Finalizar atención">
+                    <img src="../assets/icons/hangup.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+                  </button>
+                  <p class="call-controls-note" id="sim-controls-note">Vista demostrativa · No se graba video</p>
+                </div>
+              </div>
+
+              <!-- Columna Chat Asistido -->
+              <aside class="sim-chat-column" aria-label="Mensajería asistida para datos sensibles" data-support-avoid>
+                <div class="chat-header">
+                  <h4 class="chat-title">Mensajería Asistida</h4>
+                  <p class="chat-subtitle" id="sim-chat-sector-label">Banco · Datos de ejemplo</p>
+                </div>
+
+                <div class="chat-messages" id="sim-chat-messages" aria-live="polite">
+                  <div class="chat-bubble chat-bubble-staff">
+                    <span class="chat-sender">Personal de ventanilla</span>
+                    <p>Por favor, confirma tu DNI y el monto de la operación.</p>
+                  </div>
+                </div>
+
+                <div class="sensitive-data-card">
+                  <div class="sensitive-data-values" id="sim-sensitive-data">
+                    <div class="sensitive-row">
+                      <span class="sensitive-role">DNI del ciudadano</span>
+                      <p class="sensitive-value">00000000</p>
+                    </div>
+                    <div class="sensitive-row">
+                      <span class="sensitive-role">Monto / Operación (Ventanilla)</span>
+                      <p class="sensitive-value">S/ 150.00</p>
+                      <span class="sensitive-note">Solo lectura para el ciudadano</span>
+                    </div>
+                  </div>
+                  <div class="sensitive-data-actions">
+                    <button type="button" class="btn-soft" id="btn-copy-data">
+                      Copiar datos
+                    </button>
+                    <button type="button" class="btn-soft" id="btn-edit-dni" aria-expanded="false" aria-controls="sensitive-edit-form">
+                      Editar mi DNI
+                    </button>
+                    <button type="button" class="btn-soft" id="btn-edit-amount" aria-expanded="false" aria-controls="sensitive-edit-form">
+                      Ajustar monto (Personal)
+                    </button>
+                  </div>
+                  <form class="sensitive-edit-form" id="sensitive-edit-form" hidden>
+                    <div class="sensitive-edit-field" id="edit-group-1">
+                      <label for="edit-field-1" id="edit-label-1">DNI del ciudadano</label>
+                      <input type="text" id="edit-field-1" class="chat-input" placeholder="Ej. 00000000" autocomplete="off" maxlength="32">
+                    </div>
+                    <div class="sensitive-edit-field" id="edit-group-2" hidden>
+                      <label for="edit-field-2" id="edit-label-2">Monto / Operación (Ventanilla)</label>
+                      <input type="text" id="edit-field-2" class="chat-input" placeholder="Ej. 150.00" autocomplete="off" maxlength="40">
+                    </div>
+                    <span class="field-error" id="sensitive-edit-error" role="alert" hidden></span>
+                    <div class="sensitive-edit-actions">
+                      <button type="submit" class="btn-soft btn-save-data" id="btn-save-data">Guardar</button>
+                      <button type="button" class="btn-soft" id="btn-cancel-edit-data">Cancelar</button>
+                    </div>
+                  </form>
+                </div>
+
+                <p class="chat-disclaimer">
+                  Datos ficticios. No ingreses información real en esta demostración.
+                </p>
+
+                <!-- Plantillas rápidas + Dictado de voz simulado -->
+                <div class="quick-templates" id="sim-quick-templates" role="group" aria-label="Plantillas rápidas de respuesta">
+                  <button type="button" class="template-chip" data-template="Confirmo mi DNI: 00000000 y monto S/ 150.00.">Confirmar DNI y monto</button>
+                  <button type="button" class="template-chip" data-template="Por favor, repite en Lengua de Señas Peruana.">Repetir en LSP</button>
+                  <button type="button" class="template-chip" data-template="Necesito constancia impresa de la operación.">Pedir constancia</button>
+                </div>
+
+                <form class="chat-form" id="sim-chat-form">
+                  <label for="sim-chat-input" class="visually-hidden">Mensaje de respuesta</label>
+                  <input
+                    type="text"
+                    id="sim-chat-input"
+                    class="chat-input"
+                    placeholder="Escribe o selecciona una respuesta…"
+                    autocomplete="off">
+
+                  <div class="chat-form-actions">
+                    <button type="button" class="btn-soft btn-voice-dictation" id="btn-voice-dictation" aria-pressed="false">
+                      <img src="../assets/icons/mic.svg" alt="" width="18" height="18" class="icon-svg icon-primary">
+                      <span>Dictado de voz</span>
+                    </button>
+                    <button type="submit" class="btn-soft btn-send-reply">
+                      Enviar respuesta
+                    </button>
+                  </div>
+                </form>
+              </aside>
+            </div>
+
+
+          <div class="app-bottom-bar" role="group" aria-label="Acciones de la atención">
+            <p class="app-privacy">Sin grabación · Ley N.° 29733</p>
+            <div class="app-bottom-actions">
+              <button
+                type="button"
+                class="btn-contingency"
+                id="btn-simulate-outage"
+                title="Simular caída temporal de conectividad y reconexión automática">
+                Simular microcorte
+              </button>
+              <button type="button" class="btn btn-primary" id="btn-finish-session">
+                Finalizar atención
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- VISTA REMOTA: CONSOLA DEL INTÉRPRETE (Figma P8, P9, P10) -->
+          <!-- VISTA 2: CONSOLA DEL INTÉRPRETE (Figma P8, P9, P10) -->
+          <div class="sim-workspace sim-console-workspace" id="sim-view-consola" hidden role="region" aria-label="Consola del Intérprete">
+            <div class="sim-top-bar">
+              <div>
+                <h3 class="display-title-sm">SeñaSegura · Consola del Intérprete</h3>
+                <p class="sim-session-meta">Sesión de demostración · Solo datos ficticios · Sin grabación de video</p>
+              </div>
+              <div class="sim-network-group">
+                <div class="status-pill">
+                  <img src="../assets/icons/check.svg" alt="" width="20" height="20" class="icon-svg icon-check">
+                  <span id="console-network-label">Red Operativa</span>
+                </div>
+                <button type="button" class="btn-contingency" id="btn-console-sim-alert">
+                  Simular alerta crítica
+                </button>
+              </div>
+            </div>
+
+            <!-- Barra de estado del intérprete + acceso a Glosario (P8, P10) -->
+            <div class="console-status-bar">
+              <div class="pref-group" role="group" aria-label="Disponibilidad del intérprete">
+                <span class="pref-label">Estado del intérprete</span>
+                <button type="button" class="pref-chip console-status-chip is-active" data-interpreter-status="Disponible" aria-pressed="true">Disponible</button>
+                <button type="button" class="pref-chip console-status-chip" data-interpreter-status="En Pausa" aria-pressed="false">En Pausa</button>
+                <button type="button" class="pref-chip console-status-chip" data-interpreter-status="Ocupado" aria-pressed="false">Ocupado</button>
+              </div>
+              <button type="button" class="btn btn-secondary btn-glossary-trigger" id="btn-open-glossary">
+                <span>Consultar Glosario LSP</span>
+              </button>
+            </div>
+
+            <!-- Banner de Alerta Crítica (P8) -->
+            <div class="console-critical-banner" id="console-critical-banner" hidden role="alert">
+              <div class="console-critical-text">
+                <strong id="console-critical-title">EMERGENCIA CRÍTICA · Comisaría Alfonso Ugarte — Denuncia Policial (&lt;30 s)</strong>
+                <span id="console-critical-sub">Prioridad máxima en cola · Sin grabación de video</span>
+              </div>
+              <div class="console-critical-actions">
+                <button type="button" class="btn btn-emergency" id="btn-accept-critical-emergency">
+                  Aceptar Emergencia Ahora
+                </button>
+                <button type="button" class="btn-soft" id="btn-dismiss-critical-sim" hidden>
+                  Descartar simulación
+                </button>
+              </div>
+            </div>
+
+            <div class="console-grid">
+              <aside class="console-context-card">
+                <h4 class="h2-title">Contexto de la sesión</h4>
+                <p class="console-sector-title" id="console-sector-label">Banco · Datos de ejemplo</p>
+                <div class="console-data-block" id="console-data-block">
+                  <p>DNI: 00000000</p>
+                  <p>Monto: S/ 150.00</p>
+                </div>
+
+                <dl class="console-meta-list">
+                  <dt>Rol</dt>
+                  <dd>Intérprete LSP (<span id="console-interpreter-state">Disponible</span>)</dd>
+                  <dt>Prioridad</dt>
+                  <dd id="console-priority-value">Atención de prueba</dd>
+                  <dt>Trámite</dt>
+                  <dd id="console-procedure-value">Consulta de saldo y retiro</dd>
+                  <dt>Privacidad</dt>
+                  <dd>Evita repetir datos sensibles en voz alta.</dd>
+                </dl>
+
+                <div class="console-chat-panel">
+                  <p class="console-notes-label" id="console-chat-heading">Mensajes de Ventanilla (en vivo)</p>
+                  <div class="console-chat-feed" id="console-chat-feed" role="log" aria-labelledby="console-chat-heading" aria-live="polite"></div>
+                </div>
+
+                <div class="console-notes-panel">
+                  <label for="console-private-notes" class="console-notes-label">Bloc de notas privado</label>
+                  <textarea
+                    id="console-private-notes"
+                    class="console-notes-textarea"
+                    rows="3"
+                    placeholder="Anota referencias breves de la interpretación…"></textarea>
+                  <p class="badge-caption">Solo visible para el intérprete · Se purga al cerrar sesión</p>
+                </div>
+              </aside>
+
+              <div class="console-stage-card">
+                <div class="console-video-frame">
+                  <img
+                    src="../assets/images/consola-video.png"
+                    alt="Vista de ciudadano e intérprete en consola de interpretación LSP"
+                    class="console-video-img"
+                    loading="lazy"
+                    decoding="async">
+                  <span class="console-tech-badge" aria-label="Telemetría en vivo">32 fps · 45 ms</span>
+
+                  <div class="console-pip-box" id="console-pip-box">
+                    <div class="console-pip-header">
+                      <span class="console-pip-label">Tu autovista · Plano medio</span>
+                      <button
+                        type="button"
+                        class="console-pip-toggle"
+                        id="btn-toggle-pip"
+                        aria-expanded="true"
+                        aria-controls="console-pip-preview">
+                        Minimizar
+                      </button>
+                    </div>
+                    <div class="console-pip-preview" id="console-pip-preview">
+                      <img
+                        src="../assets/images/interprete-lsp.png"
+                        alt="Autovista del intérprete en plano medio"
+                        class="console-pip-img"
+                        loading="lazy"
+                        decoding="async">
+                    </div>
+                  </div>
+                </div>
+                <p class="console-turn-status" id="console-turn-status" aria-live="polite">Interpretando a LSP</p>
+
+                <div class="console-turn-controls">
+                  <button type="button" class="btn btn-primary" id="btn-console-to-lsp" aria-pressed="true">
+                    <svg class="icon-svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12H19M14 17L19 12L14 7"/></svg>
+                    <span>Interpretar a LSP</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary" id="btn-console-to-es" aria-pressed="false">
+                    <svg class="icon-svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12H19M14 17L19 12L14 7"/></svg>
+                    <span>Voz a funcionario</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary" id="btn-console-support">
+                    <span>Solicitar Apoyo / Transferir</span>
+                  </button>
+                </div>
+
+                <p class="console-support-notice" id="console-support-notice" hidden role="status" aria-live="polite"></p>
+              </div>
+            </div>
+
+            <button type="button" class="btn btn-primary" id="btn-console-back">
+              <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+              <span>Volver a Ventanilla</span>
+            </button>
+          </div>
+    </div>
+  </main>
+
+  <dialog class="app-modal" id="modal-closure" aria-labelledby="modal-closure-title">
+    <div class="modal-body">
+      <h2 id="modal-closure-title" class="display-title">Atención finalizada</h2>
+      <p class="muted-text">Tu constancia está lista. Conserva el código para consultarla después.</p>
+
+      <div class="closure-grid">
+        <div class="closure-card">
+          <p class="closure-label">Tu código de atención</p>
+          <p class="closure-code" id="closure-code-display">SEG-84920418</p>
+          <p class="muted-text">Compártelo en ventanilla para continuar o verificar tu atención.</p>
+
+          <div class="closure-actions">
+            <button type="button" class="btn btn-primary" id="btn-download-receipt">
+              <img src="../assets/icons/download.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+              <span>Descargar constancia</span>
+            </button>
+            <button type="button" class="btn btn-secondary" id="btn-print-ticket">
+              <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+              <span>Imprimir ticket</span>
+            </button>
+            <button type="button" class="btn-soft" id="btn-copy-closure-code">
+              Copiar código
+            </button>
+            <button type="button" class="btn-soft" id="btn-preview-pdf">
+              Vista previa PDF
+            </button>
+          </div>
+
+          <p class="muted-text closure-demo-note">Demostración: el comprobante no contiene video ni mensajes de la conversación.</p>
+        </div>
+
+        <div class="closure-qr-box">
+          <div id="closure-qr-container" class="qr-render-area" aria-label="Código QR de la constancia de atención">
+            <img src="../assets/images/qr-seg-84920.svg" alt="Código QR de comprobante" width="148" height="148" loading="lazy" decoding="async">
+          </div>
+          <p class="badge-caption" id="closure-qr-caption">SEG-84920418<br>QR verificable</p>
+        </div>
+      </div>
+
+      <div class="purge-notice" role="status">
+        <h3>Purga local completada · Ley N.° 29733</h3>
+        <p id="closure-purge-text">
+          Los mensajes del chat local y los datos temporales de esta sesión han sido eliminados del dispositivo al cerrar. No se graba video.
+        </p>
+      </div>
+
+      <div class="closure-rating-box" id="closure-rating-box">
+        <p class="closure-rating-title" id="closure-rating-label">¿Cómo fue tu experiencia? (Opcional)</p>
+        <div class="closure-rating-grid" role="group" aria-labelledby="closure-rating-label">
+          <button type="button" class="closure-rating-btn" data-rating="Muy difícil" aria-pressed="false">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="16" cy="16" r="13"/>
+              <path d="M10.5 11.5L13 13.5M21.5 11.5L19 13.5"/>
+              <path d="M10.5 22.5C12 19.5 20 19.5 21.5 22.5"/>
+            </svg>
+            <span>Muy difícil</span>
+          </button>
+          <button type="button" class="closure-rating-btn" data-rating="Difícil" aria-pressed="false">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="16" cy="16" r="13"/>
+              <circle cx="11.5" cy="13" r="1.2" fill="currentColor"/>
+              <circle cx="20.5" cy="13" r="1.2" fill="currentColor"/>
+              <path d="M11 21.5C12.8 19.5 19.2 19.5 21 21.5"/>
+            </svg>
+          <span>Difícil</span>
+          </button>
+          <button type="button" class="closure-rating-btn" data-rating="Regular" aria-pressed="false">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="16" cy="16" r="13"/>
+              <circle cx="11.5" cy="13" r="1.2" fill="currentColor"/>
+              <circle cx="20.5" cy="13" r="1.2" fill="currentColor"/>
+              <path d="M11 20.5H21"/>
+            </svg>
+            <span>Regular</span>
+          </button>
+          <button type="button" class="closure-rating-btn" data-rating="Fácil" aria-pressed="false">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="16" cy="16" r="13"/>
+              <circle cx="11.5" cy="13" r="1.2" fill="currentColor"/>
+              <circle cx="20.5" cy="13" r="1.2" fill="currentColor"/>
+              <path d="M11 19C12.5 21.8 19.5 21.8 21 19"/>
+            </svg>
+            <span>Fácil</span>
+          </button>
+          <button type="button" class="closure-rating-btn" data-rating="Muy fácil" aria-pressed="false">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="16" cy="16" r="13"/>
+              <circle cx="11.5" cy="12.5" r="1.2" fill="currentColor"/>
+              <circle cx="20.5" cy="12.5" r="1.2" fill="currentColor"/>
+              <path d="M10 18C11.5 23 20.5 23 22 18Z" fill="currentColor"/>
+            </svg>
+            <span>Muy fácil</span>
+          </button>
+        </div>
+        <p class="closure-rating-feedback" id="closure-rating-feedback" role="status" aria-live="polite" hidden></p>
+      </div>
+
+      <button type="button" class="btn btn-primary" data-close-modal="modal-closure">
+        <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+        <span>Volver al simulador</span>
+      </button>
+      <p class="badge-caption closure-demo-note">Constancia demostrativa · Verificable en la página web de SeñaSegura (Inicio → Verificador).</p>
+    </div>
+  </dialog>
+
+  <dialog class="app-modal" id="modal-pdf-preview" aria-labelledby="modal-pdf-title">
+    <div class="modal-body">
+      <h2 id="modal-pdf-title" class="display-title">Comprobante de atención</h2>
+      <p class="badge-caption">SEÑASEGURA · CONSTANCIA DE CIERRE</p>
+
+      <div class="pdf-preview-box">
+        <div class="pdf-preview-info">
+          <p class="closure-code" id="pdf-preview-code">SEG-84920418</p>
+          <p id="pdf-preview-sector">Atención finalizada · Sector: Banco</p>
+          <p id="pdf-preview-channel">Canal: Lengua de Señas Peruana</p>
+          <p>No incluye video ni mensajes de la conversación.</p>
+        </div>
+        <div id="pdf-preview-qr" class="qr-render-area">
+          <img src="../assets/images/qr-seg-84920.svg" alt="Código QR del comprobante" width="148" height="148" loading="lazy" decoding="async">
+        </div>
+      </div>
+
+      <p class="muted-text pdf-demo-note">
+        Puedes descargar la constancia o imprimir el ticket institucional directamente desde el navegador.
+      </p>
+
+      <div class="modal-actions-row">
+        <button type="button" class="btn btn-primary" id="btn-pdf-download">
+          <img src="../assets/icons/download.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+          <span>Descargar constancia</span>
+        </button>
+        <button type="button" class="btn btn-secondary" id="btn-pdf-print">
+          <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+          <span>Imprimir / Guardar PDF</span>
+        </button>
+        <button type="button" class="btn btn-secondary" id="btn-close-pdf-preview">
+          <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">
+          <span>Cerrar vista previa</span>
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="app-modal" id="modal-glossary" aria-labelledby="modal-glossary-title">
+    <div class="modal-body">
+      <div class="glossary-header">
+        <div>
+          <h2 id="modal-glossary-title" class="display-title-sm">Glosario Técnico LSP</h2>
+          <p class="muted-text">Términos frecuentes para interpretación institucional en ventanilla.</p>
+        </div>
+        <button type="button" class="btn-soft" data-close-modal="modal-glossary" aria-label="Cerrar glosario LSP">
+          Cerrar
+        </button>
+      </div>
+
+      <div class="glossary-controls">
+        <div class="glossary-search-wrap">
+          <label for="glossary-search" class="visually-hidden">Buscar término en el glosario LSP</label>
+          <input
+            type="search"
+            id="glossary-search"
+            class="chat-input"
+            placeholder="Buscar término (ej. CCI, Denuncia, Consentimiento)…">
+        </div>
+        <div class="glossary-filters" role="group" aria-label="Filtrar glosario por categoría">
+          <button type="button" class="pref-chip glossary-filter-btn is-active" data-glossary-filter="Todos" aria-pressed="true">Todos</button>
+          <button type="button" class="pref-chip glossary-filter-btn" data-glossary-filter="Legal/Policial" aria-pressed="false">Legal/Policial</button>
+          <button type="button" class="pref-chip glossary-filter-btn" data-glossary-filter="Bancario/Financiero" aria-pressed="false">Bancario/Financiero</button>
+        </div>
+      </div>
+
+      <ul class="glossary-list" id="glossary-list" aria-live="polite"></ul>
+      <p class="muted-text" id="glossary-empty" hidden>No se encontraron términos que coincidan con tu búsqueda.</p>
+
+      <button type="button" class="btn btn-primary" data-close-modal="modal-glossary">
+        <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+        <span>Volver a la Consola</span>
+      </button>
+    </div>
+  </dialog>
+
+  <dialog class="app-modal app-modal-fullscreen" id="modal-fullscreen" aria-labelledby="modal-fullscreen-title">
+    <div class="fullscreen-body">
+      <div class="fullscreen-header">
+        <h2 id="modal-fullscreen-title" class="display-title fullscreen-title">SeñaSegura · Simulador en pantalla completa</h2>
+        <span class="status-pill">&gt;30 fps HD · <span id="fullscreen-turn-label">Interpretando a LSP</span></span>
+      </div>
+
+      <div class="fullscreen-video-box">
+        <img
+          src="../assets/images/interprete-lsp.png"
+          alt="Intérprete de Lengua de Señas Peruana en pantalla completa"
+          class="fullscreen-video-img"
+          loading="lazy"
+          decoding="async">
+      </div>
+
+      <p class="interpreter-caption" id="fullscreen-interpreter-caption" role="status" aria-live="polite">Intérprete LSP · En espera. Pulsa “Iniciar Atención” para conectar.</p>
+
+      <div class="fullscreen-footer">
+        <button type="button" class="btn btn-primary" data-close-modal="modal-fullscreen">
+          <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
+          <span>Volver a la ventanilla</span>
+        </button>
+        <p class="fullscreen-note">Vista de demostración · No se graba video</p>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

@@ -1,11 +1,14 @@
 /**
- * SeñaSegura · Módulo "Cámara IA (Gestos)" (Vanilla JS ES6+)
+ * SeñaSegura · Módulo "Cámara IA (LSP)" (Vanilla JS ES6+)
  *
- * - MediaPipe Hands se inyecta dinámicamente SOLO cuando la persona pulsa "Activar Cámara IA".
+ * - MediaPipe Hands se inyecta dinámicamente SOLO cuando la persona pulsa "Activar Cámara".
  *   No existe ninguna etiqueta <script> de MediaPipe en el HTML (Lighthouse intacto en la carga inicial).
  * - Todo el procesamiento de video ocurre en el dispositivo: no se graba ni se envía video.
- * - Si no hay cámara, se deniega el permiso o falla el CDN, se activa un modo de respaldo
- *   (cuadrícula de 8 gestos: 1 y 2 manos) que ejecuta exactamente el mismo flujo de traducción.
+ * - Un único motor interno pre-entrenado (sin botones de modo) evalúa en cada frame:
+ *   señas de ventanilla (1 y 2 manos + movimiento en 18 frames) y letras distintivas del alfabeto LSP.
+ *   Cada seña confirmada se encadena en una oración legible (LSP → Español).
+ * - Si no hay cámara, se deniega el permiso o falla el CDN, se activa una cuadrícula de respaldo
+ *   que ejecuta exactamente el mismo flujo de traducción.
  *
  * Integración con js/main.js mediante:
  *   - window.SenaSegura (puente: setChannel, appendChatMessage, activateEmergency)
@@ -23,14 +26,14 @@
     'https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js'
   ];
 
-  const CONFIRM_MS = 600; // el gesto debe mantenerse estable este tiempo
-  const CONFIRM_FAST_MS = 280; // confirmación ágil ante saludo activo en movimiento
-  const COOLDOWN_MS = 2500; // antes de reenviar la misma frase al chat
+  const CONFIRM_MS = 350; // ritmo ágil: la seña debe mantenerse estable este tiempo
+  const CONFIRM_FAST_MS = 220; // saludo activo (palma en movimiento) se confirma más rápido
+  const CONFIRM_INDEX_MS = 560; // el índice espera un instante para distinguir "quieto" de "negación en movimiento"
+  const COOLDOWN_MS = 1200; // antes de encadenar de nuevo la misma seña
   const GRACE_MS = 150; // parpadeos de detección tolerados sin reiniciar el temporizador
   const MIN_FRAME_INTERVAL_MS = 33; // máx. ~30 inferencias/s
-  const MOTION_WINDOW = 18; // ventana deslizante para detección dinámica
-  const CUSTOM_TARGET_SAMPLES = 12;
-  const CUSTOM_SIMILARITY_THRESHOLD = 0.94;
+  const MOTION_WINDOW = 18; // frames de trayectoria para detectar señas dinámicas
+  const AUTO_SEND_PAUSE_MS = 2000; // manos abajo este tiempo → envío y voz automáticos
   const LOAD_TIMEOUT_MS = 25000;
   const SCRIPT_TIMEOUT_MS = 15000;
 
@@ -38,50 +41,64 @@
 
   const STATUS_TEXT = {
     idle: 'Cámara inactiva',
-    loading: 'Cargando modelo de visión...',
-    live: 'Detectando señas en vivo',
-    simulation: 'Modo simulación activo'
+    loading: 'Cargando modelo…',
+    live: 'En vivo',
+    simulation: 'Modo prueba'
   };
 
   const PLACEHOLDER_TEXT = {
-    idle: 'Pulsa “Activar Cámara IA” y muestra una o ambas manos frente a la cámara.',
+    idle: 'Pulsa “Activar Cámara” y muestra una o ambas manos. El video se procesa en tu dispositivo: no se graba ni se envía.',
     loading: 'Cargando modelo de visión... Si el navegador lo solicita, permite el acceso a la cámara.',
-    simulation: 'Modo simulación: la cámara no está en uso. Elige un gesto de la cuadrícula para probar la traducción.'
+    simulation: 'Modo prueba: la cámara no está en uso. Elige una seña de la cuadrícula para probar la traducción.'
   };
 
+  /**
+   * Catálogo único de señas (fuente de verdad para detección, cuadrícula sin cámara y guía).
+   * `phrase` es el fragmento que se encadena en la oración; en letras es `letter`.
+   */
   const GESTURES = [
-    { id: 'palma', emoji: '\u{270B}', label: 'Palma abierta', phrase: 'Hola, necesito atención en ventanilla' },
-    { id: 'pulgar', emoji: '\u{1F44D}', label: 'Pulgar arriba', phrase: 'Sí, confirmo los datos' },
-    { id: 'puno', emoji: '\u{270A}', label: 'Puño cerrado', phrase: 'No / Detener operación' },
-    { id: 'indice', emoji: '\u{261D}\u{FE0F}', label: 'Solo índice arriba', phrase: 'Quiero realizar una consulta o trámite' },
-    { id: 'v', emoji: '\u{270C}\u{FE0F}', label: 'Dos dedos en V', phrase: 'Aquí tengo mi DNI / documento' },
+    { id: 'palma', emoji: '\u{270B}', label: 'Palma abierta / saludo', phrase: 'Hola,', hands: '1 mano' },
+    { id: 'indice', emoji: '\u{261D}\u{FE0F}', label: 'Solo índice arriba', phrase: 'necesito una consulta', hands: '1 mano' },
     {
       id: 'negar_mov',
       emoji: '\u{1F645}',
-      label: 'Negación con índice',
-      phrase: 'No estoy de acuerdo / Por favor corregir'
+      label: 'Índice de lado a lado',
+      phrase: 'no, corregir por favor',
+      hands: '1 mano con movimiento'
     },
-    {
-      id: 'auxilio',
-      emoji: '\u{1F91F}',
-      label: 'Seña de auxilio (ILY)',
-      phrase: 'Necesito ayuda urgente — Escalar a Intérprete',
-      urgent: true
-    },
+    { id: 'pulgar', emoji: '\u{1F44D}', label: 'Pulgar arriba', phrase: 'sí, confirmo', hands: '1 mano' },
+    { id: 'puno', emoji: '\u{270A}', label: 'Puño cerrado', phrase: 'detener operación', hands: '1 mano' },
+    { id: 'v', emoji: '\u{270C}\u{FE0F}', label: 'Dos dedos en V', phrase: 'aquí tengo mi DNI', hands: '1 mano' },
     {
       id: 'dos_palmas',
       emoji: '\u{1F64C}',
       label: 'Dos palmas abiertas',
-      phrase: 'Por favor, espera un momento',
+      phrase: 'espera un momento',
+      hands: '2 manos',
       twoHands: true
     },
     {
       id: 'dos_pulgares',
       emoji: '\u{1F44D}\u{1F44D}',
       label: 'Dos pulgares arriba',
-      phrase: 'Todo conforme, muchas gracias',
+      phrase: 'muchas gracias, todo conforme',
+      hands: '2 manos',
       twoHands: true
-    }
+    },
+    {
+      id: 'auxilio',
+      emoji: '\u{1F91F}',
+      label: 'Seña de auxilio (ILY)',
+      phrase: 'necesito ayuda urgente',
+      hands: '1 o 2 manos',
+      urgent: true
+    },
+    { id: 'letra_l', kind: 'letter', letter: 'L', emoji: 'L', label: 'Letra L', hands: '1 mano', hint: 'pulgar e índice en ángulo recto' },
+    { id: 'letra_y', kind: 'letter', letter: 'Y', emoji: 'Y', label: 'Letra Y', hands: '1 mano', hint: 'pulgar y meñique abiertos' },
+    { id: 'letra_f', kind: 'letter', letter: 'F', emoji: 'F', label: 'Letra F', hands: '1 mano', hint: 'pulgar e índice en círculo, otros tres arriba' },
+    { id: 'letra_o', kind: 'letter', letter: 'O', emoji: 'O', label: 'Letra O', hands: '1 mano', hint: 'dedos curvados tocando el pulgar' },
+    { id: 'letra_c', kind: 'letter', letter: 'C', emoji: 'C', label: 'Letra C', hands: '1 mano', hint: 'mano curvada como una C' },
+    { id: 'letra_w', kind: 'letter', letter: 'W', emoji: 'W', label: 'Letra W', hands: '1 mano', hint: 'índice, medio y anular arriba' }
   ];
   const GESTURE_BY_ID = Object.fromEntries(GESTURES.map((g) => [g.id, g]));
 
@@ -92,7 +109,7 @@
   ];
 
   /* =========================================================
-     2. CLASIFICADOR GEOMÉTRICO (puro, sin DOM)
+     2. MOTOR DE CLASIFICACIÓN (funciones puras, sin DOM)
      Independiente de mano izquierda/derecha y de la rotación de la mano.
      ========================================================= */
   function dist(a, b) {
@@ -100,6 +117,7 @@
   }
 
   /**
+   * Clasifica la postura estática de UNA mano (señas de ventanilla + letras LSP).
    * @param {Array<{x:number,y:number,z?:number}>} landmarks 21 puntos normalizados de MediaPipe
    * @param {number} aspect ancho/alto del video (corrige la distorsión de coordenadas normalizadas)
    * @returns {{id: string|null, fingers: object}}
@@ -110,6 +128,7 @@
     }
     const P = landmarks.map((p) => ({ x: p.x * aspect, y: p.y }));
     const palmSize = dist(P[0], P[9]) || 1e-6; // muñeca → nudillo del medio
+    const rel = (a, b) => dist(P[a], P[b]) / palmSize;
 
     // Dedo extendido: punta más lejos de la muñeca que PIP (+ margen) y que su nudillo MCP
     const isExtended = (tip, pip, mcp) => {
@@ -126,10 +145,12 @@
     const dy = P[2].y - P[4].y;
     const thumbUp = P[4].y < P[3].y && P[3].y < P[2].y && dy > dx * 0.7 && P[5].y - P[4].y > 0.14 * palmSize;
 
-    const thumbExtended = thumbSpread || thumbUp;
+    const thumbOpen = rel(4, 5) > 0.8; // pulgar claramente separado de la palma (letras L, Y, C)
+    const pinch = rel(4, 8); // distancia pulgar-índice normalizada (letras F, O)
+    const reach = (tip) => rel(tip, 0); // ≈1.0 puño cerrado · ≈2.0 dedo extendido · ≈1.5 dedo curvado
 
     const fingers = {
-      thumb: thumbExtended,
+      thumb: thumbSpread || thumbUp,
       index: isExtended(8, 6, 5),
       middle: isExtended(12, 10, 9),
       ring: isExtended(16, 14, 13),
@@ -138,12 +159,19 @@
     const { index: I, middle: M, ring: R, pinky: K } = fingers;
 
     let id = null;
-    if (I && M && R && K) id = 'palma';
-    else if (!I && !M && !R && !K && thumbUp) id = 'pulgar';
-    else if (!I && !M && !R && !K && !thumbUp) id = 'puno';
+    if (pinch < 0.32 && M && R && K) id = 'letra_f';
+    else if (I && M && R && K) id = 'palma';
     else if (I && !M && !R && K) id = 'auxilio';
+    else if (I && M && R && !K) id = 'letra_w';
     else if (I && M && !R && !K) id = 'v';
-    else if (I && !M && !R && !K) id = 'indice';
+    else if (I && !M && !R && !K) id = thumbOpen ? 'letra_l' : 'indice';
+    else if (!I && !M && !R && K && thumbOpen) id = 'letra_y';
+    else if (!I && !M && !R && !K) {
+      if (thumbUp) id = 'pulgar';
+      else if (pinch < 0.3 && rel(4, 12) < 0.55 && reach(8) > 1.2) id = 'letra_o';
+      else if (thumbOpen && pinch >= 0.5 && pinch <= 1.2 && reach(8) > 1.25 && reach(12) > 1.25) id = 'letra_c';
+      else id = 'puno';
+    }
 
     return { id, fingers };
   }
@@ -202,53 +230,7 @@
   }
 
   /**
-   * Normaliza los 21 landmarks de una mano en un vector invariante de 42 valores (x, y)
-   * centrado en la muñeca [0] y escalado por palmSize.
-   * @param {Array<{x:number,y:number,z?:number}>} landmarks
-   * @param {number} aspect
-   * @returns {number[]|null}
-   */
-  function extractHandFeatureVector(landmarks, aspect = 4 / 3) {
-    if (!Array.isArray(landmarks) || landmarks.length < 21) return null;
-    const ox = landmarks[0].x * aspect;
-    const oy = landmarks[0].y;
-    const mx = landmarks[9].x * aspect;
-    const my = landmarks[9].y;
-    const palmSize = Math.hypot(mx - ox, my - oy) || 1e-6;
-    const vec = new Array(42);
-    for (let i = 0; i < 21; i += 1) {
-      vec[i * 2] = (landmarks[i].x * aspect - ox) / palmSize;
-      vec[i * 2 + 1] = (landmarks[i].y - oy) / palmSize;
-    }
-    return vec;
-  }
-
-  /**
-   * Similitud coseno entre dos vectores de características.
-   * @param {number[]} vecA
-   * @param {number[]} vecB
-   * @returns {number}
-   */
-  function cosineSimilarity(vecA, vecB) {
-    if (!Array.isArray(vecA) || !Array.isArray(vecB) || vecA.length === 0 || vecA.length !== vecB.length) {
-      return 0;
-    }
-    let dot = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < vecA.length; i += 1) {
-      const a = vecA[i];
-      const b = vecB[i];
-      dot += a * b;
-      normA += a * a;
-      normB += b * b;
-    }
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom > 0 ? dot / denom : 0;
-  }
-
-  /**
-   * Detecta oscilación horizontal en la ventana deslizante de trayectoria (muñeca o punta índice).
+   * Detecta oscilación horizontal en la ventana deslizante de trayectoria (muñeca o punta del índice).
    * @param {Array<{t:number,palmSize:number,wristX:number,wristY:number,tipX:number,tipY:number}>} motionBuffer
    * @returns {boolean}
    */
@@ -282,9 +264,9 @@
       let anchorX = recent[0][xKey];
       const stepThreshold = 0.04 * avgPalm;
       for (let i = 1; i < recent.length; i += 1) {
-        const dx = recent[i][xKey] - anchorX;
-        if (Math.abs(dx) >= stepThreshold) {
-          const nextDir = dx > 0 ? 1 : -1;
+        const dxStep = recent[i][xKey] - anchorX;
+        if (Math.abs(dxStep) >= stepThreshold) {
+          const nextDir = dxStep > 0 ? 1 : -1;
           if (dir !== 0 && nextDir !== dir) reversals += 1;
           dir = nextDir;
           anchorX = recent[i][xKey];
@@ -297,44 +279,46 @@
   }
 
   /**
-   * Clasificador Few-Shot k-NN (k=3) sobre señas personalizadas guardadas en sesión.
-   * @param {number[]} featureVec
-   * @param {Array<{id:string,label:string,phrase:string,samples:number[][]}>} customList
-   * @param {number} threshold
-   * @returns {{id:string,score:number,gesture:object}|null}
+   * Encadena las señas confirmadas en una oración legible (capitalización, espacios y punto final).
+   * Las letras consecutivas se unen en un código (ej. "L" + "Y" → "LY").
+   * @param {Array<{kind:'word'|'letter', text:string}>} tokens
+   * @returns {string}
    */
-  function matchCustomGesture(featureVec, customList, threshold = CUSTOM_SIMILARITY_THRESHOLD) {
-    if (!featureVec || !Array.isArray(customList) || customList.length === 0) return null;
-    let bestGesture = null;
-    let bestScore = -1;
-
-    customList.forEach((gesture) => {
-      if (!gesture || !Array.isArray(gesture.samples) || gesture.samples.length === 0) return;
-      const sims = gesture.samples
-        .map((sample) => cosineSimilarity(featureVec, sample))
-        .sort((a, b) => b - a);
-      const topK = sims.slice(0, Math.min(3, sims.length));
-      const meanScore = topK.reduce((sum, val) => sum + val, 0) / topK.length;
-      if (meanScore > bestScore) {
-        bestScore = meanScore;
-        bestGesture = gesture;
+  function composeSentence(tokens) {
+    if (!Array.isArray(tokens) || tokens.length === 0) return '';
+    const parts = [];
+    let letterRun = '';
+    const flushLetters = () => {
+      if (letterRun) {
+        parts.push({ text: letterRun, kind: 'letters' });
+        letterRun = '';
+      }
+    };
+    tokens.forEach((token) => {
+      if (token.kind === 'letter') {
+        letterRun += token.text;
+      } else {
+        flushLetters();
+        parts.push({ text: token.text, kind: 'word' });
       }
     });
+    flushLetters();
 
-    if (bestGesture && bestScore >= threshold) {
-      return { id: bestGesture.id, score: bestScore, gesture: bestGesture };
+    let sentence = parts.map((p) => p.text).join(' ');
+    sentence = sentence.charAt(0).toUpperCase() + sentence.slice(1);
+    if (parts[parts.length - 1].kind === 'word') {
+      sentence = sentence.replace(/[,;:]$/, '');
+      if (!/[.!?]$/.test(sentence)) sentence += '.';
     }
-    return null;
+    return sentence;
   }
 
   // Disponible para pruebas manuales en consola; no altera el estado de la app.
   window.SenaSeguraVision = Object.freeze({
     classifyHand,
     resolveMultiHandGesture,
-    extractHandFeatureVector,
-    cosineSimilarity,
     detectHorizontalOscillation,
-    matchCustomGesture,
+    composeSentence,
     GESTURES
   });
 
@@ -415,25 +399,15 @@
     const placeholder = $('vision-placeholder');
     const placeholderText = $('vision-placeholder-text');
     const btnStart = $('btn-vision-start');
-    const btnStop = $('btn-vision-stop');
     const btnSimulate = $('btn-vision-simulate');
     const btnSpeak = $('btn-vision-speak');
+    const btnUndo = $('btn-vision-undo');
     const btnEscalate = $('btn-vision-escalate');
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
     const guideList = $('vision-guide-list');
-    const customLabelInput = $('vision-custom-label');
-    const btnCapture = $('btn-vision-capture');
-    const btnClearCustom = $('btn-vision-clear-custom');
-    const trainerProgressWrap = $('vision-trainer-progress-wrap');
-    const trainerProgress = $('vision-trainer-progress');
-    const trainerProgressFill = $('vision-trainer-progress-fill');
-    const trainerStatus = $('vision-trainer-status');
-    const customListEl = $('vision-custom-list');
-    const autoSpeakToggle = $('vision-autospeak');
-    const gestureName = $('vision-gesture-name');
-    const phraseEl = $('vision-phrase');
-    const confidenceEl = $('vision-confidence');
+    const sentenceEl = $('vision-sentence');
+    const lastDetectEl = $('vision-last-detect');
     const sentNote = $('vision-sent-note');
     const urgentHint = $('vision-urgent-hint');
     const progressBar = $('vision-progress');
@@ -441,13 +415,19 @@
     const progressLabel = $('vision-progress-label');
     const progressValue = $('vision-progress-value');
 
-    if (!panel || !video || !canvas || !btnStart || !btnStop || !btnSimulate || !btnSpeak || !btnEscalate) {
+    if (
+      !panel || !video || !canvas || !btnStart || !btnSimulate || !btnSpeak || !btnUndo || !btnEscalate ||
+      !sentenceEl || !lastDetectEl
+    ) {
       return; // el panel no existe en esta página
     }
 
     const ctx = canvas.getContext('2d');
-    const DEFAULT_PHRASE = 'Muestra un gesto y mantenlo 0,6 s para traducirlo.';
-    const DEFAULT_PROGRESS_LABEL = 'Estabilidad del gesto (600 ms)';
+    const btnStartLabel = btnStart.querySelector('span') || btnStart;
+    const btnSimulateLabel = btnSimulate.querySelector('span') || btnSimulate;
+    const DEFAULT_SENTENCE = 'Muestra una seña y mantenla un instante para empezar la oración.';
+    const DEFAULT_LAST_DETECT = 'Última seña: — · Confianza: —';
+    const DEFAULT_PROGRESS_LABEL = `Estabilidad de la seña (${CONFIRM_MS} ms)`;
 
     let mode = 'idle'; // idle | loading | live | simulation
     let sessionToken = 0;
@@ -461,69 +441,11 @@
     let lastSendAt = 0;
     let lastConfirmed = null;
     let lastProgressPct = -1;
-    const lastSentAt = {};
+    let handsDownSince = null;
+    let sentenceTokens = [];
+    const lastAddedAt = {};
     const motionBuffer = [];
-    let customGestures = [];
-    let customSeq = 0;
-    let captureState = null;
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0 };
-
-    function resolveGestureMeta(id) {
-      if (!id) return null;
-      return GESTURE_BY_ID[id] || customGestures.find((g) => g.id === id) || null;
-    }
-
-    function updateCaptureProgress(count) {
-      const safe = Math.max(0, Math.min(CUSTOM_TARGET_SAMPLES, count));
-      if (trainerProgressWrap) trainerProgressWrap.hidden = !captureState;
-      if (trainerProgress) trainerProgress.setAttribute('aria-valuenow', String(safe));
-      if (trainerProgressFill) trainerProgressFill.style.transform = `scaleX(${safe / CUSTOM_TARGET_SAMPLES})`;
-    }
-
-    function renderCustomGestures() {
-      if (btnClearCustom) btnClearCustom.hidden = customGestures.length === 0;
-      if (!customListEl) return;
-      customListEl.textContent = '';
-
-      customGestures.forEach((item) => {
-        const li = document.createElement('li');
-        li.className = 'vision-custom-item';
-
-        const meta = document.createElement('div');
-        meta.className = 'vision-custom-meta';
-
-        const nameEl = document.createElement('strong');
-        nameEl.textContent = item.label;
-
-        const samplesEl = document.createElement('span');
-        samplesEl.className = 'vision-custom-samples';
-        samplesEl.textContent = `${item.samples.length} muestras · IA local`;
-
-        meta.append(nameEl, samplesEl);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.className = 'btn-soft';
-        removeBtn.dataset.removeCustom = item.id;
-        removeBtn.textContent = 'Eliminar';
-        removeBtn.setAttribute('aria-label', `Eliminar seña ${item.label}`);
-
-        li.append(meta, removeBtn);
-        customListEl.appendChild(li);
-      });
-    }
-
-    function clearCustomGestures(statusMessage) {
-      customGestures = [];
-      captureState = null;
-      updateCaptureProgress(0);
-      renderCustomGestures();
-      if (btnCapture) btnCapture.disabled = mode !== 'live';
-      if (trainerStatus) {
-        trainerStatus.textContent =
-          statusMessage || 'Activa la cámara en vivo para entrenar una seña con 12 muestras locales.';
-      }
-    }
 
     /* ---------- UI helpers ---------- */
     function updateHandsCount(count) {
@@ -546,13 +468,9 @@
       if (nextMode !== 'live') {
         placeholderText.textContent = PLACEHOLDER_TEXT[nextMode];
       }
-      const busy = nextMode === 'loading' || nextMode === 'live';
-      btnStart.disabled = busy;
-      btnStop.disabled = nextMode === 'idle';
-      if (btnCapture) btnCapture.disabled = nextMode !== 'live' || Boolean(captureState);
-      const btnStopLabel = btnStop.querySelector('span') || btnStop;
-      btnStopLabel.textContent = nextMode === 'simulation' ? 'Salir de simulación' : 'Detener Cámara';
-      btnSimulate.disabled = nextMode === 'simulation';
+      const cameraOn = nextMode === 'loading' || nextMode === 'live';
+      btnStartLabel.textContent = cameraOn ? 'Detener Cámara' : 'Activar Cámara';
+      btnSimulateLabel.textContent = nextMode === 'simulation' ? 'Salir de simulación' : 'Probar sin cámara';
       simBox.hidden = nextMode !== 'simulation';
     }
 
@@ -580,17 +498,26 @@
       urgentHint.hidden = !isUrgent;
     }
 
+    function renderSentence() {
+      const text = composeSentence(sentenceTokens);
+      sentenceEl.textContent = text || DEFAULT_SENTENCE;
+      sentenceEl.classList.toggle('is-empty', !text);
+      const hasTokens = sentenceTokens.length > 0;
+      btnSpeak.disabled = !hasTokens;
+      btnUndo.disabled = !hasTokens && !lastConfirmed;
+    }
+
     function resetOutput() {
       lastConfirmed = null;
-      gestureName.textContent = 'Sin gesto confirmado';
-      phraseEl.textContent = DEFAULT_PHRASE;
-      confidenceEl.textContent = 'Confianza: —';
+      sentenceTokens = [];
+      Object.keys(lastAddedAt).forEach((key) => delete lastAddedAt[key]);
+      lastDetectEl.textContent = DEFAULT_LAST_DETECT;
       sentNote.hidden = true;
       sentNote.textContent = '';
-      btnSpeak.disabled = true;
       setUrgent(false);
       setProgress(0);
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+      renderSentence();
     }
 
     function resetDetection() {
@@ -601,6 +528,7 @@
       detection.scoreSum = 0;
       detection.scoreN = 0;
       motionBuffer.length = 0;
+      handsDownSince = null;
       setProgress(0);
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
@@ -639,8 +567,6 @@
       releaseStream();
       clearCanvas();
       if (stage) stage.style.removeProperty('aspect-ratio');
-      captureState = null;
-      updateCaptureProgress(0);
       updateHandsCount(0);
       resetDetection();
       setUrgent(false);
@@ -747,7 +673,7 @@
       showNotice('');
       resetOutput();
       setStatus('loading');
-      btnStop.focus();
+      btnStart.focus();
 
       // Permiso de cámara y descarga del modelo en paralelo
       const [camResult, libResult] = await Promise.allSettled([openCamera(), getHands()]);
@@ -761,13 +687,13 @@
       }
 
       if (camResult.status === 'rejected') {
-        enterSimulation(`${cameraErrorMessage(camResult.reason)} Usa los gestos de prueba para continuar.`);
+        enterSimulation(`${cameraErrorMessage(camResult.reason)} Usa la prueba sin cámara para continuar.`);
         return;
       }
       stream = camResult.value;
 
       if (libResult.status === 'rejected') {
-        enterSimulation(`${modelErrorMessage()} Usa los gestos de prueba para continuar.`);
+        enterSimulation(`${modelErrorMessage()} Usa la prueba sin cámara para continuar.`);
         return;
       }
       hands = libResult.value;
@@ -793,7 +719,7 @@
         rafId = requestAnimationFrame(loop);
       } catch (_) {
         if (token !== sessionToken) return;
-        enterSimulation('No se pudo mostrar el video de la cámara. Usa los gestos de prueba para continuar.');
+        enterSimulation('No se pudo mostrar el video de la cámara. Usa la prueba sin cámara para continuar.');
       }
     }
 
@@ -815,7 +741,7 @@
         .send({ image: video })
         .catch(() => {
           if (running) {
-            enterSimulation('Ocurrió un error al analizar la cámara. Usa los gestos de prueba para continuar.');
+            enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
           }
         })
         .then(() => {
@@ -879,32 +805,6 @@
       });
     }
 
-    function finalizeCapturedGesture() {
-      if (!captureState) return;
-      const { label, samples } = captureState;
-      const existingIdx = customGestures.findIndex((g) => g.label.toLowerCase() === label.toLowerCase());
-      const entry = {
-        id: existingIdx >= 0 ? customGestures[existingIdx].id : `custom_${++customSeq}`,
-        emoji: '\u{2728}',
-        label,
-        phrase: label,
-        samples: samples.slice()
-      };
-      if (existingIdx >= 0) {
-        customGestures[existingIdx] = entry;
-      } else {
-        customGestures.push(entry);
-      }
-      captureState = null;
-      updateCaptureProgress(0);
-      if (customLabelInput) customLabelInput.value = '';
-      if (btnCapture) btnCapture.disabled = mode !== 'live';
-      renderCustomGestures();
-      if (trainerStatus) {
-        trainerStatus.textContent = `¡Seña "${label}" entrenada con ${CUSTOM_TARGET_SAMPLES} muestras! Mantén la seña 0,6 s para probarla.`;
-      }
-    }
-
     function handleResults(results) {
       if (!running) return;
       clearCanvas();
@@ -912,43 +812,23 @@
       const now = performance.now();
       updateHandsCount(allLandmarks.length);
 
-      const aspect = canvas.width / canvas.height;
-
-      if (captureState) {
-        if (allLandmarks.length === 0) {
-          if (trainerStatus) {
-            trainerStatus.textContent = `Muestra una mano frente a la cámara para capturar (${captureState.samples.length} / ${CUSTOM_TARGET_SAMPLES})…`;
-          }
-          return;
-        }
-        allLandmarks.forEach((landmarks, idx) => drawHand(landmarks, idx));
-        const vec = extractHandFeatureVector(allLandmarks[0], aspect);
-        if (vec) {
-          captureState.samples.push(vec);
-          const count = captureState.samples.length;
-          updateCaptureProgress(count);
-          if (count >= CUSTOM_TARGET_SAMPLES) {
-            finalizeCapturedGesture();
-          } else if (trainerStatus) {
-            trainerStatus.textContent = `Capturando muestras: ${count} / ${CUSTOM_TARGET_SAMPLES}…`;
-          }
-        }
-        return;
-      }
-
       if (allLandmarks.length === 0) {
         motionBuffer.length = 0;
         feedGesture(null, 0, now);
+        if (handsDownSince === null) handsDownSince = now;
+        if (sentenceTokens.length > 0 && now - handsDownSince >= AUTO_SEND_PAUSE_MS) {
+          sendSentence({ auto: true });
+        }
         return;
       }
+      handsDownSince = null;
 
+      const aspect = canvas.width / canvas.height;
       pushMotionFrame(allLandmarks[0], aspect, now);
       const hasOscillation = detectHorizontalOscillation(motionBuffer);
 
-      let customMatch = null;
       let fastConfirm = false;
       const handEntries = [];
-
       allLandmarks.forEach((landmarks, idx) => {
         drawHand(landmarks, idx);
         const handedness = results.multiHandedness && results.multiHandedness[idx];
@@ -957,30 +837,17 @@
         let effectiveId = staticId;
 
         if (idx === 0 && hasOscillation) {
-          if (staticId === 'palma') fastConfirm = true;
-          else if (staticId === 'indice') effectiveId = 'negar_mov';
+          if (staticId === 'palma') fastConfirm = true; // saludo activo
+          else if (staticId === 'indice') effectiveId = 'negar_mov'; // negación con índice
         }
-
         handEntries.push({ id: effectiveId, score });
-
-        if (!customMatch && customGestures.length > 0 && staticId !== 'auxilio') {
-          const vec = extractHandFeatureVector(landmarks, aspect);
-          const match = matchCustomGesture(vec, customGestures, CUSTOM_SIMILARITY_THRESHOLD);
-          if (match) customMatch = match;
-        }
       });
-
-      const hasAuxilio = handEntries.some((entry) => entry.id === 'auxilio');
-      if (customMatch && !hasAuxilio) {
-        feedGesture(customMatch.id, customMatch.score, now);
-        return;
-      }
 
       const resolved = resolveMultiHandGesture(handEntries, detection.id);
       feedGesture(resolved ? resolved.id : null, resolved ? resolved.score : 0, now, { fastConfirm });
     }
 
-    /** Exige estabilidad (600 ms o 280 ms en saludo activo) antes de confirmar un gesto. */
+    /** Exige estabilidad breve antes de confirmar una seña (ritmo ágil, adaptado a cada tipo de seña). */
     function feedGesture(id, score, now, { fastConfirm = false } = {}) {
       if (id && id === detection.id) {
         detection.lastSeen = now;
@@ -1003,12 +870,14 @@
         return;
       }
 
-      const activeGesture = resolveGestureMeta(detection.id);
+      const activeGesture = GESTURE_BY_ID[detection.id];
       if (progressLabel && activeGesture) {
         progressLabel.textContent = `Confirmando: ${activeGesture.label}…`;
       }
 
-      const targetMs = fastConfirm ? CONFIRM_FAST_MS : CONFIRM_MS;
+      let targetMs = CONFIRM_MS;
+      if (fastConfirm) targetMs = CONFIRM_FAST_MS;
+      else if (detection.id === 'indice') targetMs = CONFIRM_INDEX_MS;
       const progress = Math.min(1, (now - detection.since) / targetMs);
       setProgress(progress);
 
@@ -1019,38 +888,40 @@
       }
     }
 
-    /** Flujo único (cámara y simulación): caja de traducción + chat + voz. */
+    /** Flujo único (cámara y prueba): encadena la seña en la oración traducida en vivo. */
     function confirmGesture(id, confidencePct, source) {
-      const gesture = resolveGestureMeta(id);
+      const gesture = GESTURE_BY_ID[id];
       if (!gesture) return;
       lastConfirmed = gesture;
 
-      gestureName.textContent = `${gesture.label}`;
-      phraseEl.textContent = gesture.phrase;
-      confidenceEl.textContent = `Confianza: ${confidencePct}%${source === 'simulation' ? ' (simulada)' : ''}`;
-      btnSpeak.disabled = false;
+      const isSimulated = source === 'simulation';
+      lastDetectEl.textContent = `Última seña: ${gesture.label} · Confianza: ${confidencePct}%${isSimulated ? ' (simulada)' : ''}`;
       setUrgent(Boolean(gesture.urgent));
-      if (autoSpeakToggle && autoSpeakToggle.checked) {
-        speakLast();
-      }
 
       const now = performance.now();
-      const last = lastSentAt[id];
-      const canSend = typeof last !== 'number' || now - last >= COOLDOWN_MS;
-      if (canSend) {
-        lastSentAt[id] = now;
-        const bridge = window.SenaSegura;
-        if (bridge && typeof bridge.appendChatMessage === 'function') {
-          bridge.appendChatMessage(CHAT_SENDER, gesture.phrase, 'user');
-        }
-        sentNote.textContent = 'Enviado al chat de Mensajería Asistida.';
+      const last = lastAddedAt[id];
+      const canAdd = isSimulated || typeof last !== 'number' || now - last >= COOLDOWN_MS;
+      if (canAdd) {
+        lastAddedAt[id] = now;
+        const isLetter = gesture.kind === 'letter';
+        sentenceTokens.push({
+          id,
+          kind: isLetter ? 'letter' : 'word',
+          text: isLetter ? gesture.letter : gesture.phrase
+        });
+        renderSentence();
+        sentNote.textContent = isSimulated
+          ? 'Pulsa “Enviar y leer al funcionario” cuando la oración esté lista.'
+          : 'Baja las manos 2 s para enviar y leer automáticamente.';
+        sentNote.hidden = false;
+        // Seguridad: la seña de auxilio se envía de inmediato, sin esperar la pausa
+        if (gesture.urgent) sendSentence({ auto: true });
       } else {
-        sentNote.textContent = 'No se reenvió al chat: la misma frase se envió hace menos de 2,5 s.';
+        renderSentence();
       }
-      sentNote.hidden = false;
     }
 
-    /* ---------- Voz al funcionario ---------- */
+    /* ---------- Voz y envío al funcionario ---------- */
     function pickSpanishVoice() {
       const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
       const norm = (v) => String(v.lang || '').replace('_', '-').toLowerCase();
@@ -1062,26 +933,60 @@
       );
     }
 
-    function speakLast() {
-      if (!lastConfirmed) return;
+    /** @returns {boolean} true si el navegador pudo iniciar la síntesis de voz. */
+    function speakText(text) {
+      if (!text) return false;
       if (!('speechSynthesis' in window) || typeof window.SpeechSynthesisUtterance === 'undefined') {
-        sentNote.textContent = 'Tu navegador no admite síntesis de voz.';
-        sentNote.hidden = false;
-        return;
+        return false;
       }
       const synth = window.speechSynthesis;
       synth.cancel(); // evita colas trabadas
-      const utterance = new window.SpeechSynthesisUtterance(lastConfirmed.phrase);
+      const utterance = new window.SpeechSynthesisUtterance(text);
       const voice = pickSpanishVoice();
       utterance.voice = voice;
       utterance.lang = voice ? voice.lang : 'es-PE';
       if (!voice && synth.getVoices && synth.getVoices().length) utterance.lang = 'es-ES';
       utterance.rate = 0.95;
       setTimeout(() => synth.speak(utterance), 60);
+      return true;
     }
 
     function cancelSpeech() {
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    }
+
+    /** Envía la oración al chat de Mensajería Asistida y la lee en voz alta al funcionario. */
+    function sendSentence({ auto = false } = {}) {
+      if (sentenceTokens.length === 0) return;
+      const text = composeSentence(sentenceTokens);
+      sentenceTokens = [];
+      renderSentence();
+
+      const bridge = window.SenaSegura;
+      if (bridge && typeof bridge.appendChatMessage === 'function') {
+        bridge.appendChatMessage(CHAT_SENDER, text, 'user');
+      }
+      const spoke = speakText(text);
+      const prefix = auto ? 'Enviado automáticamente' : 'Enviado';
+      sentNote.textContent = spoke
+        ? `${prefix} al chat y leído al funcionario: “${text}”`
+        : `${prefix} al chat: “${text}”. Tu navegador no admite síntesis de voz.`;
+      sentNote.hidden = false;
+    }
+
+    /** Deshacer: quita la última seña de la oración; si ya no hay señas, limpia la salida. */
+    function undoLast() {
+      if (sentenceTokens.length > 0) {
+        const removed = sentenceTokens.pop();
+        delete lastAddedAt[removed.id];
+        const removedGesture = GESTURE_BY_ID[removed.id];
+        if (removedGesture && removedGesture.urgent) setUrgent(false);
+        renderSentence();
+        sentNote.textContent = 'Última seña eliminada de la oración.';
+        sentNote.hidden = false;
+      } else {
+        resetOutput();
+      }
     }
 
     /* ---------- Escalar a intérprete humano ---------- */
@@ -1102,7 +1007,7 @@
       }
     }
 
-    /* ---------- Eventos ---------- */
+    /* ---------- Cuadrícula de respaldo y guía (única fuente: GESTURES) ---------- */
     GESTURES.forEach((gesture) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -1120,7 +1025,7 @@
 
       const text = document.createElement('span');
       text.className = 'vision-gesture-text';
-      text.textContent = gesture.phrase;
+      text.textContent = gesture.kind === 'letter' ? `Añade “${gesture.letter}”` : gesture.phrase;
 
       btn.append(emoji, label, text);
       simGrid.appendChild(btn);
@@ -1133,16 +1038,19 @@
         guideEmoji.textContent = gesture.emoji;
 
         const descWrap = document.createElement('span');
-        const modality = gesture.id === 'auxilio' ? '1 o 2 manos' : gesture.twoHands ? '2 manos' : '1 mano';
         const strong = document.createElement('strong');
-        strong.textContent = `${gesture.label} (${modality}):`;
-        descWrap.append(strong, ` ${gesture.phrase}`);
+        strong.textContent = `${gesture.label} (${gesture.hands}):`;
+        const detail = gesture.kind === 'letter'
+          ? ` añade “${gesture.letter}” · ${gesture.hint}`
+          : ` “${gesture.phrase}”`;
+        descWrap.append(strong, detail);
 
         li.append(guideEmoji, descWrap);
         guideList.appendChild(li);
       }
     });
 
+    /* ---------- Eventos ---------- */
     simGrid.addEventListener('click', (e) => {
       const btn = e.target.closest('.vision-gesture-btn[data-gesture]');
       if (!btn) return;
@@ -1151,65 +1059,29 @@
       confirmGesture(btn.getAttribute('data-gesture'), confidence, 'simulation');
     });
 
-    btnStart.addEventListener('click', startCamera);
-
-    btnStop.addEventListener('click', () => {
-      resetToIdle();
-      btnStart.focus();
+    btnStart.addEventListener('click', () => {
+      if (mode === 'loading' || mode === 'live') {
+        resetToIdle();
+        btnStart.focus();
+        return;
+      }
+      startCamera();
     });
 
     btnSimulate.addEventListener('click', () => {
+      if (mode === 'simulation') {
+        resetToIdle();
+        btnSimulate.focus();
+        return;
+      }
       enterSimulation('');
       const first = simGrid.querySelector('.vision-gesture-btn');
       if (first) first.focus();
     });
 
-    btnSpeak.addEventListener('click', speakLast);
+    btnSpeak.addEventListener('click', () => sendSentence({ auto: false }));
+    btnUndo.addEventListener('click', undoLast);
     btnEscalate.addEventListener('click', escalate);
-
-    if (btnCapture) {
-      btnCapture.addEventListener('click', () => {
-        if (mode !== 'live' || captureState) return;
-        const rawLabel = customLabelInput ? customLabelInput.value.trim() : '';
-        if (rawLabel.length < 2) {
-          if (trainerStatus) {
-            trainerStatus.textContent = 'Escribe un nombre o frase de al menos 2 caracteres antes de capturar.';
-          }
-          if (customLabelInput) customLabelInput.focus();
-          return;
-        }
-        captureState = { label: rawLabel, samples: [] };
-        btnCapture.disabled = true;
-        updateCaptureProgress(0);
-        if (trainerStatus) {
-          trainerStatus.textContent = `Capturando muestras: 0 / ${CUSTOM_TARGET_SAMPLES}… Muestra tu seña frente a la cámara.`;
-        }
-      });
-    }
-
-    if (customListEl) {
-      customListEl.addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-remove-custom]');
-        if (!btn) return;
-        const targetId = btn.dataset.removeCustom;
-        customGestures = customGestures.filter((g) => g.id !== targetId);
-        if (lastConfirmed && lastConfirmed.id === targetId) {
-          resetOutput();
-        }
-        renderCustomGestures();
-        if (trainerStatus) {
-          trainerStatus.textContent = customGestures.length
-            ? 'Seña eliminada de la sesión local.'
-            : 'Activa la cámara en vivo para entrenar una seña con 12 muestras locales.';
-        }
-      });
-    }
-
-    if (btnClearCustom) {
-      btnClearCustom.addEventListener('click', () => {
-        clearCustomGestures('Todas las señas personalizadas fueron eliminadas de la memoria local.');
-      });
-    }
 
     // Esc detiene la cámara / simulación cuando el foco está dentro del panel
     panel.addEventListener('keydown', (e) => {
@@ -1220,16 +1092,15 @@
       }
     });
 
-    // Salir de "Cámara IA (Gestos)" detiene la cámara automáticamente
+    // Salir de "Cámara IA (LSP)" detiene la cámara automáticamente
     document.addEventListener('senasegura:channelchange', (e) => {
       if (!e.detail || e.detail.channel !== 'camara') {
         resetToIdle();
       }
     });
 
-    // Purga local al cerrar la atención
+    // Purga local al cerrar la atención (Ley N.° 29733)
     document.addEventListener('senasegura:purge', () => {
-      clearCustomGestures('Señas personalizadas eliminadas tras cerrar sesión.');
       resetToIdle();
       cancelSpeech();
     });
@@ -1238,7 +1109,7 @@
     document.addEventListener('visibilitychange', () => {
       if (document.hidden && (mode === 'loading' || mode === 'live')) {
         stopCamera();
-        showNotice('La cámara se detuvo al salir de la pestaña. Pulsa “Activar Cámara IA” para reanudar.');
+        showNotice('La cámara se detuvo al salir de la pestaña. Pulsa “Activar Cámara” para reanudar.');
       }
     });
     const releaseOnExit = () => {

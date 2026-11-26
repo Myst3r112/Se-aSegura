@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=14">
-  <script src="../js/main.js?v=14" defer></script>
-  <script src="../js/vision-ai.js?v=14" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=16">
+  <script src="../js/main.js?v=16" defer></script>
+  <script src="../js/vision-ai.js?v=16" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -523,12 +523,19 @@
             <div class="sim-main-grid" id="sim-main-grid">
               <!-- Columna Video -->
               <div class="sim-video-column" id="sim-video-column">
-                <!-- Panel Cámara IA (LSP): MediaPipe se inyecta SOLO al pulsar "Activar Cámara" -->
+                <!-- Panel Cámara IA (LSP): reconocimiento neuronal unificado con precarga silenciosa y enfoque biomecánico -->
                 <section class="vision-panel" id="vision-panel" hidden aria-labelledby="vision-title" data-support-avoid>
                   <div class="vision-top-bar">
-                    <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
+                    <div class="vision-title-group">
+                      <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
+                      <span class="vision-ai-ready" id="vision-ai-ready" data-ready="loading" role="status" aria-live="polite">Preparando IA…</span>
+                    </div>
 
                     <div class="vision-status-group">
+                      <div class="vision-view-toggles" role="group" aria-label="Opciones visuales de cámara">
+                        <button type="button" class="vision-toggle-btn is-active" id="btn-vision-overlay" aria-pressed="true">Ver enfoque IA</button>
+                        <button type="button" class="vision-toggle-btn is-active" id="btn-vision-mirror" aria-pressed="true">Espejo</button>
+                      </div>
                       <span class="vision-hands-count" id="vision-hands-count" hidden aria-live="polite" aria-label="Manos detectadas: 0 de 2">Manos: 0 / 2</span>
                       <div class="vision-status" id="vision-status" data-state="idle" role="status">
                         <span class="vision-status-icon" aria-hidden="true">
@@ -548,7 +555,16 @@
 
                   <div class="vision-stage" id="vision-stage">
                     <video id="vision-video" class="vision-video" autoplay playsinline muted disablepictureinpicture aria-label="Vista previa de tu cámara"></video>
-                    <canvas id="vision-canvas" class="vision-canvas" width="1280" height="720" aria-hidden="true"></canvas>
+                    <canvas id="vision-canvas" class="vision-canvas" width="640" height="480" aria-hidden="true"></canvas>
+                    <div class="vision-hud" id="vision-hud" hidden aria-hidden="true">
+                      <div class="vision-hud-top">
+                        <span class="vision-hud-pill" id="vision-hud-framing" data-tone="ok">Encuadre óptimo</span>
+                        <span class="vision-hud-pill" id="vision-hud-activity" data-tone="idle">En reposo</span>
+                      </div>
+                      <div class="vision-hud-bottom">
+                        <span class="vision-hud-top2" id="vision-hud-top2">Enfoque: esperando seña…</span>
+                      </div>
+                    </div>
                     <div class="vision-placeholder" id="vision-placeholder">
                       <p id="vision-placeholder-text">Pulsa “Activar Cámara” y muestra una o ambas manos. El video se procesa en tu dispositivo: no se graba ni se envía.</p>
                     </div>
@@ -573,9 +589,11 @@
 
                   <div class="vision-output" id="vision-output">
                     <div class="vision-live" id="vision-live" aria-live="polite" aria-atomic="true">
-                      <p class="vision-output-label" id="vision-sentence-label">Oración traducida en vivo (LSP → Español)</p>
+                      <div class="vision-live-head">
+                        <p class="vision-output-label" id="vision-sentence-label">Oración traducida en vivo (LSP → Español)</p>
+                        <p class="vision-last-detect" id="vision-last-detect">Última seña: — · Confianza: —</p>
+                      </div>
                       <p class="vision-sentence is-empty" id="vision-sentence">Muestra una seña y mantenla un instante para empezar la oración.</p>
-                      <p class="vision-last-detect" id="vision-last-detect">Última seña: — · Confianza: —</p>
                       <p class="vision-sent-note" id="vision-sent-note" hidden></p>
                       <p class="vision-urgent-hint" id="vision-urgent-hint" hidden>Seña de auxilio detectada y enviada. Pulsa el botón rojo para conectar con un intérprete humano.</p>
                     </div>
@@ -591,25 +609,29 @@
                     </div>
 
                     <div class="vision-output-actions">
-                      <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-speak" disabled>
-                        <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
-                        <span>Enviar y leer al funcionario</span>
-                      </button>
-                      <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-undo" disabled>
-                        <span>Deshacer</span>
-                      </button>
-                      <button type="button" class="btn btn-outline-primary vision-btn" id="btn-vision-clear" disabled>
-                        <span>Limpiar</span>
-                      </button>
-                      <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
-                        <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
-                        <span>Escalar a Intérprete Humano (&lt;30 s)</span>
-                      </button>
+                      <div class="vision-text-actions" role="group" aria-label="Acciones del mensaje traducido">
+                        <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-speak" disabled>
+                          <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
+                          <span>Enviar y leer al funcionario</span>
+                        </button>
+                        <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-undo" disabled>
+                          <span>Deshacer</span>
+                        </button>
+                        <button type="button" class="btn btn-outline-primary vision-btn" id="btn-vision-clear" disabled>
+                          <span>Limpiar</span>
+                        </button>
+                      </div>
+                      <div class="vision-escalate-zone">
+                        <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
+                          <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
+                          <span>Escalar a Intérprete Humano (&lt;30 s)</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
 
                   <details class="vision-guide" id="vision-guide">
-                    <summary class="vision-guide-summary">Guía rápida: 118 señas dinámicas LSP y alfabeto completo (A–Z + Ñ)</summary>
+                    <summary class="vision-guide-summary">Cómo usar el reconocimiento IA unificado (118 señas LSP + Alfabeto A–Z y Ñ)</summary>
                     <ul class="vision-guide-list" id="vision-guide-list"></ul>
                   </details>
                 </section>

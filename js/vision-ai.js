@@ -3,14 +3,10 @@
  *
  * - Precarga silenciosa en segundo plano al iniciar (requestIdleCallback / setTimeout 800 ms, sin bloquear arranque)
  *   reutilizando las mismas promesas al pulsar "Activar Cámara" sin descargas duplicadas ni alertas prematuras.
- * - Flujo único automático compatible con GitHub Pages (rutas estrictamente relativas sin '/' inicial):
- *     Prioridad 1 (Emergencia): seña inmediata de `auxilio`.
- *     Prioridad 2 (Vocabulario Dinámico · 118 señas): tf.loadGraphModel('./models/senas_dinamicas/model.json')
- *              Ventana deslizante [1, 30, 159] (Pose torso 21 + Mano Izq 69 + Mano Der 69).
- *     Prioridad 3 (Alfabeto A–Z + Ñ): tf.loadGraphModel('./models/alfabeto_lsp/model.json')
- *              Vector estandarizado [1, 16] con 1 mano estable (~500 ms) o trazos dinámicos J, Ñ, Z.
- * - Respaldo geométrico de 7 parámetros LSP si falla TF.js o no hay cámara disponible.
- * - Todo el procesamiento ocurre en el dispositivo: se liberan tensores en cada frame con tf.tidy().
+ * - Motor continuo con pose_landmarker_full en escritorio (pose_landmarker_lite en dispositivos ligeros),
+ *   suavizado temporal EMA, tolerancia a micro-pérdidas (5 frames / ~160 ms) y capa biomecánica (Smart Gating).
+ * - Overlay visual legible ("Ver enfoque IA" / "Espejo") + HUD humano con encuadre, actividad y Top-2 en vivo.
+ * - Compatible 100 % con GitHub Pages (rutas relativas sin '/' inicial) y sin bloqueo del hilo principal (outTensor.data()).
  *
  * Integración con js/main.js mediante:
  *   - window.SenaSegura (puente: setChannel, appendChatMessage, activateEmergency)
@@ -28,7 +24,9 @@
   const TFJS_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
   const HAND_MODEL_URL =
     'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-  const POSE_MODEL_URL =
+  const POSE_MODEL_FULL_URL =
+    'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
+  const POSE_MODEL_LITE_URL =
     'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
   const FACE_MODEL_URL =
     'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
@@ -39,13 +37,19 @@
   const CONFIRM_MS = 320; // confirmación ágil tras voto por mayoría (respaldo geométrico)
   const CONFIRM_FAST_MS = 210; // saludo activo / emergencia inmediata
   const CONFIRM_INDEX_MS = 520; // espera breve para distinguir quieto vs trayectoria
-  const CONFIRM_SPELL_MS = 500; // estabilización de letra estática (~0.5 s) en Modo Deletreo
+  const CONFIRM_SPELL_MS = 500; // estabilización de letra estática (~0.5 s)
   const CONFIRM_SPELL_DYN_MS = 240; // confirmación rápida tras completar trazo dinámico J, Ñ, Z
   const COOLDOWN_MS = 1200; // pausa antes de aceptar nuevamente la misma seña (~1.2 s)
   const SPELL_COOLDOWN_MS = 750; // pausa breve tras confirmar una letra
   const GRACE_MS = 180; // tolerancia a micro-parpadeos
+  const HAND_DROPOUT_GRACE_FRAMES = 5; // tolerancia ~160 ms sin vaciar ventana deslizante
+  const HAND_EMA_ALPHA = 0.55; // suavizado ligero EMA de landmarks de manos
+  const POSE_EMA_ALPHA = 0.45; // suavizado ligero EMA de landmarks de torso
+  const ALPHA_FEATURE_EMA = 0.5; // EMA equivalente a ~3 frames para el vector [16]
+  const MAX_TRAIL_POINTS = 14; // estela visual de trazos J, Ñ, Z y señas dinámicas
+  const HUD_TOP2_THROTTLE_MS = 140; // lectura fluida del Top-2 sin parpadeo excesivo
   const MIN_FRAME_INTERVAL_MS = 33; // ~30 fps máx.
-  const AUX_DETECT_STRIDE = 3; // Face / Pose auxiliar en modo geométrico
+  const AUX_DETECT_STRIDE = 3; // Face auxiliar solo en modo geométrico
   const MOTION_WINDOW = 24; // ventana deslizante para trayectorias J / Ñ / Z
   const DYNAMIC_SEQ_LEN = 30; // [1, 30, 159] para Motor 1
   const DYNAMIC_NUM_FEATURES = 159;
@@ -1130,34 +1134,335 @@
   }
 
   /**
-   * Motor 2 (Alfabeto A–Z + Ñ · ./models/alfabeto_lsp/):
-   * Calcula las 16 características [15 ángulos internos de articulación + 'angulo' 0..360°]
-   * y las estandariza con (x - scalerMean[i]) / scalerStd[i] cuando se proveen escaladores.
+   * Atajo ligero de emergencia (Prioridad 1): detecta la seña ILY ('auxilio': índice y meñique
+   * extendidos, medio y anular cerrados) sin ejecutar el clasificador geométrico completo.
    */
-  function extractAlphabetFeatures(landmarks, scalerMean = null, scalerStd = null) {
+  function detectIlyEmergency(landmarks, worldLandmarks = null, aspect = 1) {
+    const hasWorld = Array.isArray(worldLandmarks) && worldLandmarks.length >= 21;
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+    let pts = null;
+    if (hasWorld) {
+      pts = worldLandmarks;
+    } else if (Array.isArray(landmarks) && landmarks.length >= 21) {
+      pts = landmarks.map((p) => ({
+        x: p.x * safeAspect,
+        y: p.y,
+        z: typeof p.z === 'number' ? p.z * safeAspect : 0
+      }));
+    } else {
+      return false;
+    }
+
+    const palm = dist3(pts[0], pts[9]) || 1e-6;
+    const indexExtended =
+      angleDeg(pts[5], pts[6], pts[7]) >= 142 &&
+      angleDeg(pts[6], pts[7], pts[8]) >= 130 &&
+      dist3(pts[0], pts[8]) > dist3(pts[0], pts[6]) + 0.12 * palm;
+    const pinkyExtended =
+      angleDeg(pts[17], pts[18], pts[19]) >= 138 &&
+      angleDeg(pts[18], pts[19], pts[20]) >= 128 &&
+      dist3(pts[0], pts[20]) > dist3(pts[0], pts[18]) + 0.10 * palm;
+    if (!indexExtended || !pinkyExtended) return false;
+
+    const middleCurled =
+      angleDeg(pts[9], pts[10], pts[11]) <= 122 ||
+      dist3(pts[0], pts[12]) < dist3(pts[0], pts[10]) + 0.05 * palm;
+    const ringCurled =
+      angleDeg(pts[13], pts[14], pts[15]) <= 122 ||
+      dist3(pts[0], pts[16]) < dist3(pts[0], pts[14]) + 0.05 * palm;
+
+    return middleCurled && ringCurled && dist3(pts[8], pts[12]) > 0.25 * palm;
+  }
+
+  /**
+   * Suavizado exponencial ligero (EMA) sobre landmarks de MediaPipe (manos ~0.55, torso ~0.45)
+   * reduciendo el temblor de cámara web sin añadir latencia y reseteando en entradas nuevas.
+   */
+  function smoothLandmarksEMA(prevPts, nextPts, alpha = 0.55, jumpResetDist = 0.35) {
+    if (!Array.isArray(nextPts) || nextPts.length === 0) return null;
+    const clonePts = (pts) =>
+      pts.map((p) => ({
+        x: p.x,
+        y: p.y,
+        z: typeof p.z === 'number' ? p.z : 0,
+        visibility: typeof p.visibility === 'number' ? p.visibility : 1
+      }));
+
+    if (!Array.isArray(prevPts) || prevPts.length !== nextPts.length) {
+      return clonePts(nextPts);
+    }
+
+    const anchorIdx = nextPts.length >= 23 && nextPts[11] && prevPts[11] ? 11 : 0;
+    const anchorJump = Math.hypot(
+      nextPts[anchorIdx].x - prevPts[anchorIdx].x,
+      nextPts[anchorIdx].y - prevPts[anchorIdx].y
+    );
+    if (anchorJump > jumpResetDist) {
+      return clonePts(nextPts);
+    }
+
+    const out = new Array(nextPts.length);
+    for (let i = 0; i < nextPts.length; i += 1) {
+      const prev = prevPts[i];
+      const cur = nextPts[i];
+      const pz = typeof prev.z === 'number' ? prev.z : 0;
+      const cz = typeof cur.z === 'number' ? cur.z : 0;
+      const pv = typeof prev.visibility === 'number' ? prev.visibility : 1;
+      const cv = typeof cur.visibility === 'number' ? cur.visibility : 1;
+      out[i] = {
+        x: prev.x + alpha * (cur.x - prev.x),
+        y: prev.y + alpha * (cur.y - prev.y),
+        z: pz + alpha * (cz - pz),
+        visibility: pv + alpha * (cv - pv)
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Suavizado EMA (alpha ~0.5, equivalente a ventana de 3 frames) sobre el vector crudo de 16
+   * características antes de estandarizar, respetando la discontinuidad circular de `angulo` (0..360°).
+   */
+  function smoothAlphabetRawFeatures(prevRaw16, currentRaw16, alpha = ALPHA_FEATURE_EMA) {
+    const out = new Float32Array(16);
+    if (!currentRaw16 || currentRaw16.length < 16) return out;
+    if (!prevRaw16 || prevRaw16.length < 16) {
+      out.set(currentRaw16.subarray ? currentRaw16.subarray(0, 16) : currentRaw16.slice(0, 16));
+      return out;
+    }
+    for (let i = 0; i < 15; i += 1) {
+      out[i] = prevRaw16[i] + alpha * (currentRaw16[i] - prevRaw16[i]);
+    }
+    const angularDelta = ((currentRaw16[15] - prevRaw16[15] + 540) % 360) - 180;
+    out[15] = (((prevRaw16[15] + alpha * angularDelta) % 360) + 360) % 360;
+    return out;
+  }
+
+  /**
+   * Extrae las 16 características crudas (sin estandarizar) de Motor 2 usando landmarks normalizados
+   * con proporción horizontal `x * aspect` y `z` proporcional (coherente con `mp.solutions.hands`),
+   * además de `angulo` consistente con la orientación real en cámara espejada.
+   */
+  function extractAlphabetRawFeatures(landmarks, aspect = 1, mirroredInput = false) {
     const out = new Float32Array(16);
     if (!Array.isArray(landmarks) || landmarks.length < 21) return out;
 
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+    const pts = landmarks.map((p) => ({
+      x: p.x * safeAspect,
+      y: p.y,
+      z: typeof p.z === 'number' ? p.z * safeAspect : 0
+    }));
+
     for (let i = 0; i < ALPHABET_JOINT_TRIPLETS.length; i += 1) {
       const [a, b, c] = ALPHABET_JOINT_TRIPLETS[i];
-      out[i] = angleDeg(landmarks[a], landmarks[b], landmarks[c]);
+      out[i] = angleDeg(pts[a], pts[b], pts[c]);
     }
 
-    let angulo = (Math.atan2(landmarks[0].y - landmarks[9].y, landmarks[9].x - landmarks[0].x) * 180) / Math.PI;
+    // En stream crudo de cámara web, la vista está espejada al usuario: invertimos dx salvo que ya venga espejada
+    const dx = mirroredInput
+      ? (landmarks[9].x - landmarks[0].x) * safeAspect
+      : (landmarks[0].x - landmarks[9].x) * safeAspect;
+    const dy = landmarks[0].y - landmarks[9].y;
+    let angulo = (Math.atan2(dy, dx) * 180) / Math.PI;
     if (angulo < 0) angulo += 360;
     out[15] = angulo;
 
+    for (let k = 0; k < out.length; k += 1) {
+      if (!Number.isFinite(out[k])) out[k] = 0;
+    }
+    return out;
+  }
+
+  /**
+   * Motor 2 (Alfabeto A–Z + Ñ · ./models/alfabeto_lsp/):
+   * Estandariza las 16 características crudas con suavizado EMA opcional (3 frames) antes de
+   * aplicar (x - scalerMean[i]) / scalerStd[i].
+   */
+  function extractAlphabetFeatures(
+    landmarks,
+    scalerMean = null,
+    scalerStd = null,
+    optionsOrWorld = null,
+    aspectArg = 1
+  ) {
+    if (!Array.isArray(landmarks) || landmarks.length < 21) return new Float32Array(16);
+
+    const opts = optionsOrWorld && !Array.isArray(optionsOrWorld) && typeof optionsOrWorld === 'object'
+      ? optionsOrWorld
+      : { aspect: aspectArg };
+    const safeAspect = Number.isFinite(opts.aspect) && opts.aspect > 0 ? opts.aspect : 1;
+    const raw = extractAlphabetRawFeatures(landmarks, safeAspect, Boolean(opts.mirroredInput));
+    const smoothed = opts.prevRaw
+      ? smoothAlphabetRawFeatures(opts.prevRaw, raw, typeof opts.emaAlpha === 'number' ? opts.emaAlpha : ALPHA_FEATURE_EMA)
+      : raw;
+
+    const out = new Float32Array(16);
     if (Array.isArray(scalerMean) && Array.isArray(scalerStd) && scalerMean.length >= 16 && scalerStd.length >= 16) {
       for (let i = 0; i < 16; i += 1) {
         const std = scalerStd[i] || 1;
-        out[i] = (out[i] - scalerMean[i]) / std;
+        out[i] = (smoothed[i] - scalerMean[i]) / std;
       }
+    } else {
+      out.set(smoothed);
     }
 
     for (let k = 0; k < out.length; k += 1) {
       if (!Number.isFinite(out[k])) out[k] = 0;
     }
     return out;
+  }
+
+  /**
+   * Bloque 1.3 · Capa biomecánica de cuerpo completo (Smart Gating + diagnóstico):
+   * Evalúa encuadre de hombros/codos, distancia al frame, apertura de codos, elevación sobre torso/caderas
+   * e inclinación/rotación de hombros para distinguir `reposo`, `dinamico` y `estatico`.
+   */
+  function analyzeBiomechanics(poseLandmarks, handLandmarksList = [], wristSteady = true, aspect = 4 / 3) {
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 4 / 3;
+    const hands = Array.isArray(handLandmarksList) ? handLandmarksList : [];
+    const handCount = hands.length;
+
+    const vis = (pt) => (pt && typeof pt.visibility === 'number' ? pt.visibility : 1);
+    const hasPose = Array.isArray(poseLandmarks) && poseLandmarks.length >= 17;
+    const p11 = hasPose ? poseLandmarks[11] : null;
+    const p12 = hasPose ? poseLandmarks[12] : null;
+    const p13 = hasPose ? poseLandmarks[13] : null;
+    const p14 = hasPose ? poseLandmarks[14] : null;
+    const p15 = hasPose ? poseLandmarks[15] : null;
+    const p16 = hasPose ? poseLandmarks[16] : null;
+    const p23 = hasPose && poseLandmarks.length > 23 ? poseLandmarks[23] : null;
+    const p24 = hasPose && poseLandmarks.length > 24 ? poseLandmarks[24] : null;
+
+    const shouldersPresent = Boolean(
+      p11 && p12 && vis(p11) >= 0.35 && vis(p12) >= 0.35 &&
+      p11.x >= 0.02 && p11.x <= 0.98 && p12.x >= 0.02 && p12.x <= 0.98 &&
+      p11.y >= 0.02 && p11.y <= 0.94 && p12.y >= 0.02 && p12.y <= 0.94
+    );
+
+    const elbowsVisible = Boolean(
+      p13 && p14 && vis(p13) >= 0.3 && vis(p14) >= 0.3 &&
+      p13.x >= 0.01 && p13.x <= 0.99 && p14.x >= 0.01 && p14.x <= 0.99
+    );
+
+    const shoulderSpanX = p11 && p12 ? Math.abs(p11.x - p12.x) : 0.35;
+    const shMidY = p11 && p12 ? (p11.y + p12.y) / 2 : 0.38;
+
+    let hipLineY = Math.min(0.95, shMidY + Math.max(0.24, shoulderSpanX * 1.35));
+    if (p23 && p24 && vis(p23) >= 0.3 && vis(p24) >= 0.3) {
+      hipLineY = (p23.y + p24.y) / 2;
+    }
+
+    let framing = 'optimo';
+    let framingLabel = 'Encuadre óptimo';
+    let framingTone = 'ok';
+
+    if (shouldersPresent && (shoulderSpanX > 0.62 || (p11.y < 0.07 && p12.y < 0.07))) {
+      framing = 'muy_cerca';
+      framingLabel = 'Aléjate un poco';
+      framingTone = 'warn';
+    } else if (hasPose && !shouldersPresent) {
+      framing = 'hombros_cortados';
+      framingLabel = 'Muestra tus hombros';
+      framingTone = 'warn';
+    } else if (handCount === 0) {
+      framing = 'sin_manos';
+      framingLabel = 'Muestra una o ambas manos';
+      framingTone = 'idle';
+    }
+
+    const toAspectPt = (p) => (p ? { x: p.x * safeAspect, y: p.y, z: (p.z || 0) * safeAspect } : null);
+    const leftElbowDeg = p11 && p13 && p15 ? Math.round(angleDeg(toAspectPt(p11), toAspectPt(p13), toAspectPt(p15))) : null;
+    const rightElbowDeg = p12 && p14 && p16 ? Math.round(angleDeg(toAspectPt(p12), toAspectPt(p14), toAspectPt(p16))) : null;
+
+    const shoulderTiltDeg = p11 && p12
+      ? Math.round((Math.atan2(p12.y - p11.y, Math.abs(p12.x - p11.x) || 1e-6) * 180) / Math.PI)
+      : 0;
+    const shoulderYaw = p11 && p12
+      ? Number((Math.abs((p12.z || 0) - (p11.z || 0)) / (shoulderSpanX || 1e-6)).toFixed(2))
+      : 0;
+
+    // Elevación de muñecas: detecta manos descansando abajo fuera de la zona de señado
+    let inRestZone = false;
+    let avgWristElevation = 0;
+    if (handCount > 0) {
+      const torsoHeight = Math.max(0.18, hipLineY - shMidY);
+      let restCount = 0;
+      let elevSum = 0;
+      for (let i = 0; i < handCount; i += 1) {
+        const w = hands[i] && hands[i][0];
+        if (!w) continue;
+        const elev = (hipLineY - w.y) / torsoHeight;
+        elevSum += elev;
+        if (w.y >= 0.89 || elev < 0.12) restCount += 1;
+      }
+      avgWristElevation = Number((elevSum / handCount).toFixed(2));
+      inRestZone = restCount === handCount;
+    }
+
+    let activity = 'reposo';
+    if (handCount === 0 || (inRestZone && wristSteady)) {
+      activity = 'reposo';
+    } else if (handCount >= 2 || !wristSteady) {
+      activity = 'dinamico';
+    } else {
+      activity = 'estatico';
+    }
+
+    return {
+      framing,
+      framingLabel,
+      framingTone,
+      activity,
+      elbowsVisible,
+      shoulderSpanX: Number(shoulderSpanX.toFixed(3)),
+      shoulderTiltDeg,
+      shoulderYaw,
+      leftElbowDeg,
+      rightElbowDeg,
+      avgWristElevation,
+      inRestZone
+    };
+  }
+
+  /**
+   * Estabilidad rápida de muñeca sobre los últimos N frames (~150 ms) para responder de inmediato
+   * al detener la mano en letras estáticas (C, M, N, etc.) sin esperar 1.7 s.
+   */
+  function isWristSteady(trackBuffer, windowFrames = 5) {
+    if (!Array.isArray(trackBuffer) || trackBuffer.length < 2) return true;
+    const count = Math.min(Math.max(2, windowFrames), trackBuffer.length);
+    const start = trackBuffer.length - count;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let maxStep = 0;
+    let palmSum = 0;
+    let prevX = null;
+    let prevY = null;
+
+    for (let i = start; i < trackBuffer.length; i += 1) {
+      const f = trackBuffer[i];
+      const wrist = f && Array.isArray(f.landmarks) ? f.landmarks[0] : null;
+      if (!wrist) continue;
+      palmSum += f.palmSize || 0.1;
+      if (wrist.x < minX) minX = wrist.x;
+      if (wrist.x > maxX) maxX = wrist.x;
+      if (wrist.y < minY) minY = wrist.y;
+      if (wrist.y > maxY) maxY = wrist.y;
+      if (prevX !== null) {
+        const step = Math.hypot(wrist.x - prevX, wrist.y - prevY);
+        if (step > maxStep) maxStep = step;
+      }
+      prevX = wrist.x;
+      prevY = wrist.y;
+    }
+
+    if (prevX === null || !Number.isFinite(minX)) return true;
+    const avgPalm = palmSum / count || 0.1;
+    const span = Math.hypot(maxX - minX, maxY - minY) / avgPalm;
+    return span <= 0.18 && maxStep / avgPalm <= 0.09;
   }
 
   /**
@@ -1201,7 +1506,7 @@
         } else {
           const avgP = palmSum / valid || 0.1;
           const dx = pt.x - anchorX;
-          if (Math.abs(dx) >= 0.04 * avgP) {
+          if (Math.abs(dx) >= 0.03 * avgP) {
             const nextDir = dx > 0 ? 1 : -1;
             if (dir !== 0 && nextDir !== dir) reversals += 1;
             dir = nextDir;
@@ -1263,19 +1568,19 @@
       }
     }
 
-    // 2. Letra Ñ: base estática N (o M/U/V durante batido), muñeca [0] oscilando horizontalmente (20 frames)
+    // 2. Letra Ñ: base N (o M/U/V/H durante batido rápido), muñeca [0] oscilando horizontalmente
     const enieRule = rules['Ñ'] || DEFAULT_DYNAMIC_ALPHABET_RULES['Ñ'];
     const enieSlice = getSlice(enieRule.windowFrames || 20);
-    const enieBase = countMatchingStatic(enieSlice, [enieRule.baseStaticLabel || 'N', 'M', 'U', 'V']);
+    const enieBase = countMatchingStatic(enieSlice, [enieRule.baseStaticLabel || 'N', 'M', 'U', 'V', 'H']);
     if (enieSlice.length >= 8 && enieBase.count >= 2) {
       const lmIdx = typeof enieRule.trackedLandmark === 'number' ? enieRule.trackedLandmark : 0;
       const enieStats = measureLandmarkStats(enieSlice, lmIdx);
-      if (enieStats && enieStats.spanX >= 0.30 && enieStats.spanX > enieStats.spanY * 0.9 && enieStats.reversals >= 2) {
+      if (enieStats && enieStats.spanX >= 0.22 && enieStats.spanX > enieStats.spanY * 0.75 && enieStats.reversals >= 2) {
         return { label: 'Ñ', score: Math.max(0.86, enieBase.maxProb) };
       }
     }
 
-    // 3. Letra J: base estática I, meñique [20] bajando y girando en gancho (20 frames)
+    // 3. Letra J: base estática I, meñique [20] bajando y girando en gancho
     const jRule = rules.J || DEFAULT_DYNAMIC_ALPHABET_RULES.J;
     const jSlice = getSlice(jRule.windowFrames || 20);
     const jBase = countMatchingStatic(jSlice, [jRule.baseStaticLabel || 'I']);
@@ -1286,8 +1591,8 @@
       const pFirst = jSlice[0].landmarks && jSlice[0].landmarks[lmIdx];
       let pMid = null;
       let maxY = -Infinity;
-      const lo = Math.floor(jSlice.length * 0.3);
-      const hi = Math.ceil(jSlice.length * 0.85);
+      const lo = Math.floor(jSlice.length * 0.25);
+      const hi = Math.ceil(jSlice.length * 0.90);
       for (let i = lo; i < hi; i += 1) {
         const pt = jSlice[i].landmarks && jSlice[i].landmarks[lmIdx];
         if (pt && pt.y > maxY) {
@@ -1300,7 +1605,7 @@
         const dropY = (pMid.y - pFirst.y) / avgPalm;
         const hookDx = Math.abs(pLast.x - pMid.x) / avgPalm;
         const hookUpY = (pMid.y - pLast.y) / avgPalm;
-        if (dropY >= 0.28 && hookDx >= 0.16 && hookUpY >= -0.05) {
+        if (dropY >= 0.20 && hookDx >= 0.12 && hookUpY >= -0.08) {
           return { label: 'J', score: Math.max(0.86, jBase.maxProb) };
         }
       }
@@ -1379,8 +1684,14 @@
     analyzeNonManualExpressions,
     analyzeTrajectory3D,
     extractDynamicFrameFeatures,
+    extractAlphabetRawFeatures,
     extractAlphabetFeatures,
+    smoothAlphabetRawFeatures,
+    smoothLandmarksEMA,
+    analyzeBiomechanics,
     detectDynamicAlphabetLetter,
+    detectIlyEmergency,
+    isWristSteady,
     humanizeGloss,
     composeSentence,
     loadTfModels,
@@ -1582,6 +1893,13 @@
     const canvas = $('vision-canvas');
     const statusBox = $('vision-status');
     const statusText = $('vision-status-text');
+    const aiReadyEl = $('vision-ai-ready');
+    const btnOverlay = $('btn-vision-overlay');
+    const btnMirror = $('btn-vision-mirror');
+    const hudEl = $('vision-hud');
+    const hudFramingEl = $('vision-hud-framing');
+    const hudActivityEl = $('vision-hud-activity');
+    const hudTop2El = $('vision-hud-top2');
     const handsCountEl = $('vision-hands-count');
     const notice = $('vision-notice');
     const placeholder = $('vision-placeholder');
@@ -1630,6 +1948,8 @@
     let tfModels = null;
     let preloadHandle = null;
     let preloadUsingIdle = false;
+    let overlayEnabled = true;
+    let mirrorEnabled = true;
     let running = false;
     let rafId = 0;
     let frameCounter = 0;
@@ -1639,6 +1959,7 @@
     let lastDetectTs = 0;
     let lastAuxDetectTs = 0;
     let latestPoseLandmarks = null;
+    let smoothedPoseLandmarks = null;
     let latestFaceLandmarks = null;
     let latestFaceBlendshapes = null;
     let prevPalmOrientation = null;
@@ -1646,9 +1967,18 @@
     let lastConfirmed = null;
     let lastProgressPct = -1;
     let handsDownSince = null;
+    let missingHandFrames = 0;
     let speechTimer = null;
     let sentenceTokens = [];
     let dynamicEvalCounter = 0;
+    let isDynamicInferring = false;
+    let isAlphabetInferring = false;
+    let alphaFeatureRawEma = null;
+    let lastHudTop2At = 0;
+    let lastHudTop2Text = '';
+    const dynamicFlatInput = new Float32Array(DYNAMIC_SEQ_LEN * DYNAMIC_NUM_FEATURES);
+    const smoothedHandSlots = { Left: null, Right: null };
+    const trailPoints = [];
     const lastAddedAt = {};
     const motionBuffer = [];
     const voteBuffer = [];
@@ -1658,6 +1988,45 @@
     const dynCandidate = { id: null, streak: 0, lastProb: 0, since: 0 };
     const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, isDynamic: false };
 
+    function setAiReadyState(state) {
+      if (!aiReadyEl) return;
+      aiReadyEl.setAttribute('data-ready', state);
+      if (state === 'ready') {
+        aiReadyEl.textContent = 'IA lista';
+      } else if (state === 'fallback') {
+        aiReadyEl.textContent = 'IA básica';
+      } else {
+        aiReadyEl.textContent = 'Preparando IA…';
+      }
+    }
+
+    function syncHudVisibility() {
+      if (!hudEl) return;
+      const shouldShow = mode === 'live' && overlayEnabled;
+      hudEl.hidden = !shouldShow;
+      hudEl.setAttribute('aria-hidden', String(!shouldShow));
+    }
+
+    function updateHud({ framingText, framingTone, activityText, activityTone, top2Text } = {}, now = performance.now()) {
+      syncHudVisibility();
+      if (!hudEl || hudEl.hidden) return;
+      if (hudFramingEl && framingText) {
+        hudFramingEl.textContent = framingText;
+        hudFramingEl.setAttribute('data-tone', framingTone || 'ok');
+      }
+      if (hudActivityEl && activityText) {
+        hudActivityEl.textContent = activityText;
+        hudActivityEl.setAttribute('data-tone', activityTone || 'idle');
+      }
+      if (hudTop2El && typeof top2Text === 'string' && top2Text !== lastHudTop2Text) {
+        if (now - lastHudTop2At >= HUD_TOP2_THROTTLE_MS || top2Text === 'Enfoque: esperando seña…' || top2Text.includes('Emergencia')) {
+          lastHudTop2Text = top2Text;
+          lastHudTop2At = now;
+          hudTop2El.textContent = top2Text;
+        }
+      }
+    }
+
     function resetSpellCandidate() {
       spellCandidate.label = null;
       spellCandidate.since = 0;
@@ -1666,6 +2035,7 @@
       spellCandidate.scoreSum = 0;
       spellCandidate.scoreN = 0;
       spellCandidate.isDynamic = false;
+      alphaFeatureRawEma = null;
     }
 
     function resetDynamicCandidate() {
@@ -1700,6 +2070,7 @@
       btnStartLabel.textContent = cameraOn ? 'Detener Cámara' : 'Activar Cámara';
       btnSimulateLabel.textContent = nextMode === 'simulation' ? 'Salir de simulación' : 'Probar sin cámara';
       simBox.hidden = nextMode !== 'simulation';
+      syncHudVisibility();
     }
 
     function showNotice(message) {
@@ -1763,12 +2134,22 @@
       resetDynamicCandidate();
       resetSpellCandidate();
       dynamicEvalCounter = 0;
+      isDynamicInferring = false;
+      isAlphabetInferring = false;
+      missingHandFrames = 0;
+      smoothedHandSlots.Left = null;
+      smoothedHandSlots.Right = null;
+      trailPoints.length = 0;
+      lastHudTop2At = 0;
+      lastHudTop2Text = '';
+      if (hudTop2El) hudTop2El.textContent = 'Enfoque: esperando seña…';
       motionBuffer.length = 0;
       voteBuffer.length = 0;
       dynamicSeqBuffer.length = 0;
       spellTrackBuffer.length = 0;
       prevPalmOrientation = null;
       latestPoseLandmarks = null;
+      smoothedPoseLandmarks = null;
       latestFaceLandmarks = null;
       latestFaceBlendshapes = null;
       handsDownSince = null;
@@ -1829,7 +2210,7 @@
       }
       try {
         return await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
           audio: false
         });
       } catch (err) {
@@ -1925,50 +2306,64 @@
         return createTaskWithCpuFallback(TaskClass, vision, opts);
       };
 
-      const handLandmarker = await makeTask(HandLandmarker, {
-        baseOptions: { modelAssetPath: HAND_MODEL_URL },
-        runningMode: 'VIDEO',
-        numHands: 2,
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5
-      });
-
-      // PoseLandmarker siempre activo para alimentar las 159 características de Motor 1;
-      // FaceLandmarker se reserva a dispositivos con recursos suficientes.
-      const [poseRes, faceRes] = await Promise.allSettled([
-        makeTask(PoseLandmarker, {
-          baseOptions: { modelAssetPath: POSE_MODEL_URL },
+      // PoseLandmarker Full en escritorio/laptop y Lite en dispositivos ligeros (fallback automático a Lite)
+      const createPoseLandmarker = () => {
+        if (!PoseLandmarker) return Promise.resolve(null);
+        const preferredPoseUrl = lowPowerDevice ? POSE_MODEL_LITE_URL : POSE_MODEL_FULL_URL;
+        const poseOpts = (url) => ({
+          baseOptions: { modelAssetPath: url },
           runningMode: 'VIDEO',
           numPoses: 1,
           minPoseDetectionConfidence: 0.45,
           minTrackingConfidence: 0.45
+        });
+        return makeTask(PoseLandmarker, poseOpts(preferredPoseUrl))
+          .catch((fullErr) => {
+            if (preferredPoseUrl === POSE_MODEL_FULL_URL) {
+              console.warn('[Cámara IA · Pose Full fallback]', fullErr);
+              return makeTask(PoseLandmarker, poseOpts(POSE_MODEL_LITE_URL));
+            }
+            throw fullErr;
+          })
+          .catch((err) => {
+            console.warn('[Cámara IA]', err);
+            return null;
+          });
+      };
+
+      const [handLandmarker, poseRes] = await Promise.all([
+        makeTask(HandLandmarker, {
+          baseOptions: { modelAssetPath: HAND_MODEL_URL },
+          runningMode: 'VIDEO',
+          numHands: 2,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5
         }),
-        !lowPowerDevice
-          ? makeTask(FaceLandmarker, {
+        createPoseLandmarker()
+      ]);
+
+      const poseLandmarker = poseRes || null;
+
+      if (tfModelsPromise && !loadedTfModels) {
+        await tfModelsPromise.catch(() => null);
+      }
+      const tfAvailable = Boolean(loadedTfModels || tfModels);
+
+      let faceLandmarker = null;
+      if (!tfAvailable && !lowPowerDevice && FaceLandmarker) {
+        try {
+          faceLandmarker = await makeTask(FaceLandmarker, {
             baseOptions: { modelAssetPath: FACE_MODEL_URL },
             runningMode: 'VIDEO',
             numFaces: 1,
             outputFaceBlendshapes: true,
             minFaceDetectionConfidence: 0.45,
             minTrackingConfidence: 0.45
-          })
-          : Promise.resolve(null)
-      ]);
-
-      let poseLandmarker = null;
-      let faceLandmarker = null;
-
-      if (poseRes.status === 'fulfilled' && poseRes.value) {
-        poseLandmarker = poseRes.value;
-      } else if (poseRes.status === 'rejected') {
-        console.warn('[Cámara IA]', poseRes.reason);
-      }
-
-      if (faceRes.status === 'fulfilled' && faceRes.value) {
-        faceLandmarker = faceRes.value;
-      } else if (faceRes.status === 'rejected') {
-        console.warn('[Cámara IA]', faceRes.reason);
+          });
+        } catch (faceErr) {
+          console.warn('[Cámara IA]', faceErr);
+        }
       }
 
       const level = poseLandmarker || faceLandmarker ? 1 : 2;
@@ -2090,10 +2485,10 @@
         placeholderText.textContent = `${msg} Permite el acceso a la cámara si el navegador lo solicita.`;
       };
 
-      const [camResult, libResult, tfResult] = await Promise.allSettled([
-        openCamera(),
+      const [tfResult, libResult, camResult] = await Promise.allSettled([
+        loadTfModels({ onProgress: updateProgressMsg }),
         getVisionEngine({ silent: false }),
-        loadTfModels({ onProgress: updateProgressMsg })
+        openCamera()
       ]);
 
       if (token !== sessionToken) {
@@ -2119,8 +2514,10 @@
 
       if (tfResult.status === 'fulfilled') {
         tfModels = tfResult.value;
+        setAiReadyState('ready');
       } else {
         tfModels = null;
+        setAiReadyState('fallback');
         console.warn('[Cámara IA · TF.js]', tfResult.reason);
         showNotice('Modelos neuronales TF.js no disponibles en esta red: operando con reconocimiento geométrico base.');
       }
@@ -2137,8 +2534,8 @@
         await readyPromise;
         if (token !== sessionToken) return;
 
-        const vw = video.videoWidth || 1280;
-        const vh = video.videoHeight || 720;
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 480;
         canvas.width = vw;
         canvas.height = vh;
         if (stage) stage.style.aspectRatio = `${vw} / ${vh}`;
@@ -2157,7 +2554,7 @@
       }
     }
 
-    /** Bucle de video ~30 fps: Manos + Pose continuo para [1, 30, 159]; Face cada 3 frames. */
+    /** Bucle de video ~30 fps: Manos cada frame; Pose cada 2 frames; Face omitido si TF.js activo. */
     function loop() {
       if (!running || !visionEngine) return;
       rafId = requestAnimationFrame(loop);
@@ -2175,9 +2572,9 @@
           lastDetectTs = ts;
           const handRes = visionEngine.handLandmarker.detectForVideo(video, ts);
 
-          const poseStride = lowPowerDevice ? 2 : 1;
-          const runPoseNow = visionEngine.poseLandmarker && frameCounter % poseStride === 0;
-          const runFaceNow = visionEngine.faceLandmarker && frameCounter % AUX_DETECT_STRIDE === 0;
+          const tfActive = Boolean(tfModels || loadedTfModels);
+          const runPoseNow = Boolean(visionEngine.poseLandmarker) && frameCounter % 2 === 0;
+          const runFaceNow = !tfActive && Boolean(visionEngine.faceLandmarker) && frameCounter % AUX_DETECT_STRIDE === 0;
 
           if (runPoseNow || runFaceNow) {
             const auxTs = Math.max(lastAuxDetectTs + 1, ts);
@@ -2185,8 +2582,12 @@
             if (runPoseNow) {
               try {
                 const poseRes = visionEngine.poseLandmarker.detectForVideo(video, auxTs);
-                latestPoseLandmarks =
+                const rawPose =
                   poseRes && Array.isArray(poseRes.landmarks) && poseRes.landmarks[0] ? poseRes.landmarks[0] : null;
+                latestPoseLandmarks = rawPose;
+                smoothedPoseLandmarks = rawPose
+                  ? smoothLandmarksEMA(smoothedPoseLandmarks, rawPose, POSE_EMA_ALPHA, 0.4)
+                  : null;
               } catch (poseErr) {
                 console.warn('[Cámara IA]', poseErr);
                 visionEngine.poseLandmarker = null;
@@ -2251,42 +2652,82 @@
       }
     }
 
-    /* ---------- Dibujo sutil + Resultados 7 parámetros ---------- */
-    function drawShoulderReference(poseLandmarks) {
-      if (!Array.isArray(poseLandmarks) || !poseLandmarks[11] || !poseLandmarks[12]) return;
+    /* ---------- Overlay biomecánico y visual legible (#vision-canvas) ---------- */
+    const POSE_UPPER_EDGES = [
+      [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+      [11, 23], [12, 24], [23, 24]
+    ];
+
+    function drawUpperBodySkeleton(poseLandmarks, framing = 'optimo') {
+      if (!overlayEnabled || !Array.isArray(poseLandmarks) || poseLandmarks.length < 17) return;
       const w = canvas.width;
       const h = canvas.height;
       const high = document.documentElement.getAttribute('data-contrast') === 'high';
+      const warn = framing === 'muy_cerca' || framing === 'hombros_cortados';
+      const vis = (pt) => (pt && typeof pt.visibility === 'number' ? pt.visibility : 1);
+
+      const halo = high ? '#121820' : '#FFFFFF';
+      const stroke = high ? '#F59E0B' : (warn ? '#D97706' : '#0284C7');
+      const nodeFill = high ? '#FFFFFF' : (warn ? '#FEF3C7' : '#38BDF8');
 
       ctx.save();
-      ctx.globalAlpha = 0.35;
-      ctx.strokeStyle = high ? '#F59E0B' : '#0F4C81';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 6]);
-      ctx.beginPath();
-      ctx.moveTo(poseLandmarks[11].x * w, poseLandmarks[11].y * h);
-      ctx.lineTo(poseLandmarks[12].x * w, poseLandmarks[12].y * h);
-      ctx.stroke();
+      ctx.globalAlpha = 0.88;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
 
-      [poseLandmarks[11], poseLandmarks[12]].forEach((pt) => {
+      const drawSegmentList = (color, lineW) => {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineW;
         ctx.beginPath();
-        ctx.arc(pt.x * w, pt.y * h, 4, 0, Math.PI * 2);
-        ctx.fillStyle = high ? '#FFFFFF' : '#0F4C81';
+
+        // Línea cervical: cabeza/nariz [0] -> centro de hombros [11, 12]
+        const nose = poseLandmarks[0];
+        const ls = poseLandmarks[11];
+        const rs = poseLandmarks[12];
+        if (nose && ls && rs && vis(nose) >= 0.3 && vis(ls) >= 0.3 && vis(rs) >= 0.3) {
+          ctx.moveTo(nose.x * w, nose.y * h);
+          ctx.lineTo(((ls.x + rs.x) / 2) * w, ((ls.y + rs.y) / 2) * h);
+        }
+
+        POSE_UPPER_EDGES.forEach(([a, b]) => {
+          const pa = poseLandmarks[a];
+          const pb = poseLandmarks[b];
+          if (!pa || !pb || vis(pa) < 0.28 || vis(pb) < 0.28) return;
+          ctx.moveTo(pa.x * w, pa.y * h);
+          ctx.lineTo(pb.x * w, pb.y * h);
+        });
+        ctx.stroke();
+      };
+
+      drawSegmentList(halo, 6);
+      drawSegmentList(stroke, 3);
+
+      [0, 11, 12, 13, 14, 15, 16, 23, 24].forEach((idx) => {
+        const pt = poseLandmarks[idx];
+        if (!pt || vis(pt) < 0.3) return;
+        ctx.beginPath();
+        ctx.arc(pt.x * w, pt.y * h, idx === 0 ? 5.5 : 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = nodeFill;
         ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = halo;
+        ctx.stroke();
       });
       ctx.restore();
     }
 
-    function drawHand(landmarks, handIndex = 0) {
+    function drawHandEnhanced(landmarks, anatomicalSide = 'Right', palm = null) {
+      if (!overlayEnabled || !Array.isArray(landmarks) || landmarks.length < 21) return;
       const high = document.documentElement.getAttribute('data-contrast') === 'high';
-      const isSecond = handIndex > 0;
+      const isLeft = anatomicalSide === 'Left';
       const haloColor = high ? '#121820' : '#FFFFFF';
-      const lineColor = high ? (isSecond ? '#FFFFFF' : '#F59E0B') : (isSecond ? '#15803D' : '#0F4C81');
-      const dotColor = high ? (isSecond ? '#F59E0B' : '#FFFFFF') : (isSecond ? '#FFFFFF' : '#F59E0B');
+      const lineColor = high ? (isLeft ? '#FFFFFF' : '#F59E0B') : (isLeft ? '#15803D' : '#0F4C81');
+      const dotColor = high ? (isLeft ? '#F59E0B' : '#FFFFFF') : (isLeft ? '#86EFAC' : '#F59E0B');
 
       const w = canvas.width;
       const h = canvas.height;
-      [[haloColor, 8], [lineColor, 4]].forEach(([color, width]) => {
+      ctx.save();
+      [[haloColor, 7], [lineColor, 3.5]].forEach(([color, width]) => {
         ctx.strokeStyle = color;
         ctx.lineWidth = width;
         ctx.lineCap = 'round';
@@ -2303,13 +2744,94 @@
 
       ctx.fillStyle = dotColor;
       ctx.strokeStyle = '#121820';
-      ctx.lineWidth = 2;
-      landmarks.forEach((p) => {
+      ctx.lineWidth = 1.8;
+      landmarks.forEach((p, idx) => {
+        const radius = idx === 0 || idx === 4 || idx === 8 || idx === 20 ? 5 : 3.8;
         ctx.beginPath();
-        ctx.arc(p.x * w, p.y * h, 5, 0, Math.PI * 2);
+        ctx.arc(p.x * w, p.y * h, radius, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       });
+
+      // Indicador visual discreto de orientación de palma en centro de palma
+      if (palm) {
+        const cx = ((landmarks[0].x + landmarks[5].x + landmarks[9].x + landmarks[17].x) / 4) * w;
+        const cy = ((landmarks[0].y + landmarks[5].y + landmarks[9].y + landmarks[17].y) / 4) * h;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+        if (palm.orientation === 'frente') {
+          ctx.fillStyle = lineColor;
+          ctx.fill();
+        } else {
+          ctx.fillStyle = haloColor;
+          ctx.fill();
+        }
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = lineColor;
+        ctx.stroke();
+
+        if (palm.dir) {
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + palm.dir.dx * 16, cy + palm.dir.dy * 16);
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = dotColor;
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    function pushTrailPoint(primaryHand, now) {
+      if (!Array.isArray(primaryHand) || primaryHand.length < 21) return;
+      const pinkyUp =
+        angleDeg(primaryHand[17], primaryHand[18], primaryHand[19]) > 142 &&
+        angleDeg(primaryHand[13], primaryHand[14], primaryHand[15]) < 125;
+      const indexUp =
+        angleDeg(primaryHand[5], primaryHand[6], primaryHand[7]) > 142 &&
+        angleDeg(primaryHand[9], primaryHand[10], primaryHand[11]) < 125;
+      const trackedIdx = pinkyUp ? 20 : (indexUp ? 8 : 0);
+      const pt = primaryHand[trackedIdx];
+      if (!pt) return;
+
+      if (trailPoints.length >= MAX_TRAIL_POINTS) trailPoints.shift();
+      trailPoints.push({ x: pt.x * canvas.width, y: pt.y * canvas.height, t: now, idx: trackedIdx });
+    }
+
+    function drawMotionTrail() {
+      if (!overlayEnabled || trailPoints.length < 3) return;
+      let totalMove = 0;
+      for (let i = 1; i < trailPoints.length; i += 1) {
+        totalMove += Math.hypot(trailPoints[i].x - trailPoints[i - 1].x, trailPoints[i].y - trailPoints[i - 1].y);
+      }
+      if (totalMove < 12) return;
+
+      const high = document.documentElement.getAttribute('data-contrast') === 'high';
+      const trailColor = high ? '#F59E0B' : '#38BDF8';
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (let i = 1; i < trailPoints.length; i += 1) {
+        const frac = i / trailPoints.length;
+        ctx.globalAlpha = 0.14 + frac * 0.72;
+        ctx.strokeStyle = trailColor;
+        ctx.lineWidth = 2 + frac * 4;
+        ctx.beginPath();
+        ctx.moveTo(trailPoints[i - 1].x, trailPoints[i - 1].y);
+        ctx.lineTo(trailPoints[i].x, trailPoints[i].y);
+        ctx.stroke();
+      }
+      const tip = trailPoints[trailPoints.length - 1];
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = trailColor;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawHand(landmarks, handIndex = 0) {
+      drawHandEnhanced(landmarks, handIndex > 0 ? 'Left' : 'Right', null);
     }
 
     function pushMotionFrame(landmarks, worldPts, spatial, aspect, now) {
@@ -2338,24 +2860,31 @@
       });
     }
 
+    function formatTop2Text(label1, prob1, label2 = '', prob2 = 0) {
+      const p1 = Math.round((prob1 || 0) * 100);
+      const p2 = Math.round((prob2 || 0) * 100);
+      if (label2 && p2 >= 5) {
+        return `Enfoque: “${label1}” (${p1}%) · sig: “${label2}” (${p2}%)`;
+      }
+      return `Enfoque: “${label1}” (${p1}%)`;
+    }
+
     /**
      * Prioridad 2 · Vocabulario Dinámico (118 señas · ./models/senas_dinamicas/).
-     * Devuelve { available, confirmedWord } tras evaluar la ventana deslizante [1, 30, 159].
+     * Alimenta [1, 30, 159] con landmarks suavizados y evalúa sin bloqueo (outTensor.data()).
      */
-    function evaluateDynamicWordsTf(results, frameMeta, now, handCount) {
+    function evaluateDynamicWordsTf(results, now, handCount, bio) {
       const dynEntry = tfModels && tfModels.dynamic;
-      if (!dynEntry || !dynEntry.model || !window.tf) {
-        return { available: false, confirmedWord: false };
-      }
+      if (!dynEntry || !dynEntry.model || !window.tf) return;
 
       const meta = dynEntry.metadata || {};
       const seqLen = meta.sequenceLength || DYNAMIC_SEQ_LEN;
       const numFeat = meta.numFeatures || DYNAMIC_NUM_FEATURES;
       const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.7;
       const labels = Array.isArray(meta.labels) ? meta.labels : [];
-      const spellPossible = Boolean(tfModels && tfModels.alphabet && handCount === 1);
+      const spellPossible = Boolean(tfModels && tfModels.alphabet && handCount === 1 && bio.activity === 'estatico');
 
-      const vec = extractDynamicFrameFeatures(latestPoseLandmarks, results);
+      const vec = extractDynamicFrameFeatures(smoothedPoseLandmarks || latestPoseLandmarks, results);
       if (dynamicSeqBuffer.length >= seqLen) dynamicSeqBuffer.shift();
       dynamicSeqBuffer.push(vec);
 
@@ -2366,107 +2895,143 @@
             progressLabel.textContent = `Analizando contexto LSP (${dynamicSeqBuffer.length}/${seqLen})…`;
           }
         }
-        return { available: true, confirmedWord: false };
+        return;
       }
 
+      if (isDynamicInferring) return;
       dynamicEvalCounter += 1;
-      if (dynamicEvalCounter % 2 !== 0 && dynCandidate.streak === 0) {
-        return { available: true, confirmedWord: false };
+      const evalStride = dynCandidate.streak > 0 ? 2 : 3;
+      if (dynamicEvalCounter % evalStride !== 0) return;
+
+      const tokenAtCall = sessionToken;
+      isDynamicInferring = true;
+
+      const total = seqLen * numFeat;
+      const flat = total === dynamicFlatInput.length ? dynamicFlatInput : new Float32Array(total);
+      for (let t = 0; t < seqLen; t += 1) {
+        flat.set(dynamicSeqBuffer[t], t * numFeat);
       }
 
-      const probs = window.tf.tidy(() => {
-        const flat = new Float32Array(seqLen * numFeat);
-        for (let t = 0; t < seqLen; t += 1) {
-          flat.set(dynamicSeqBuffer[t], t * numFeat);
-        }
-        const input = window.tf.tensor3d(flat, [1, seqLen, numFeat], 'float32');
-        const out = dynEntry.model.predict(input);
-        const outTensor = Array.isArray(out) ? out[0] : out;
-        return Array.from(outTensor.dataSync());
-      });
-
-      let rawBestIdx = -1;
-      let rawBestProb = -1;
-      let bestIdx = -1;
-      let bestProb = -1;
-      for (let i = 0; i < probs.length; i += 1) {
-        const p = probs[i];
-        if (p > rawBestProb) {
-          rawBestProb = p;
-          rawBestIdx = i;
-        }
-        const lbl = labels[i];
-        if (lbl && !IGNORED_GLOSSES.has(lbl) && p > bestProb) {
-          bestProb = p;
-          bestIdx = i;
-        }
+      let outTensor = null;
+      try {
+        outTensor = window.tf.tidy(() => {
+          const input = window.tf.tensor3d(flat, [1, seqLen, numFeat], 'float32');
+          const out = dynEntry.model.predict(input);
+          return Array.isArray(out) ? out[0] : out;
+        });
+      } catch (err) {
+        isDynamicInferring = false;
+        console.warn('[Cámara IA · Dinámico]', err);
+        return;
       }
 
-      const topRawLabel = rawBestIdx >= 0 ? labels[rawBestIdx] : '';
-      const gloss = bestIdx >= 0 ? labels[bestIdx] : '';
-      const word = humanizeGloss(gloss);
+      outTensor
+        .data()
+        .then((probs) => {
+          if (tokenAtCall !== sessionToken || !running) return;
+          const evalNow = performance.now();
 
-      if (IGNORED_GLOSSES.has(topRawLabel) || !word || bestProb < threshold) {
-        resetDynamicCandidate();
-        if (!spellPossible) {
-          setProgress(0);
-          if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
-        }
-        return { available: true, confirmedWord: false };
-      }
+          let rawBestIdx = -1;
+          let rawBestProb = -1;
+          let bestIdx = -1;
+          let bestProb = -1;
+          let secondIdx = -1;
+          let secondProb = -1;
 
-      const pct = Math.round(bestProb * 100);
-      if (dynCandidate.id === gloss) {
-        dynCandidate.streak += 1;
-        dynCandidate.lastProb = bestProb;
-      } else {
-        dynCandidate.id = gloss;
-        dynCandidate.streak = 1;
-        dynCandidate.lastProb = bestProb;
-        dynCandidate.since = now;
-      }
-
-      setProgress(Math.min(1, 0.45 + (dynCandidate.streak / DYNAMIC_STREAK_REQUIRED) * 0.55));
-      if (progressLabel) progressLabel.textContent = `Confirmando seña: ${word}…`;
-      lastDetectEl.textContent = `Seña detectada: ${word} · Confianza: ${pct}%`;
-
-      latestDescriptorSnapshot = Object.freeze({
-        level: frameMeta.level,
-        source: 'dynamic_118',
-        gestureId: `dyn:${gloss}`,
-        gloss,
-        word,
-        palm: frameMeta.palm,
-        spatial: frameMeta.spatial,
-        nonManual: frameMeta.nonManual,
-        confidence: bestProb,
-        timestamp: now
-      });
-
-      if (dynCandidate.streak >= DYNAMIC_STREAK_REQUIRED) {
-        const tokenId = `dyn:${gloss}`;
-        const last = lastAddedAt[tokenId];
-        if (typeof last !== 'number' || now - last >= COOLDOWN_MS) {
-          lastAddedAt[tokenId] = now;
-          if (frameMeta.nonManual && frameMeta.nonManual.expression && frameMeta.nonManual.expression !== 'neutro') {
-            activeSentenceExpression = frameMeta.nonManual.expression;
+          for (let i = 0; i < probs.length; i += 1) {
+            const p = probs[i];
+            if (p > rawBestProb) {
+              rawBestProb = p;
+              rawBestIdx = i;
+            }
+            const lbl = labels[i];
+            if (lbl && !IGNORED_GLOSSES.has(lbl)) {
+              if (p > bestProb) {
+                secondProb = bestProb;
+                secondIdx = bestIdx;
+                bestProb = p;
+                bestIdx = i;
+              } else if (p > secondProb) {
+                secondProb = p;
+                secondIdx = i;
+              }
+            }
           }
-          const confirmedToken = { id: tokenId, kind: 'word', text: word, phrase: word, label: word };
-          lastConfirmed = confirmedToken;
-          sentenceTokens.push({ id: tokenId, kind: 'word', text: word });
-          lastDetectEl.textContent = `Última seña: ${word} · Confianza: ${pct}%`;
-          renderSentence();
-          sentNote.textContent = 'Baja las manos 2 s para enviar y leer automáticamente.';
-          sentNote.hidden = false;
-        }
-        // Recorta parte de la ventana y limpia candidatos de deletreo para evitar falsas letras
-        dynamicSeqBuffer.splice(0, 12);
-        resetDynamicCandidate();
-        resetSpellCandidate();
-        spellTrackBuffer.length = 0;
-        return { available: true, confirmedWord: true };
-      }
-      return { available: true, confirmedWord: false };
+
+          const topRawLabel = rawBestIdx >= 0 ? labels[rawBestIdx] : '';
+          const gloss = bestIdx >= 0 ? labels[bestIdx] : '';
+          const word = humanizeGloss(gloss);
+          const secondWord = secondIdx >= 0 ? humanizeGloss(labels[secondIdx]) : '';
+
+          if (word && (!spellPossible || bestProb >= 0.4)) {
+            updateHud(
+              { top2Text: formatTop2Text(word, bestProb, secondWord, secondProb) },
+              evalNow
+            );
+          }
+
+          if (IGNORED_GLOSSES.has(topRawLabel) || !word || bestProb < threshold) {
+            resetDynamicCandidate();
+            if (!spellPossible) {
+              setProgress(0);
+              if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+            }
+            return;
+          }
+
+          const pct = Math.round(bestProb * 100);
+          if (dynCandidate.id === gloss) {
+            dynCandidate.streak += 1;
+            dynCandidate.lastProb = bestProb;
+          } else {
+            dynCandidate.id = gloss;
+            dynCandidate.streak = 1;
+            dynCandidate.lastProb = bestProb;
+            dynCandidate.since = evalNow;
+          }
+
+          setProgress(Math.min(1, 0.45 + (dynCandidate.streak / DYNAMIC_STREAK_REQUIRED) * 0.55));
+          if (progressLabel) progressLabel.textContent = `Confirmando seña: ${word}…`;
+          lastDetectEl.textContent = `Seña detectada: ${word} · Confianza: ${pct}%`;
+
+          latestDescriptorSnapshot = Object.freeze({
+            level: visionEngine ? visionEngine.level : 2,
+            source: 'dynamic_118',
+            gestureId: `dyn:${gloss}`,
+            gloss,
+            word,
+            confidence: bestProb,
+            timestamp: evalNow
+          });
+
+          if (dynCandidate.streak >= DYNAMIC_STREAK_REQUIRED) {
+            const tokenId = `dyn:${gloss}`;
+            const last = lastAddedAt[tokenId];
+            if (typeof last !== 'number' || evalNow - last >= COOLDOWN_MS) {
+              lastAddedAt[tokenId] = evalNow;
+              const confirmedToken = { id: tokenId, kind: 'word', text: word, phrase: word, label: word };
+              lastConfirmed = confirmedToken;
+              sentenceTokens.push({ id: tokenId, kind: 'word', text: word });
+              lastDetectEl.textContent = `Última seña: ${word} · Confianza: ${pct}%`;
+              renderSentence();
+              sentNote.textContent = 'Baja las manos 2 s para enviar y leer automáticamente.';
+              sentNote.hidden = false;
+            }
+            dynamicSeqBuffer.splice(0, 12);
+            resetDynamicCandidate();
+            resetSpellCandidate();
+            spellTrackBuffer.length = 0;
+          }
+        })
+        .catch((err) => {
+          console.warn('[Cámara IA · Dinámico]', err);
+        })
+        .finally(() => {
+          isDynamicInferring = false;
+          if (outTensor && typeof outTensor.dispose === 'function') {
+            outTensor.dispose();
+          }
+        });
     }
 
     function feedSpellLetter(label, score, now, { isDynamic = false } = {}) {
@@ -2525,7 +3090,6 @@
           lastDetectEl.textContent = `Última letra: ${displayChar} · Confianza: ${pct}%`;
           sentNote.textContent = 'Baja las manos 2 s para enviar o sostén postura neutra para separar palabras.';
           sentNote.hidden = false;
-          // Limpia el candidato dinámico al confirmar una letra para evitar conflictos entre motores
           resetDynamicCandidate();
           if (spellCandidate.isDynamic) {
             spellTrackBuffer.length = 0;
@@ -2536,99 +3100,170 @@
 
     /**
      * Prioridad 3 · Alfabeto LSP (A–Z + Ñ · ./models/alfabeto_lsp/).
-     * Solo confirma letras estáticas si la mano permanece estable (trajectory.type === 'quieto') ~500 ms,
-     * o letras dinámicas (J, Ñ, Z) al completar su trazo.
+     * Usa landmarks normalizados con proporción `x * aspect` + EMA de 3 frames antes de estandarizar,
+     * orientación consistente en cámara espejada y lectura Top-2 en el HUD.
      */
-    function evaluateAlphabetTf(primaryHand, aspect, frameMeta, now) {
+    function evaluateAlphabetTf(primaryHand, aspect, bio, now) {
       const alphaEntry = tfModels && tfModels.alphabet;
-      if (!alphaEntry || !alphaEntry.model || !window.tf) return false;
+      if (!alphaEntry || !alphaEntry.model || !window.tf || isAlphabetInferring) return;
 
       const meta = alphaEntry.metadata || {};
       const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.75;
       const labels = Array.isArray(meta.labels) ? meta.labels : [];
+      const tokenAtCall = sessionToken;
+      isAlphabetInferring = true;
 
-      const features = extractAlphabetFeatures(primaryHand, meta.scalerMean, meta.scalerStd);
-      const probs = window.tf.tidy(() => {
-        const input = window.tf.tensor2d(features, [1, 16], 'float32');
-        const out = alphaEntry.model.predict(input);
-        const outTensor = Array.isArray(out) ? out[0] : out;
-        return Array.from(outTensor.dataSync());
-      });
-
-      let bestIdx = 0;
-      let bestProb = -1;
-      for (let i = 0; i < probs.length; i += 1) {
-        if (probs[i] > bestProb) {
-          bestProb = probs[i];
-          bestIdx = i;
-        }
-      }
-
-      const rawLabel = bestIdx < labels.length ? labels[bestIdx] : '';
       const aspectLandmarks = primaryHand.map((p) => ({ x: p.x * aspect, y: p.y }));
       const palmSize =
         Math.hypot(aspectLandmarks[9].x - aspectLandmarks[0].x, aspectLandmarks[9].y - aspectLandmarks[0].y) || 0.1;
 
-      if (spellTrackBuffer.length >= MOTION_WINDOW) spellTrackBuffer.shift();
-      spellTrackBuffer.push({
-        t: now,
-        palmSize,
-        landmarks: aspectLandmarks,
-        staticLabel: bestProb >= threshold ? rawLabel : null,
-        prob: bestProb
+      const rawNow = extractAlphabetRawFeatures(primaryHand, aspect, !mirrorEnabled);
+      const smoothedRaw = smoothAlphabetRawFeatures(alphaFeatureRawEma, rawNow, ALPHA_FEATURE_EMA);
+      alphaFeatureRawEma = smoothedRaw;
+
+      const features = extractAlphabetFeatures(primaryHand, meta.scalerMean, meta.scalerStd, {
+        aspect,
+        mirroredInput: !mirrorEnabled,
+        prevRaw: alphaFeatureRawEma,
+        emaAlpha: 1
       });
 
-      const dynLetter = detectDynamicAlphabetLetter(spellTrackBuffer, meta.dynamicLettersRules);
-      const handIsQuiet = !frameMeta.trajectory || frameMeta.trajectory.type === 'quieto';
-      let resolvedLabel = null;
-      let resolvedScore = 0;
-      let isDynamic = false;
-
-      if (dynLetter) {
-        resolvedLabel = dynLetter.label;
-        resolvedScore = dynLetter.score;
-        isDynamic = true;
-      } else if (bestProb >= threshold && handIsQuiet) {
-        if (rawLabel === '') {
-          const canInsertSpace =
-            sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter';
-          if (canInsertSpace) {
-            resolvedLabel = SPACE_TOKEN_LABEL;
-            resolvedScore = bestProb;
-          }
-        } else {
-          resolvedLabel = rawLabel;
-          resolvedScore = bestProb;
-        }
+      let outTensor = null;
+      try {
+        outTensor = window.tf.tidy(() => {
+          const input = window.tf.tensor2d(features, [1, 16], 'float32');
+          const out = alphaEntry.model.predict(input);
+          return Array.isArray(out) ? out[0] : out;
+        });
+      } catch (err) {
+        isAlphabetInferring = false;
+        console.warn('[Cámara IA · Alfabeto]', err);
+        return;
       }
 
-      latestDescriptorSnapshot = Object.freeze({
-        level: frameMeta.level,
-        source: 'alphabet_lsp',
-        gestureId: resolvedLabel ? `spell:${resolvedLabel}` : null,
-        palm: frameMeta.palm,
-        trajectory: frameMeta.trajectory,
-        confidence: resolvedScore || bestProb,
-        timestamp: now
-      });
+      outTensor
+        .data()
+        .then((probs) => {
+          if (tokenAtCall !== sessionToken || !running || dynCandidate.streak > 0) return;
+          const evalNow = performance.now();
 
-      feedSpellLetter(resolvedLabel, resolvedScore, now, { isDynamic });
-      return true;
+          let bestIdx = 0;
+          let bestProb = -1;
+          let secondIdx = -1;
+          let secondProb = -1;
+          for (let i = 0; i < probs.length; i += 1) {
+            const p = probs[i];
+            if (p > bestProb) {
+              secondProb = bestProb;
+              secondIdx = bestIdx;
+              bestProb = p;
+              bestIdx = i;
+            } else if (p > secondProb) {
+              secondProb = p;
+              secondIdx = i;
+            }
+          }
+
+          const rawLabel = bestIdx < labels.length ? labels[bestIdx] : '';
+          const secondLabelRaw = secondIdx >= 0 && secondIdx < labels.length ? labels[secondIdx] : '';
+
+          if (spellTrackBuffer.length >= MOTION_WINDOW) spellTrackBuffer.shift();
+          spellTrackBuffer.push({
+            t: evalNow || now,
+            palmSize,
+            landmarks: aspectLandmarks,
+            staticLabel: bestProb >= 0.45 ? rawLabel : null,
+            prob: bestProb
+          });
+
+          const dynLetter = detectDynamicAlphabetLetter(spellTrackBuffer, meta.dynamicLettersRules);
+          const handIsQuiet = bio.activity === 'estatico' && isWristSteady(spellTrackBuffer, 5);
+          let resolvedLabel = null;
+          let resolvedScore = 0;
+          let isDynamic = false;
+
+          if (dynLetter) {
+            resolvedLabel = dynLetter.label;
+            resolvedScore = dynLetter.score;
+            isDynamic = true;
+          } else if (bestProb >= threshold && handIsQuiet) {
+            if (rawLabel === '') {
+              const canInsertSpace =
+                sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter';
+              if (canInsertSpace) {
+                resolvedLabel = SPACE_TOKEN_LABEL;
+                resolvedScore = bestProb;
+              }
+            } else {
+              resolvedLabel = rawLabel;
+              resolvedScore = bestProb;
+            }
+          }
+
+          const hudLbl1 = dynLetter ? dynLetter.label : (rawLabel === '' ? 'Espacio' : rawLabel);
+          const hudProb1 = dynLetter ? dynLetter.score : bestProb;
+          const hudLbl2 = secondLabelRaw === '' ? 'Espacio' : secondLabelRaw;
+          updateHud(
+            { top2Text: formatTop2Text(hudLbl1, hudProb1, hudLbl2, secondProb) },
+            evalNow
+          );
+
+          latestDescriptorSnapshot = Object.freeze({
+            level: visionEngine ? visionEngine.level : 2,
+            source: 'alphabet_lsp',
+            gestureId: resolvedLabel ? `spell:${resolvedLabel}` : null,
+            wristSteady: handIsQuiet,
+            confidence: resolvedScore || bestProb,
+            timestamp: evalNow
+          });
+
+          feedSpellLetter(resolvedLabel, resolvedScore, evalNow, { isDynamic });
+        })
+        .catch((err) => {
+          console.warn('[Cámara IA · Alfabeto]', err);
+        })
+        .finally(() => {
+          isAlphabetInferring = false;
+          if (outTensor && typeof outTensor.dispose === 'function') {
+            outTensor.dispose();
+          }
+        });
     }
 
     function handleResults(results, now = performance.now()) {
       if (!running || !results) return;
       clearCanvas();
-      const allLandmarks = Array.isArray(results.landmarks) ? results.landmarks : [];
+      const rawLandmarks = Array.isArray(results.landmarks) ? results.landmarks : [];
       const allWorldLandmarks = Array.isArray(results.worldLandmarks) ? results.worldLandmarks : [];
       const allHandedness = Array.isArray(results.handedness) ? results.handedness : [];
+      const aspect = canvas.width / canvas.height;
+      const poseForFrame = smoothedPoseLandmarks || latestPoseLandmarks;
 
-      if (visionEngine && visionEngine.poseLandmarker && latestPoseLandmarks) {
-        drawShoulderReference(latestPoseLandmarks);
-      }
-      updateHandsCount(allLandmarks.length);
+      updateHandsCount(rawLandmarks.length);
 
-      if (allLandmarks.length === 0) {
+      if (rawLandmarks.length === 0) {
+        missingHandFrames += 1;
+        const bioNoHands = analyzeBiomechanics(poseForFrame, [], true, aspect);
+        drawUpperBodySkeleton(poseForFrame, bioNoHands.framing);
+        updateHud(
+          {
+            framingText: bioNoHands.framingLabel,
+            framingTone: bioNoHands.framingTone,
+            activityText: 'En reposo',
+            activityTone: 'idle',
+            top2Text: missingHandFrames > HAND_DROPOUT_GRACE_FRAMES ? 'Enfoque: esperando seña…' : undefined
+          },
+          now
+        );
+
+        if (missingHandFrames <= HAND_DROPOUT_GRACE_FRAMES) {
+          drawMotionTrail();
+          return;
+        }
+
+        smoothedHandSlots.Left = null;
+        smoothedHandSlots.Right = null;
+        trailPoints.length = 0;
         motionBuffer.length = 0;
         voteBuffer.length = 0;
         dynamicSeqBuffer.length = 0;
@@ -2643,18 +3278,129 @@
         }
         return;
       }
+
+      missingHandFrames = 0;
       handsDownSince = null;
 
-      const aspect = canvas.width / canvas.height;
-      const spatial = computeSpatialContext(allLandmarks[0], allWorldLandmarks[0] || null, latestPoseLandmarks, allLandmarks);
+      // Suavizado EMA temporal por ranura anatómica (Left / Right) manteniendo correspondencia
+      const assigned = assignAnatomicalHands(rawLandmarks, allHandedness, poseForFrame);
+      smoothedHandSlots.Left = assigned.Left
+        ? smoothLandmarksEMA(smoothedHandSlots.Left, assigned.Left, HAND_EMA_ALPHA)
+        : null;
+      smoothedHandSlots.Right = assigned.Right
+        ? smoothLandmarksEMA(smoothedHandSlots.Right, assigned.Right, HAND_EMA_ALPHA)
+        : null;
+
+      const smoothedHands = [];
+      const smoothedHandedness = [];
+      ['Right', 'Left'].forEach((side) => {
+        if (smoothedHandSlots[side]) {
+          smoothedHands.push(smoothedHandSlots[side]);
+          // Preserva convención cruda (invertida respecto al cuerpo en cámara sin espejo)
+          smoothedHandedness.push([{ categoryName: side === 'Left' ? 'Right' : 'Left', score: 0.92 }]);
+        }
+      });
+
+      const handsForFrame = smoothedHands.length ? smoothedHands : rawLandmarks;
+      const quickSteady = isWristSteady(spellTrackBuffer, 5);
+      const bio = analyzeBiomechanics(poseForFrame, handsForFrame, quickSteady, aspect);
+
+      pushTrailPoint(handsForFrame[0], now);
+      drawUpperBodySkeleton(poseForFrame, bio.framing);
+      drawMotionTrail();
+
+      handsForFrame.forEach((lm, idx) => {
+        const side = smoothedHandSlots.Right && idx === 0 ? 'Right' : 'Left';
+        const palm = computePalmOrientation3D(
+          lm.map((p) => ({ x: p.x * aspect, y: p.y, z: (p.z || 0) * aspect })),
+          side
+        );
+        drawHandEnhanced(lm, side, palm);
+      });
+
+      const activeTf = tfModels || loadedTfModels;
+      if (activeTf && (activeTf.dynamic || activeTf.alphabet)) {
+        tfModels = activeTf;
+
+        // Prioridad 1 (Emergencia): detección ILY ligera sin ejecutar el clasificador geométrico completo
+        let ilyDetected = false;
+        for (let i = 0; i < rawLandmarks.length; i += 1) {
+          if (detectIlyEmergency(handsForFrame[i] || rawLandmarks[i], allWorldLandmarks[i] || null, aspect)) {
+            ilyDetected = true;
+            break;
+          }
+        }
+        if (ilyDetected) {
+          updateHud(
+            {
+              framingText: bio.framingLabel,
+              framingTone: bio.framingTone,
+              activityText: 'Prioridad urgente',
+              activityTone: 'urgent',
+              top2Text: 'Enfoque: “Auxilio (Emergencia)”'
+            },
+            now
+          );
+          feedGesture('auxilio', 0.94, now, { fastConfirm: true, meta: null });
+          return;
+        }
+        if (detection.id === 'auxilio') {
+          feedGesture(null, 0, now);
+        }
+
+        // Smart Gating biomecánico: ignora manos descansando abajo fuera de zona de señado
+        if (bio.activity === 'reposo') {
+          resetDynamicCandidate();
+          resetSpellCandidate();
+          setProgress(0);
+          if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+          updateHud(
+            {
+              framingText: bio.framingLabel,
+              framingTone: bio.framingTone,
+              activityText: 'En reposo',
+              activityTone: 'idle',
+              top2Text: 'Enfoque: manos en reposo'
+            },
+            now
+          );
+          return;
+        }
+
+        const isSpellFocus = handsForFrame.length === 1 && bio.activity === 'estatico' && dynCandidate.streak === 0;
+        updateHud(
+          {
+            framingText: bio.framingLabel,
+            framingTone: bio.framingTone,
+            activityText: isSpellFocus ? 'Leyendo letra' : 'Escuchando seña',
+            activityTone: isSpellFocus ? 'spell' : 'active'
+          },
+          now
+        );
+
+        if (handsForFrame.length >= 2 && (spellCandidate.label || spellTrackBuffer.length > 0)) {
+          resetSpellCandidate();
+          spellTrackBuffer.length = 0;
+        }
+
+        const smoothedResults = { landmarks: handsForFrame, handedness: smoothedHandedness };
+        // Prioridad 2 (Vocabulario dinámico · 118 señas) + Prioridad 3 (Alfabeto A–Z + Ñ con 1 mano)
+        evaluateDynamicWordsTf(smoothedResults, now, handsForFrame.length, bio);
+        if (handsForFrame.length === 1 && dynCandidate.streak === 0 && activeTf.alphabet) {
+          evaluateAlphabetTf(handsForFrame[0], aspect, bio, now);
+        }
+        return;
+      }
+
+      // Respaldo geométrico estricto (7 parámetros LSP) SOLO cuando TF.js no está disponible
+      const spatial = computeSpatialContext(handsForFrame[0], allWorldLandmarks[0] || null, poseForFrame, handsForFrame);
       const nonManual = analyzeNonManualExpressions(latestFaceBlendshapes, latestFaceLandmarks);
 
-      pushMotionFrame(allLandmarks[0], allWorldLandmarks[0] || null, spatial, aspect, now);
+      pushMotionFrame(handsForFrame[0], allWorldLandmarks[0] || null, spatial, aspect, now);
       const trajectory = analyzeTrajectory3D(motionBuffer);
 
       const handEntries = [];
-      allLandmarks.forEach((landmarks, idx) => {
-        drawHand(landmarks, idx);
+      handsForFrame.forEach((landmarks, idx) => {
         const worldPts = allWorldLandmarks[idx] || null;
         const handedEntry = allHandedness[idx] && allHandedness[idx][0];
         const handedLabel = normalizeHandedness(handedEntry);
@@ -2688,35 +3434,26 @@
         trajectory
       };
 
-      // Prioridad 1 (Emergencia): la seña `auxilio` interrumpe de inmediato cualquier flujo
       if (resolved && resolved.id === 'auxilio') {
         feedGesture('auxilio', resolved.score, now, { fastConfirm: true, meta: frameMeta });
         return;
       }
 
-      const activeTf = tfModels || loadedTfModels;
-      if (activeTf && (activeTf.dynamic || activeTf.alphabet)) {
-        tfModels = activeTf;
-
-        if (allLandmarks.length >= 2 && (spellCandidate.label || spellTrackBuffer.length > 0)) {
-          resetSpellCandidate();
-          spellTrackBuffer.length = 0;
-        }
-
-        // Prioridad 2 (Vocabulario dinámico · 118 señas): alimenta siempre [1, 30, 159]
-        const dynOutcome = evaluateDynamicWordsTf(results, frameMeta, now, allLandmarks.length);
-
-        // Prioridad 3 (Alfabeto A–Z + Ñ): solo 1 mano visible y sin palabra dinámica en confirmación
-        if (!dynOutcome.confirmedWord && allLandmarks.length === 1 && dynCandidate.streak === 0 && activeTf.alphabet) {
-          evaluateAlphabetTf(allLandmarks[0], aspect, frameMeta, now);
-        }
-        return;
-      }
-
-      // Respaldo geométrico (7 parámetros LSP) si TF.js no pudo cargar
       if (voteBuffer.length >= VOTE_WINDOW) voteBuffer.shift();
       voteBuffer.push(resolved ? { id: resolved.id, score: resolved.score } : { id: null, score: 0 });
       const smoothed = majorityVoteGesture(voteBuffer);
+
+      const fallbackGesture = smoothed.id && GESTURE_BY_ID[smoothed.id];
+      updateHud(
+        {
+          framingText: bio.framingLabel,
+          framingTone: bio.framingTone,
+          activityText: fallbackGesture ? (fallbackGesture.kind === 'letter' ? 'Leyendo letra' : 'Escuchando seña') : 'En reposo',
+          activityTone: fallbackGesture ? 'active' : 'idle',
+          top2Text: fallbackGesture ? formatTop2Text(fallbackGesture.label, smoothed.score || 0.9) : 'Enfoque: esperando seña…'
+        },
+        now
+      );
 
       latestDescriptorSnapshot = Object.freeze({
         level: frameMeta.level,
@@ -2929,7 +3666,35 @@
       }
     }
 
-    /* ---------- Cuadrícula compacta (ventanilla + teclado A–Z + Ñ) y guía ---------- */
+    /* ---------- Cuadrícula de prueba sin cámara (A–Z + Ñ) y guía neuronal limpia ---------- */
+    const NEURAL_GUIDE_ITEMS = [
+      {
+        emoji: '\u{1F91F}',
+        title: 'Emergencia inmediata (Auxilio):',
+        detail: ' muestra índice y meñique extendidos (seña ILY) para activar prioridad e intérprete humano en <30 s.'
+      },
+      {
+        emoji: '\u{1F590}\u{FE0F}',
+        title: 'Vocabulario dinámico LSP (118 señas):',
+        detail: ' realiza señas fluidas con 1 o 2 manos (hola, ayudar, enferma, dinero, comprar, preguntar, qué pasó, cómo, dónde, cuánto, sí, no, esperar).'
+      },
+      {
+        emoji: '\u{1F524}',
+        title: 'Deletreo estático (A–Y, 1 mano):',
+        detail: ' forma una letra con una sola mano y detén la muñeca ~0.5 s para confirmarla (incluye C, M, N, P, Q, T, X).'
+      },
+      {
+        emoji: '\u{270D}\u{FE0F}',
+        title: 'Letras con trazo (J, Ñ, Z):',
+        detail: ' J (meñique en I bajando en gancho), Ñ (N agitando la muñeca horizontalmente) y Z (D trazando zig-zag con el índice).'
+      },
+      {
+        emoji: '\u{2423}',
+        title: 'Espacio y envío automático:',
+        detail: ' sostén postura neutra tras deletrear para separar palabras, o baja las manos 2 s para enviar y leer al funcionario.'
+      }
+    ];
+
     GESTURES.forEach((gesture) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -2960,29 +3725,25 @@
         btn.append(emoji, label, text);
         simGrid.appendChild(btn);
       }
+    });
 
-      if (guideList) {
+    if (guideList) {
+      NEURAL_GUIDE_ITEMS.forEach((item) => {
         const li = document.createElement('li');
         const guideEmoji = document.createElement('span');
         guideEmoji.className = 'vision-guide-emoji';
         guideEmoji.setAttribute('aria-hidden', 'true');
-        guideEmoji.textContent = gesture.emoji;
+        guideEmoji.textContent = item.emoji;
 
         const descWrap = document.createElement('span');
         const strong = document.createElement('strong');
-        strong.textContent = `${gesture.label} (${gesture.hands}):`;
-        let detail = ` “${gesture.phrase}”`;
-        if (gesture.kind === 'letter') {
-          detail = ` añade “${gesture.letter}” · ${gesture.hint}`;
-        } else if (gesture.kind === 'space') {
-          detail = ` separa palabras · ${gesture.hint}`;
-        }
-        descWrap.append(strong, detail);
+        strong.textContent = item.title;
+        descWrap.append(strong, item.detail);
 
         li.append(guideEmoji, descWrap);
         guideList.appendChild(li);
-      }
-    });
+      });
+    }
 
     /* ---------- Eventos ---------- */
     (simBox || simGrid).addEventListener('click', (e) => {
@@ -3017,6 +3778,26 @@
     btnUndo.addEventListener('click', undoLast);
     if (btnClear) btnClear.addEventListener('click', clearAllOutput);
     btnEscalate.addEventListener('click', escalate);
+
+    if (btnOverlay) {
+      btnOverlay.addEventListener('click', () => {
+        overlayEnabled = !overlayEnabled;
+        btnOverlay.classList.toggle('is-active', overlayEnabled);
+        btnOverlay.setAttribute('aria-pressed', String(overlayEnabled));
+        if (!overlayEnabled) clearCanvas();
+        syncHudVisibility();
+      });
+    }
+
+    if (btnMirror && stage) {
+      btnMirror.addEventListener('click', () => {
+        mirrorEnabled = !mirrorEnabled;
+        btnMirror.classList.toggle('is-active', mirrorEnabled);
+        btnMirror.setAttribute('aria-pressed', String(mirrorEnabled));
+        stage.classList.toggle('is-unmirrored', !mirrorEnabled);
+        alphaFeatureRawEma = null;
+      });
+    }
 
     panel.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && mode !== 'idle') {
@@ -3094,16 +3875,26 @@
     }
 
     function scheduleSilentPreload() {
-      if (window.location.protocol === 'file:' || navigator.onLine === false) return;
+      if (window.location.protocol === 'file:' || navigator.onLine === false) {
+        setAiReadyState('fallback');
+        return;
+      }
+      setAiReadyState('loading');
       const runPreload = () => {
         preloadHandle = null;
-        if (window.location.protocol === 'file:' || navigator.onLine === false) return;
-        getVisionEngine({ silent: true }).catch(() => {});
+        if (window.location.protocol === 'file:' || navigator.onLine === false) {
+          setAiReadyState('fallback');
+          return;
+        }
         loadTfModels()
           .then((models) => {
             if (!tfModels) tfModels = models;
+            setAiReadyState('ready');
           })
-          .catch(() => {});
+          .catch(() => {
+            setAiReadyState('fallback');
+          });
+        getVisionEngine({ silent: true }).catch(() => {});
       };
       if (typeof window.requestIdleCallback === 'function') {
         preloadUsingIdle = true;

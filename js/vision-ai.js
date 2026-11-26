@@ -1938,11 +1938,25 @@
       }
     }
 
-    async function createTasksEngine() {
+    async function createTasksEngine({ forceCpu = false } = {}) {
       const { FilesetResolver, HandLandmarker, PoseLandmarker, FaceLandmarker } = await loadTasksVision();
       const vision = await withTimeout(FilesetResolver.forVisionTasks(VISION_WASM_URL), LOAD_TIMEOUT_MS);
 
-      const handLandmarker = await createTaskWithCpuFallback(HandLandmarker, vision, {
+      const makeTask = (TaskClass, opts) => {
+        if (!TaskClass) return Promise.resolve(null);
+        if (forceCpu) {
+          return withTimeout(
+            TaskClass.createFromOptions(vision, {
+              ...opts,
+              baseOptions: { ...opts.baseOptions, delegate: 'CPU' }
+            }),
+            LOAD_TIMEOUT_MS
+          );
+        }
+        return createTaskWithCpuFallback(TaskClass, vision, opts);
+      };
+
+      const handLandmarker = await makeTask(HandLandmarker, {
         baseOptions: { modelAssetPath: HAND_MODEL_URL },
         runningMode: 'VIDEO',
         numHands: 2,
@@ -1954,17 +1968,15 @@
       // PoseLandmarker siempre activo para alimentar las 159 características de Motor 1;
       // FaceLandmarker se reserva a dispositivos con recursos suficientes.
       const [poseRes, faceRes] = await Promise.allSettled([
-        PoseLandmarker
-          ? createTaskWithCpuFallback(PoseLandmarker, vision, {
-            baseOptions: { modelAssetPath: POSE_MODEL_URL },
-            runningMode: 'VIDEO',
-            numPoses: 1,
-            minPoseDetectionConfidence: 0.45,
-            minTrackingConfidence: 0.45
-          })
-          : Promise.resolve(null),
-        !lowPowerDevice && FaceLandmarker
-          ? createTaskWithCpuFallback(FaceLandmarker, vision, {
+        makeTask(PoseLandmarker, {
+          baseOptions: { modelAssetPath: POSE_MODEL_URL },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.45,
+          minTrackingConfidence: 0.45
+        }),
+        !lowPowerDevice
+          ? makeTask(FaceLandmarker, {
             baseOptions: { modelAssetPath: FACE_MODEL_URL },
             runningMode: 'VIDEO',
             numFaces: 1,
@@ -1991,7 +2003,7 @@
       }
 
       const level = poseLandmarker || faceLandmarker ? 1 : 2;
-      return { type: 'tasks', level, handLandmarker, poseLandmarker, faceLandmarker };
+      return { type: 'tasks', level, handLandmarker, poseLandmarker, faceLandmarker, cpuFallbackUsed: forceCpu };
     }
 
     async function createLegacyEngine() {
@@ -2213,6 +2225,26 @@
           handleResults(handRes, ts);
         } catch (err) {
           console.warn('[Cámara IA]', err);
+          if (running && visionEngine && !visionEngine.cpuFallbackUsed) {
+            const tokenAtFail = sessionToken;
+            visionEngine.cpuFallbackUsed = true;
+            running = false;
+            createTasksEngine({ forceCpu: true })
+              .catch(() => createLegacyEngine())
+              .then((cpuEngine) => {
+                if (tokenAtFail !== sessionToken) return;
+                visionEngine = cpuEngine;
+                enginePromise = Promise.resolve(cpuEngine);
+                running = true;
+                lastVideoTime = -1;
+                rafId = requestAnimationFrame(loop);
+              })
+              .catch(() => {
+                if (tokenAtFail !== sessionToken) return;
+                enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+              });
+            return;
+          }
           if (running) {
             enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
           }

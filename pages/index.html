@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=13">
-  <script src="../js/main.js?v=13" defer></script>
-  <script src="../js/vision-ai.js?v=13" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=14">
+  <script src="../js/main.js?v=14" defer></script>
+  <script src="../js/vision-ai.js?v=14" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -544,15 +544,6 @@
                     </div>
                   </div>
 
-                  <div class="vision-mode-switch" role="group" aria-label="Modo del intérprete de cámara">
-                    <button type="button" class="vision-mode-btn is-active" id="btn-vision-mode-words" aria-pressed="true">
-                      Modo Señas (118 palabras)
-                    </button>
-                    <button type="button" class="vision-mode-btn" id="btn-vision-mode-spell" aria-pressed="false">
-                      Modo Deletreo (Alfabeto A–Z + Ñ)
-                    </button>
-                  </div>
-
                   <p class="vision-notice" id="vision-notice" role="status" hidden></p>
 
                   <div class="vision-stage" id="vision-stage">
@@ -591,7 +582,7 @@
 
                     <div class="vision-stability">
                       <div class="vision-stability-head">
-                        <span id="vision-progress-label">Estabilidad de la seña (320 ms)</span>
+                        <span id="vision-progress-label">Reconocimiento unificado LSP (118 señas + alfabeto)</span>
                         <span id="vision-progress-value">0%</span>
                       </div>
                       <div class="vision-progress" id="vision-progress" role="progressbar" aria-labelledby="vision-progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">

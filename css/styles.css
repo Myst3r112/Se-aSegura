@@ -3604,59 +3604,6 @@ html[data-contrast="high"] .vision-status[data-state="idle"] {
   overflow-wrap: anywhere;
 }
 
-/* Selector accesible de modo (Señas dinámicas vs Deletreo) con CLS = 0 */
-.vision-mode-switch {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  gap: 8px;
-}
-
-.vision-mode-btn {
-  min-height: 44px;
-  padding: 8px 14px;
-  border-radius: var(--radius-12);
-  border: 2px solid var(--color-primary);
-  background-color: var(--color-surface);
-  color: var(--color-primary);
-  font-family: inherit;
-  font-size: 0.9375rem;
-  font-weight: 700;
-  cursor: pointer;
-  text-align: center;
-  overflow-wrap: anywhere;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-
-.vision-mode-btn:hover {
-  background-color: var(--color-bg);
-}
-
-.vision-mode-btn.is-active,
-.vision-mode-btn[aria-pressed="true"] {
-  background-color: var(--color-primary);
-  color: #FFFFFF;
-  border-color: var(--color-primary);
-}
-
-html[data-contrast="high"] .vision-mode-btn {
-  background-color: var(--color-bg);
-  color: var(--color-text);
-  border-color: var(--color-border);
-}
-
-html[data-contrast="high"] .vision-mode-btn:hover {
-  background-color: var(--color-surface);
-  color: var(--color-focus);
-  border-color: var(--color-focus);
-}
-
-html[data-contrast="high"] .vision-mode-btn.is-active,
-html[data-contrast="high"] .vision-mode-btn[aria-pressed="true"] {
-  background-color: var(--color-focus);
-  color: #121820;
-  border-color: var(--color-focus);
-}
-
 html[data-contrast="high"] .vision-notice {
   background-color: var(--color-bg);
   border-color: var(--color-border);

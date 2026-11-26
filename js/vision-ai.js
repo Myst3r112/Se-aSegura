@@ -1,13 +1,15 @@
 /**
  * SeñaSegura · Módulo "Cámara IA (LSP · TensorFlow.js + MediaPipe)" (Vanilla JS ES6+)
  *
- * - Carga ESTRICTAMENTE bajo demanda al pulsar "Activar Cámara" (0 peticiones externas en carga inicial).
- * - Arquitectura dual compatible con GitHub Pages (rutas estrictamente relativas sin '/' inicial):
- *     Motor 1 (Modo Señas · 118 palabras): tf.loadGraphModel('./models/senas_dinamicas/model.json')
+ * - Precarga silenciosa en segundo plano al iniciar (requestIdleCallback / setTimeout 800 ms, sin bloquear arranque)
+ *   reutilizando las mismas promesas al pulsar "Activar Cámara" sin descargas duplicadas ni alertas prematuras.
+ * - Flujo único automático compatible con GitHub Pages (rutas estrictamente relativas sin '/' inicial):
+ *     Prioridad 1 (Emergencia): seña inmediata de `auxilio`.
+ *     Prioridad 2 (Vocabulario Dinámico · 118 señas): tf.loadGraphModel('./models/senas_dinamicas/model.json')
  *              Ventana deslizante [1, 30, 159] (Pose torso 21 + Mano Izq 69 + Mano Der 69).
- *     Motor 2 (Modo Deletreo · Alfabeto A–Z + Ñ): tf.loadGraphModel('./models/alfabeto_lsp/model.json')
- *              Vector estandarizado [1, 16] (15 ángulos articulares + orientación 'angulo') y reglas dinámicas J, Ñ, Z.
- * - Respaldo resiliente de 4 niveles si falla WebGL/TF.js o no hay cámara disponible.
+ *     Prioridad 3 (Alfabeto A–Z + Ñ): tf.loadGraphModel('./models/alfabeto_lsp/model.json')
+ *              Vector estandarizado [1, 16] con 1 mano estable (~500 ms) o trazos dinámicos J, Ñ, Z.
+ * - Respaldo geométrico de 7 parámetros LSP si falla TF.js o no hay cámara disponible.
  * - Todo el procesamiento ocurre en el dispositivo: se liberan tensores en cada frame con tf.tidy().
  *
  * Integración con js/main.js mediante:
@@ -1356,15 +1358,10 @@
   }
 
   let latestDescriptorSnapshot = null;
-  let activeInterpreterModeSnapshot = 'words';
   let activeTfStatusSnapshot = { ready: false, loading: false, dynamicReady: false, alphabetReady: false, error: null };
 
   function getLastDescriptor() {
     return latestDescriptorSnapshot;
-  }
-
-  function getInterpreterMode() {
-    return activeInterpreterModeSnapshot;
   }
 
   function getTfEngineStatus() {
@@ -1388,19 +1385,19 @@
     composeSentence,
     loadTfModels,
     getLastDescriptor,
-    getInterpreterMode,
     getTfEngineStatus,
     GESTURES
   });
 
   /* =========================================================
-     3. CARGA DINÁMICA DE MOTORES DE VISIÓN + TENSORFLOW.JS (BAJO DEMANDA)
+     3. PRECARGA SILENCIOSA Y MOTORES DE VISIÓN + TENSORFLOW.JS
      ========================================================= */
   let visionModulePromise = null;
   let loadedHandConnections = HAND_CONNECTIONS_FALLBACK;
   const scriptPromises = new Map();
   let tfModelsPromise = null;
   let loadedTfModels = null;
+  let tfProgressCallback = null;
 
   /**
    * Calcula el prefijo relativo hacia ./models sin usar rutas absolutas con '/' inicial,
@@ -1439,6 +1436,9 @@
   }
 
   function loadTfModels({ onProgress } = {}) {
+    if (typeof onProgress === 'function') {
+      tfProgressCallback = onProgress;
+    }
     if (loadedTfModels) return Promise.resolve(loadedTfModels);
     if (tfModelsPromise) return tfModelsPromise;
     if (window.location.protocol === 'file:') {
@@ -1449,12 +1449,12 @@
 
     activeTfStatusSnapshot = { ready: false, loading: true, dynamicReady: false, alphabetReady: false, error: null };
     const report = (msg) => {
-      if (typeof onProgress === 'function') onProgress(msg);
+      if (typeof tfProgressCallback === 'function') tfProgressCallback(msg);
     };
 
     tfModelsPromise = (async () => {
       try {
-        report('Descargando motor TensorFlow.js bajo demanda…');
+        report('Descargando motor TensorFlow.js…');
         await loadLegacyScript(TFJS_SCRIPT_URL);
         if (!window.tf || typeof window.tf.loadGraphModel !== 'function') {
           throw new Error('tfjs-unavailable');
@@ -1588,8 +1588,6 @@
     const placeholderText = $('vision-placeholder-text');
     const btnStart = $('btn-vision-start');
     const btnSimulate = $('btn-vision-simulate');
-    const btnModeWords = $('btn-vision-mode-words');
-    const btnModeSpell = $('btn-vision-mode-spell');
     const btnSpeak = $('btn-vision-speak');
     const btnUndo = $('btn-vision-undo');
     const btnClear = $('btn-vision-clear');
@@ -1619,19 +1617,19 @@
     const btnSimulateLabel = btnSimulate.querySelector('span') || btnSimulate;
     const DEFAULT_SENTENCE = 'Muestra una seña y mantenla un instante para empezar la oración.';
     const DEFAULT_LAST_DETECT = 'Última seña: — · Confianza: —';
-    const DEFAULT_PROGRESS_WORDS = 'Estabilidad de seña dinámica (118 palabras)';
-    const DEFAULT_PROGRESS_SPELL = `Estabilidad de letra (${CONFIRM_SPELL_MS} ms)`;
+    const DEFAULT_PROGRESS_LABEL = 'Reconocimiento unificado LSP (118 señas + alfabeto)';
     const lowPowerDevice =
       window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
 
     let mode = 'idle'; // idle | loading | live | simulation
-    let interpreterMode = 'words'; // words | spell
     let sessionToken = 0;
     let stream = null;
     // visionEngine: { type: 'tasks', level: 1|2, handLandmarker, poseLandmarker, faceLandmarker } | { type: 'legacy', level: 3, hands }
     let visionEngine = null;
     let enginePromise = null;
     let tfModels = null;
+    let preloadHandle = null;
+    let preloadUsingIdle = false;
     let running = false;
     let rafId = 0;
     let frameCounter = 0;
@@ -1660,41 +1658,21 @@
     const dynCandidate = { id: null, streak: 0, lastProb: 0, since: 0 };
     const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, isDynamic: false };
 
-    function getDefaultProgressLabel() {
-      return interpreterMode === 'spell' ? DEFAULT_PROGRESS_SPELL : DEFAULT_PROGRESS_WORDS;
+    function resetSpellCandidate() {
+      spellCandidate.label = null;
+      spellCandidate.since = 0;
+      spellCandidate.lastSeen = 0;
+      spellCandidate.confirmed = false;
+      spellCandidate.scoreSum = 0;
+      spellCandidate.scoreN = 0;
+      spellCandidate.isDynamic = false;
     }
 
-    function setInterpreterMode(nextInterpreterMode, { silent = false } = {}) {
-      const normalized = nextInterpreterMode === 'spell' ? 'spell' : 'words';
-      const changed = interpreterMode !== normalized;
-      interpreterMode = normalized;
-      activeInterpreterModeSnapshot = normalized;
-
-      if (btnModeWords) {
-        const isWords = normalized === 'words';
-        btnModeWords.classList.toggle('is-active', isWords);
-        btnModeWords.setAttribute('aria-pressed', String(isWords));
-      }
-      if (btnModeSpell) {
-        const isSpell = normalized === 'spell';
-        btnModeSpell.classList.toggle('is-active', isSpell);
-        btnModeSpell.setAttribute('aria-pressed', String(isSpell));
-      }
-
-      if (changed) {
-        // Conserva cámara, MediaPipe y modelos TF.js cargados; solo reinicia ventanas transitorias de frames
-        resetDetection();
-      } else if (progressLabel) {
-        progressLabel.textContent = getDefaultProgressLabel();
-      }
-
-      if (!silent && mode === 'live') {
-        sentNote.textContent =
-          normalized === 'spell'
-            ? 'Modo Deletreo activo: sostén cada letra ~0.5 s (J, Ñ y Z requieren trazo).'
-            : 'Modo Señas (118 palabras) activo: realiza la seña fluida frente a la cámara.';
-        sentNote.hidden = false;
-      }
+    function resetDynamicCandidate() {
+      dynCandidate.id = null;
+      dynCandidate.streak = 0;
+      dynCandidate.lastProb = 0;
+      dynCandidate.since = 0;
     }
 
     /* ---------- UI helpers ---------- */
@@ -1770,7 +1748,7 @@
       sentNote.textContent = '';
       setUrgent(false);
       setProgress(0);
-      if (progressLabel) progressLabel.textContent = getDefaultProgressLabel();
+      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
       renderSentence();
     }
 
@@ -1782,17 +1760,8 @@
       detection.scoreSum = 0;
       detection.scoreN = 0;
       detection.meta = null;
-      dynCandidate.id = null;
-      dynCandidate.streak = 0;
-      dynCandidate.lastProb = 0;
-      dynCandidate.since = 0;
-      spellCandidate.label = null;
-      spellCandidate.since = 0;
-      spellCandidate.lastSeen = 0;
-      spellCandidate.confirmed = false;
-      spellCandidate.scoreSum = 0;
-      spellCandidate.scoreN = 0;
-      spellCandidate.isDynamic = false;
+      resetDynamicCandidate();
+      resetSpellCandidate();
       dynamicEvalCounter = 0;
       motionBuffer.length = 0;
       voteBuffer.length = 0;
@@ -1804,7 +1773,7 @@
       latestFaceBlendshapes = null;
       handsDownSince = null;
       setProgress(0);
-      if (progressLabel) progressLabel.textContent = getDefaultProgressLabel();
+      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
 
     /* ---------- Cámara y ciclo de vida ---------- */
@@ -2034,18 +2003,26 @@
       return { type: 'legacy', level: 3, hands: instance };
     }
 
-    function getVisionEngine() {
+    function getVisionEngine({ silent = false } = {}) {
+      if (visionEngine) return Promise.resolve(visionEngine);
       if (enginePromise) return enginePromise;
-      if (navigator.onLine === false) {
-        return Promise.reject(new Error('offline'));
+      if (navigator.onLine === false || window.location.protocol === 'file:') {
+        return Promise.reject(new Error(navigator.onLine === false ? 'offline' : 'file-protocol'));
       }
       enginePromise = createTasksEngine()
+        .then((eng) => {
+          visionEngine = eng;
+          return eng;
+        })
         .catch((tasksErr) => {
-          console.warn('[Cámara IA]', tasksErr);
-          return createLegacyEngine();
+          if (!silent) console.warn('[Cámara IA]', tasksErr);
+          return createLegacyEngine().then((legacyEng) => {
+            visionEngine = legacyEng;
+            return legacyEng;
+          });
         })
         .catch((fallbackErr) => {
-          console.warn('[Cámara IA]', fallbackErr);
+          if (!silent) console.warn('[Cámara IA]', fallbackErr);
           enginePromise = null;
           throw fallbackErr;
         });
@@ -2094,19 +2071,28 @@
       showNotice('');
       resetOutput();
       setStatus('loading');
-      statusText.textContent = 'Descargando modelos IA…';
-      placeholderText.textContent = 'Cargando motor MediaPipe y redes neuronales LSP (118 señas y alfabeto)… Permite el acceso a la cámara si el navegador lo solicita.';
+
+      const readyModels = tfModels || loadedTfModels;
+      const preloadedReady = Boolean(visionEngine && readyModels);
+      if (preloadedReady) {
+        tfModels = readyModels;
+        statusText.textContent = 'Abriendo cámara…';
+        placeholderText.textContent = 'Modelos IA listos. Permite el acceso a la cámara si el navegador lo solicita.';
+      } else {
+        statusText.textContent = 'Descargando modelos IA…';
+        placeholderText.textContent = 'Cargando motor MediaPipe y redes neuronales LSP (118 señas y alfabeto)… Permite el acceso a la cámara si el navegador lo solicita.';
+      }
       btnStart.focus();
 
       const updateProgressMsg = (msg) => {
-        if (token !== sessionToken || mode !== 'loading') return;
+        if (token !== sessionToken || mode !== 'loading' || preloadedReady) return;
         statusText.textContent = 'Descargando modelos IA…';
         placeholderText.textContent = `${msg} Permite el acceso a la cámara si el navegador lo solicita.`;
       };
 
       const [camResult, libResult, tfResult] = await Promise.allSettled([
         openCamera(),
-        getVisionEngine(),
+        getVisionEngine({ silent: false }),
         loadTfModels({ onProgress: updateProgressMsg })
       ]);
 
@@ -2162,7 +2148,7 @@
         lastVideoTime = -1;
         lastSendAt = 0;
         setStatus('live');
-        if (progressLabel) progressLabel.textContent = getDefaultProgressLabel();
+        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
         rafId = requestAnimationFrame(loop);
       } catch (err) {
         console.warn('[Cámara IA]', err);
@@ -2171,7 +2157,7 @@
       }
     }
 
-    /** Bucle de video ~30 fps: Manos + Pose continuo en Modo Señas dinámicas; Face cada 3 frames. */
+    /** Bucle de video ~30 fps: Manos + Pose continuo para [1, 30, 159]; Face cada 3 frames. */
     function loop() {
       if (!running || !visionEngine) return;
       rafId = requestAnimationFrame(loop);
@@ -2189,7 +2175,7 @@
           lastDetectTs = ts;
           const handRes = visionEngine.handLandmarker.detectForVideo(video, ts);
 
-          const poseStride = interpreterMode === 'words' ? (lowPowerDevice ? 2 : 1) : AUX_DETECT_STRIDE;
+          const poseStride = lowPowerDevice ? 2 : 1;
           const runPoseNow = visionEngine.poseLandmarker && frameCounter % poseStride === 0;
           const runFaceNow = visionEngine.faceLandmarker && frameCounter % AUX_DETECT_STRIDE === 0;
 
@@ -2352,31 +2338,40 @@
       });
     }
 
-    function handleDynamicWordsTf(results, frameMeta, now) {
+    /**
+     * Prioridad 2 · Vocabulario Dinámico (118 señas · ./models/senas_dinamicas/).
+     * Devuelve { available, confirmedWord } tras evaluar la ventana deslizante [1, 30, 159].
+     */
+    function evaluateDynamicWordsTf(results, frameMeta, now, handCount) {
       const dynEntry = tfModels && tfModels.dynamic;
-      if (!dynEntry || !dynEntry.model || !window.tf) return false;
+      if (!dynEntry || !dynEntry.model || !window.tf) {
+        return { available: false, confirmedWord: false };
+      }
 
       const meta = dynEntry.metadata || {};
       const seqLen = meta.sequenceLength || DYNAMIC_SEQ_LEN;
       const numFeat = meta.numFeatures || DYNAMIC_NUM_FEATURES;
       const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.7;
       const labels = Array.isArray(meta.labels) ? meta.labels : [];
+      const spellPossible = Boolean(tfModels && tfModels.alphabet && handCount === 1);
 
       const vec = extractDynamicFrameFeatures(latestPoseLandmarks, results);
       if (dynamicSeqBuffer.length >= seqLen) dynamicSeqBuffer.shift();
       dynamicSeqBuffer.push(vec);
 
       if (dynamicSeqBuffer.length < seqLen) {
-        setProgress((dynamicSeqBuffer.length / seqLen) * 0.45);
-        if (progressLabel) {
-          progressLabel.textContent = `Capturando secuencia dinámica (${dynamicSeqBuffer.length}/${seqLen})…`;
+        if (!spellPossible || (!spellCandidate.label && handCount >= 2)) {
+          setProgress((dynamicSeqBuffer.length / seqLen) * 0.4);
+          if (progressLabel) {
+            progressLabel.textContent = `Analizando contexto LSP (${dynamicSeqBuffer.length}/${seqLen})…`;
+          }
         }
-        return true;
+        return { available: true, confirmedWord: false };
       }
 
       dynamicEvalCounter += 1;
       if (dynamicEvalCounter % 2 !== 0 && dynCandidate.streak === 0) {
-        return true;
+        return { available: true, confirmedWord: false };
       }
 
       const probs = window.tf.tidy(() => {
@@ -2412,11 +2407,12 @@
       const word = humanizeGloss(gloss);
 
       if (IGNORED_GLOSSES.has(topRawLabel) || !word || bestProb < threshold) {
-        dynCandidate.streak = 0;
-        dynCandidate.id = null;
-        setProgress(0.25);
-        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_WORDS;
-        return true;
+        resetDynamicCandidate();
+        if (!spellPossible) {
+          setProgress(0);
+          if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+        }
+        return { available: true, confirmedWord: false };
       }
 
       const pct = Math.round(bestProb * 100);
@@ -2436,7 +2432,7 @@
 
       latestDescriptorSnapshot = Object.freeze({
         level: frameMeta.level,
-        interpreterMode: 'words',
+        source: 'dynamic_118',
         gestureId: `dyn:${gloss}`,
         gloss,
         word,
@@ -2463,15 +2459,17 @@
           sentNote.textContent = 'Baja las manos 2 s para enviar y leer automáticamente.';
           sentNote.hidden = false;
         }
-        // Recorta parte de la ventana para evitar repeticiones en bucle de la misma seña
+        // Recorta parte de la ventana y limpia candidatos de deletreo para evitar falsas letras
         dynamicSeqBuffer.splice(0, 12);
-        dynCandidate.streak = 0;
-        dynCandidate.id = null;
+        resetDynamicCandidate();
+        resetSpellCandidate();
+        spellTrackBuffer.length = 0;
+        return { available: true, confirmedWord: true };
       }
-      return true;
+      return { available: true, confirmedWord: false };
     }
 
-    function feedSpellLetter(label, score, now, { isDynamic = false, previewLabel = null, previewProb = 0 } = {}) {
+    function feedSpellLetter(label, score, now, { isDynamic = false } = {}) {
       if (label && label === spellCandidate.label) {
         spellCandidate.lastSeen = now;
         spellCandidate.scoreSum += score;
@@ -2491,11 +2489,7 @@
 
       if (!spellCandidate.label) {
         setProgress(0);
-        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_SPELL;
-        if (previewLabel && previewProb >= 0.45) {
-          const shown = previewLabel === '' ? 'Espacio' : previewLabel;
-          lastDetectEl.textContent = `Deletreo en vivo: ${shown} · Confianza: ${Math.round(previewProb * 100)}%`;
-        }
+        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
         return;
       }
 
@@ -2529,8 +2523,10 @@
           sentenceTokens.push({ id: token.id, kind: token.kind, text: token.text });
           renderSentence();
           lastDetectEl.textContent = `Última letra: ${displayChar} · Confianza: ${pct}%`;
-          sentNote.textContent = 'Sostén postura neutra para separar palabras o pulsa “Enviar y leer al funcionario”.';
+          sentNote.textContent = 'Baja las manos 2 s para enviar o sostén postura neutra para separar palabras.';
           sentNote.hidden = false;
+          // Limpia el candidato dinámico al confirmar una letra para evitar conflictos entre motores
+          resetDynamicCandidate();
           if (spellCandidate.isDynamic) {
             spellTrackBuffer.length = 0;
           }
@@ -2538,7 +2534,12 @@
       }
     }
 
-    function handleAlphabetTf(primaryHand, aspect, frameMeta, now) {
+    /**
+     * Prioridad 3 · Alfabeto LSP (A–Z + Ñ · ./models/alfabeto_lsp/).
+     * Solo confirma letras estáticas si la mano permanece estable (trajectory.type === 'quieto') ~500 ms,
+     * o letras dinámicas (J, Ñ, Z) al completar su trazo.
+     */
+    function evaluateAlphabetTf(primaryHand, aspect, frameMeta, now) {
       const alphaEntry = tfModels && tfModels.alphabet;
       if (!alphaEntry || !alphaEntry.model || !window.tf) return false;
 
@@ -2578,6 +2579,7 @@
       });
 
       const dynLetter = detectDynamicAlphabetLetter(spellTrackBuffer, meta.dynamicLettersRules);
+      const handIsQuiet = !frameMeta.trajectory || frameMeta.trajectory.type === 'quieto';
       let resolvedLabel = null;
       let resolvedScore = 0;
       let isDynamic = false;
@@ -2586,7 +2588,7 @@
         resolvedLabel = dynLetter.label;
         resolvedScore = dynLetter.score;
         isDynamic = true;
-      } else if (bestProb >= threshold) {
+      } else if (bestProb >= threshold && handIsQuiet) {
         if (rawLabel === '') {
           const canInsertSpace =
             sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter';
@@ -2602,18 +2604,15 @@
 
       latestDescriptorSnapshot = Object.freeze({
         level: frameMeta.level,
-        interpreterMode: 'spell',
+        source: 'alphabet_lsp',
         gestureId: resolvedLabel ? `spell:${resolvedLabel}` : null,
         palm: frameMeta.palm,
+        trajectory: frameMeta.trajectory,
         confidence: resolvedScore || bestProb,
         timestamp: now
       });
 
-      feedSpellLetter(resolvedLabel, resolvedScore, now, {
-        isDynamic,
-        previewLabel: rawLabel,
-        previewProb: bestProb
-      });
+      feedSpellLetter(resolvedLabel, resolvedScore, now, { isDynamic });
       return true;
     }
 
@@ -2634,10 +2633,9 @@
         voteBuffer.length = 0;
         dynamicSeqBuffer.length = 0;
         spellTrackBuffer.length = 0;
-        dynCandidate.streak = 0;
-        dynCandidate.id = null;
+        resetDynamicCandidate();
+        resetSpellCandidate();
         prevPalmOrientation = null;
-        if (interpreterMode === 'spell') feedSpellLetter(null, 0, now);
         feedGesture(null, 0, now);
         if (handsDownSince === null) handsDownSince = now;
         if (sentenceTokens.length > 0 && now - handsDownSince >= AUTO_SEND_PAUSE_MS) {
@@ -2690,32 +2688,39 @@
         trajectory
       };
 
-      // Seguridad prioritaria inmediata: la seña de auxilio interrumpe incluso durante secuencias dinámicas
+      // Prioridad 1 (Emergencia): la seña `auxilio` interrumpe de inmediato cualquier flujo
       if (resolved && resolved.id === 'auxilio') {
         feedGesture('auxilio', resolved.score, now, { fastConfirm: true, meta: frameMeta });
         return;
       }
 
-      if (interpreterMode === 'spell') {
-        if (handleAlphabetTf(allLandmarks[0], aspect, frameMeta, now)) return;
-      } else if (handleDynamicWordsTf(results, frameMeta, now)) {
+      const activeTf = tfModels || loadedTfModels;
+      if (activeTf && (activeTf.dynamic || activeTf.alphabet)) {
+        tfModels = activeTf;
+
+        if (allLandmarks.length >= 2 && (spellCandidate.label || spellTrackBuffer.length > 0)) {
+          resetSpellCandidate();
+          spellTrackBuffer.length = 0;
+        }
+
+        // Prioridad 2 (Vocabulario dinámico · 118 señas): alimenta siempre [1, 30, 159]
+        const dynOutcome = evaluateDynamicWordsTf(results, frameMeta, now, allLandmarks.length);
+
+        // Prioridad 3 (Alfabeto A–Z + Ñ): solo 1 mano visible y sin palabra dinámica en confirmación
+        if (!dynOutcome.confirmedWord && allLandmarks.length === 1 && dynCandidate.streak === 0 && activeTf.alphabet) {
+          evaluateAlphabetTf(allLandmarks[0], aspect, frameMeta, now);
+        }
         return;
       }
 
-      // Respaldo geométrico (7 parámetros LSP) si TF.js no pudo cargar en red restringida
-      let filteredResolved = resolved;
-      if (interpreterMode === 'spell' && resolved) {
-        const g = GESTURE_BY_ID[resolved.id];
-        if (!g || (g.kind !== 'letter' && g.kind !== 'space')) filteredResolved = null;
-      }
-
+      // Respaldo geométrico (7 parámetros LSP) si TF.js no pudo cargar
       if (voteBuffer.length >= VOTE_WINDOW) voteBuffer.shift();
-      voteBuffer.push(filteredResolved ? { id: filteredResolved.id, score: filteredResolved.score } : { id: null, score: 0 });
+      voteBuffer.push(resolved ? { id: resolved.id, score: resolved.score } : { id: null, score: 0 });
       const smoothed = majorityVoteGesture(voteBuffer);
 
       latestDescriptorSnapshot = Object.freeze({
         level: frameMeta.level,
-        interpreterMode,
+        source: 'geometric_fallback',
         gestureId: smoothed.id,
         palm: primaryPalm,
         spatial,
@@ -2725,7 +2730,7 @@
         timestamp: now
       });
 
-      const fastConfirm = filteredResolved && filteredResolved.id === 'palma' && trajectory.type === 'oscilacion_h';
+      const fastConfirm = resolved && resolved.id === 'palma' && trajectory.type === 'oscilacion_h';
       feedGesture(smoothed.id, smoothed.score, now, { fastConfirm, meta: frameMeta });
     }
 
@@ -2900,9 +2905,8 @@
       resetOutput();
       dynamicSeqBuffer.length = 0;
       spellTrackBuffer.length = 0;
-      dynCandidate.streak = 0;
-      dynCandidate.id = null;
-      spellCandidate.label = null;
+      resetDynamicCandidate();
+      resetSpellCandidate();
       sentNote.textContent = 'Texto borrado. Listo para una nueva seña o deletreo.';
       sentNote.hidden = false;
     }
@@ -3012,8 +3016,6 @@
     btnSpeak.addEventListener('click', () => sendSentence({ auto: false }));
     btnUndo.addEventListener('click', undoLast);
     if (btnClear) btnClear.addEventListener('click', clearAllOutput);
-    if (btnModeWords) btnModeWords.addEventListener('click', () => setInterpreterMode('words'));
-    if (btnModeSpell) btnModeSpell.addEventListener('click', () => setInterpreterMode('spell'));
     btnEscalate.addEventListener('click', escalate);
 
     panel.addEventListener('keydown', (e) => {
@@ -3043,6 +3045,14 @@
     });
 
     const releaseOnExit = () => {
+      if (preloadHandle !== null) {
+        if (preloadUsingIdle && typeof window.cancelIdleCallback === 'function') {
+          window.cancelIdleCallback(preloadHandle);
+        } else {
+          clearTimeout(preloadHandle);
+        }
+        preloadHandle = null;
+      }
       stopCamera({ keepStatus: true });
       cancelSpeech();
       if (visionEngine) {
@@ -3074,6 +3084,7 @@
       tfModels = null;
       loadedTfModels = null;
       tfModelsPromise = null;
+      tfProgressCallback = null;
     };
     window.addEventListener('beforeunload', releaseOnExit);
     window.addEventListener('pagehide', releaseOnExit);
@@ -3082,9 +3093,30 @@
       window.speechSynthesis.getVoices();
     }
 
-    setInterpreterMode('words', { silent: true });
+    function scheduleSilentPreload() {
+      if (window.location.protocol === 'file:' || navigator.onLine === false) return;
+      const runPreload = () => {
+        preloadHandle = null;
+        if (window.location.protocol === 'file:' || navigator.onLine === false) return;
+        getVisionEngine({ silent: true }).catch(() => {});
+        loadTfModels()
+          .then((models) => {
+            if (!tfModels) tfModels = models;
+          })
+          .catch(() => {});
+      };
+      if (typeof window.requestIdleCallback === 'function') {
+        preloadUsingIdle = true;
+        preloadHandle = window.requestIdleCallback(runPreload, { timeout: 1500 });
+      } else {
+        preloadUsingIdle = false;
+        preloadHandle = setTimeout(runPreload, 800);
+      }
+    }
+
     resetOutput();
     setStatus('idle');
+    scheduleSilentPreload();
   }
 
   if (document.readyState === 'loading') {

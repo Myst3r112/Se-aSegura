@@ -1,15 +1,14 @@
 /**
- * SeñaSegura · Módulo "Cámara IA (LSP · 7 Parámetros Formativos)" (Vanilla JS ES6+)
+ * SeñaSegura · Módulo "Cámara IA (LSP · TensorFlow.js + MediaPipe)" (Vanilla JS ES6+)
  *
  * - Carga ESTRICTAMENTE bajo demanda al pulsar "Activar Cámara" (0 peticiones externas en carga inicial).
- * - Cadena resiliente de degradación progresiva:
- *     Nivel 1: Motor Completo LSP 7 Parámetros (@mediapipe/tasks-vision@0.10.14):
- *              HandLandmarker (2 manos 3D) + PoseLandmarker Lite (torso/profundidad cada 3 frames) +
- *              FaceLandmarker (blendshapes/intención no manual cada 3 frames).
- *     Nivel 2: HandLandmarker 3D solo (móviles de bajos recursos o fallo parcial de Pose/Face).
- *     Nivel 3: @mediapipe/hands@0.4.1675469240 clásico (respaldo si falla ESM/WASM/WebGL).
- *     Nivel 4: Vista compacta de prueba sin cámara (13 señas de ventanilla + 19 letras A–Z).
- * - Todo el procesamiento de video ocurre en el dispositivo: no se graba ni se envía video.
+ * - Arquitectura dual compatible con GitHub Pages (rutas estrictamente relativas sin '/' inicial):
+ *     Motor 1 (Modo Señas · 118 palabras): tf.loadGraphModel('./models/senas_dinamicas/model.json')
+ *              Ventana deslizante [1, 30, 159] (Pose torso 21 + Mano Izq 69 + Mano Der 69).
+ *     Motor 2 (Modo Deletreo · Alfabeto A–Z + Ñ): tf.loadGraphModel('./models/alfabeto_lsp/model.json')
+ *              Vector estandarizado [1, 16] (15 ángulos articulares + orientación 'angulo') y reglas dinámicas J, Ñ, Z.
+ * - Respaldo resiliente de 4 niveles si falla WebGL/TF.js o no hay cámara disponible.
+ * - Todo el procesamiento ocurre en el dispositivo: se liberan tensores en cada frame con tf.tidy().
  *
  * Integración con js/main.js mediante:
  *   - window.SenaSegura (puente: setChannel, appendChatMessage, activateEmergency)
@@ -24,6 +23,7 @@
   const TASKS_VISION_VERSION = '0.10.14';
   const VISION_BUNDLE_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/vision_bundle.mjs`;
   const VISION_WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/wasm`;
+  const TFJS_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
   const HAND_MODEL_URL =
     'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
   const POSE_MODEL_URL =
@@ -34,18 +34,64 @@
   const LEGACY_HANDS_BASE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/';
   const LEGACY_HANDS_SCRIPT_URL = `${LEGACY_HANDS_BASE_URL}hands.js`;
 
-  const CONFIRM_MS = 320; // confirmación ágil tras voto por mayoría
-  const CONFIRM_FAST_MS = 210; // saludo activo / respuesta inmediata
-  const CONFIRM_INDEX_MS = 520; // breve espera para distinguir quieto vs trayectoria dinámica (Z/negación)
-  const COOLDOWN_MS = 1200; // antes de encadenar nuevamente la misma seña
-  const GRACE_MS = 160; // tolerancia a micro-parpadeos
+  const CONFIRM_MS = 320; // confirmación ágil tras voto por mayoría (respaldo geométrico)
+  const CONFIRM_FAST_MS = 210; // saludo activo / emergencia inmediata
+  const CONFIRM_INDEX_MS = 520; // espera breve para distinguir quieto vs trayectoria
+  const CONFIRM_SPELL_MS = 500; // estabilización de letra estática (~0.5 s) en Modo Deletreo
+  const CONFIRM_SPELL_DYN_MS = 240; // confirmación rápida tras completar trazo dinámico J, Ñ, Z
+  const COOLDOWN_MS = 1200; // pausa antes de aceptar nuevamente la misma seña (~1.2 s)
+  const SPELL_COOLDOWN_MS = 750; // pausa breve tras confirmar una letra
+  const GRACE_MS = 180; // tolerancia a micro-parpadeos
   const MIN_FRAME_INTERVAL_MS = 33; // ~30 fps máx.
-  const AUX_DETECT_STRIDE = 3; // Pose + Face cada 3 frames (~10 Hz) para mantener 24–30 fps
-  const MOTION_WINDOW = 22; // ventana de 20–24 frames para trayectorias 3D
+  const AUX_DETECT_STRIDE = 3; // Face / Pose auxiliar en modo geométrico
+  const MOTION_WINDOW = 24; // ventana deslizante para trayectorias J / Ñ / Z
+  const DYNAMIC_SEQ_LEN = 30; // [1, 30, 159] para Motor 1
+  const DYNAMIC_NUM_FEATURES = 159;
+  const DYNAMIC_STREAK_REQUIRED = 2; // 2 ventanas consecutivas (>= threshold) antes de confirmar
   const VOTE_WINDOW = 6; // suavizado temporal por mayoría
   const AUTO_SEND_PAUSE_MS = 2000;
-  const LOAD_TIMEOUT_MS = 25000;
+  const LOAD_TIMEOUT_MS = 30000;
   const SCRIPT_TIMEOUT_MS = 15000;
+
+  const IGNORED_GLOSSES = new Set(['ix', 'g_r']);
+  const SPACE_TOKEN_LABEL = '__space__';
+
+  const DYNAMIC_POSE_INDICES = [0, 11, 12, 13, 14, 15, 16];
+  const ALPHABET_JOINT_TRIPLETS = [
+    [0, 1, 2], [1, 2, 3], [2, 3, 4],
+    [0, 5, 6], [5, 6, 7], [6, 7, 8],
+    [0, 9, 10], [9, 10, 11], [10, 11, 12],
+    [0, 13, 14], [13, 14, 15], [14, 15, 16],
+    [0, 17, 18], [17, 18, 19], [18, 19, 20]
+  ];
+
+  const DEFAULT_DYNAMIC_ALPHABET_RULES = {
+    J: { baseStaticLabel: 'I', trackedLandmark: 20, trajectory: 'down_then_inward_hook', windowFrames: 20 },
+    Ñ: { baseStaticLabel: 'N', trackedLandmark: 0, trajectory: 'horizontal_oscillation', windowFrames: 20 },
+    Z: { baseStaticLabel: 'D', trackedLandmark: 8, trajectory: 'zigzag_right_diagdownleft_right', windowFrames: 24 }
+  };
+
+  const GLOSS_SPANISH_MAP = {
+    ahi: 'ahí',
+    alla: 'allá',
+    caminar_persona: 'caminar',
+    como: 'cómo',
+    cuanto: 'cuánto',
+    despues: 'después',
+    dificil: 'difícil',
+    donde: 'dónde',
+    el: 'él',
+    emocion: 'emoción',
+    frio: 'frío',
+    mama: 'mamá',
+    otra_vez: 'otra vez',
+    proteina: 'proteína',
+    que: 'qué',
+    que_paso: 'qué pasó',
+    se_fue: 'se fue',
+    si: 'sí',
+    tu: 'tú'
+  };
 
   const CHAT_SENDER = 'Ciudadano (Cámara IA)';
 
@@ -147,19 +193,28 @@
     { id: 'letra_d', kind: 'letter', letter: 'D', emoji: 'D', label: 'Letra D', hands: '1 mano', hint: 'índice arriba mientras pulgar y dedos medios forman círculo' },
     { id: 'letra_e', kind: 'letter', letter: 'E', emoji: 'E', label: 'Letra E', hands: '1 mano', hint: 'dedos curvados en garra sobre el pulgar doblado' },
     { id: 'letra_f', kind: 'letter', letter: 'F', emoji: 'F', label: 'Letra F', hands: '1 mano', hint: 'pulgar e índice en pinza, otros tres dedos extendidos' },
+    { id: 'letra_g', kind: 'letter', letter: 'G', emoji: 'G', label: 'Letra G', hands: '1 mano', hint: 'índice y pulgar extendidos lateralmente en paralelo' },
+    { id: 'letra_h', kind: 'letter', letter: 'H', emoji: 'H', label: 'Letra H', hands: '1 mano', hint: 'índice y medio extendidos lateralmente juntos' },
     { id: 'letra_i', kind: 'letter', letter: 'I', emoji: 'I', label: 'Letra I', hands: '1 mano', hint: 'solo meñique extendido con pulgar recogido' },
     { id: 'letra_j', kind: 'letter', letter: 'J', emoji: 'J', label: 'Letra J', hands: '1 mano en movimiento', hint: 'meñique trazando una curva en J' },
     { id: 'letra_k', kind: 'letter', letter: 'K', emoji: 'K', label: 'Letra K', hands: '1 mano', hint: 'índice y medio abiertos con pulgar apoyado entre ambos' },
     { id: 'letra_l', kind: 'letter', letter: 'L', emoji: 'L', label: 'Letra L', hands: '1 mano', hint: 'pulgar e índice en ángulo recto' },
-    { id: 'letra_enie', kind: 'letter', letter: 'Ñ', emoji: 'Ñ', label: 'Letra Ñ', hands: '1 mano con movimiento', hint: 'dedos U/V agitados horizontalmente' },
+    { id: 'letra_m', kind: 'letter', letter: 'M', emoji: 'M', label: 'Letra M', hands: '1 mano', hint: 'tres dedos flexionados sobre el pulgar' },
+    { id: 'letra_n', kind: 'letter', letter: 'N', emoji: 'N', label: 'Letra N', hands: '1 mano', hint: 'dos dedos flexionados sobre el pulgar' },
+    { id: 'letra_enie', kind: 'letter', letter: 'Ñ', emoji: 'Ñ', label: 'Letra Ñ', hands: '1 mano con movimiento', hint: 'configuración de N agitada horizontalmente' },
     { id: 'letra_o', kind: 'letter', letter: 'O', emoji: 'O', label: 'Letra O', hands: '1 mano', hint: 'todas las puntas curvadas tocando el pulgar en O' },
+    { id: 'letra_p', kind: 'letter', letter: 'P', emoji: 'P', label: 'Letra P', hands: '1 mano', hint: 'configuración K orientada hacia abajo' },
+    { id: 'letra_q', kind: 'letter', letter: 'Q', emoji: 'Q', label: 'Letra Q', hands: '1 mano', hint: 'configuración G orientada hacia abajo' },
     { id: 'letra_r', kind: 'letter', letter: 'R', emoji: 'R', label: 'Letra R', hands: '1 mano', hint: 'dedo medio cruzado sobre el índice' },
     { id: 'letra_s', kind: 'letter', letter: 'S', emoji: 'S', label: 'Letra S', hands: '1 mano', hint: 'palma al frente con pulgar cruzado sobre los dedos' },
+    { id: 'letra_t', kind: 'letter', letter: 'T', emoji: 'T', label: 'Letra T', hands: '1 mano', hint: 'pulgar entre índice y medio cerrados en puño' },
     { id: 'letra_u', kind: 'letter', letter: 'U', emoji: 'U', label: 'Letra U', hands: '1 mano', hint: 'índice y medio extendidos juntos en paralelo' },
     { id: 'letra_v', kind: 'letter', letter: 'V', emoji: 'V', label: 'Letra V', hands: '1 mano', hint: 'índice y medio extendidos separados en V' },
     { id: 'letra_w', kind: 'letter', letter: 'W', emoji: 'W', label: 'Letra W', hands: '1 mano', hint: 'índice, medio y anular extendidos en abanico' },
+    { id: 'letra_x', kind: 'letter', letter: 'X', emoji: 'X', label: 'Letra X', hands: '1 mano', hint: 'índice flexionado en gancho' },
     { id: 'letra_y', kind: 'letter', letter: 'Y', emoji: 'Y', label: 'Letra Y', hands: '1 mano', hint: 'pulgar y meñique abiertos lateralmente' },
-    { id: 'letra_z', kind: 'letter', letter: 'Z', emoji: 'Z', label: 'Letra Z', hands: '1 mano en movimiento', hint: 'índice trazando zig-zag en Z' }
+    { id: 'letra_z', kind: 'letter', letter: 'Z', emoji: 'Z', label: 'Letra Z', hands: '1 mano en movimiento', hint: 'índice trazando zig-zag en Z' },
+    { id: 'letra_space', kind: 'space', letter: 'Espacio', emoji: '␣', label: 'Espacio entre palabras', hands: 'Postura neutra', hint: 'separa palabras al deletrear' }
   ];
   const GESTURE_BY_ID = Object.fromEntries(GESTURES.map((g) => [g.id, g]));
 
@@ -926,8 +981,335 @@
   }
 
   /**
-   * Encadena las señas confirmadas en español legible integrando intención no manual (¿...?).
-   * @param {Array<{id?:string,kind:'word'|'letter', text:string}>} tokens
+   * Convierte una glosa del modelo de 118 señas a español legible para el ciudadano.
+   * Las glosas técnicas ('ix', 'g_r') devuelven '' para filtrarse fuera de la UI.
+   */
+  function humanizeGloss(gloss) {
+    const raw = String(gloss || '').trim();
+    if (!raw || IGNORED_GLOSSES.has(raw)) return '';
+    if (Object.prototype.hasOwnProperty.call(GLOSS_SPANISH_MAP, raw)) {
+      return GLOSS_SPANISH_MAP[raw];
+    }
+    return raw.replace(/_/g, ' ');
+  }
+
+  /**
+   * Resuelve qué mano corresponde a la ranura anatómica izquierda vs derecha del tensor de 159 características.
+   */
+  function assignAnatomicalHands(allLandmarks, allHandedness, poseLandmarks) {
+    const slots = { Left: null, Right: null };
+    if (!Array.isArray(allLandmarks) || allLandmarks.length === 0) return slots;
+
+    const hasPoseWrists =
+      Array.isArray(poseLandmarks) &&
+      poseLandmarks.length >= 17 &&
+      Boolean(poseLandmarks[15] && poseLandmarks[16]);
+
+    const sideForHand = (idx) => {
+      const entry = Array.isArray(allHandedness) && allHandedness[idx] ? allHandedness[idx][0] : null;
+      const mpLabel = normalizeHandedness(entry);
+      // En frame sin espejo, la etiqueta cruda de HandLandmarker está invertida respecto al cuerpo
+      return mpLabel === 'Left' ? 'Right' : 'Left';
+    };
+
+    if (allLandmarks.length === 1) {
+      const h0 = allLandmarks[0];
+      if (!Array.isArray(h0) || h0.length < 21) return slots;
+      let side = sideForHand(0);
+      if (hasPoseWrists) {
+        const dL = Math.hypot(h0[0].x - poseLandmarks[15].x, h0[0].y - poseLandmarks[15].y);
+        const dR = Math.hypot(h0[0].x - poseLandmarks[16].x, h0[0].y - poseLandmarks[16].y);
+        side = dL <= dR ? 'Left' : 'Right';
+      }
+      slots[side] = h0;
+      return slots;
+    }
+
+    const h0 = allLandmarks[0];
+    const h1 = allLandmarks[1];
+    if (hasPoseWrists && h0 && h0.length >= 21 && h1 && h1.length >= 21) {
+      const cost0L1R =
+        Math.hypot(h0[0].x - poseLandmarks[15].x, h0[0].y - poseLandmarks[15].y) +
+        Math.hypot(h1[0].x - poseLandmarks[16].x, h1[0].y - poseLandmarks[16].y);
+      const cost0R1L =
+        Math.hypot(h0[0].x - poseLandmarks[16].x, h0[0].y - poseLandmarks[16].y) +
+        Math.hypot(h1[0].x - poseLandmarks[15].x, h1[0].y - poseLandmarks[15].y);
+      if (cost0L1R <= cost0R1L) {
+        slots.Left = h0;
+        slots.Right = h1;
+      } else {
+        slots.Right = h0;
+        slots.Left = h1;
+      }
+      return slots;
+    }
+
+    const s0 = sideForHand(0);
+    if (h0 && h0.length >= 21) slots[s0] = h0;
+    if (h1 && h1.length >= 21) {
+      const s1 = s0 === 'Left' ? 'Right' : 'Left';
+      slots[s1] = h1;
+    }
+    return slots;
+  }
+
+  /**
+   * Motor 1 (Vocabulario Dinámico · ./models/senas_dinamicas/):
+   * Construye el vector de 159 parámetros para un frame:
+   *   - 0..20   (21): 7 landmarks de torso superior [0, 11, 12, 13, 14, 15, 16] normalizados por hombros
+   *   - 21..89  (69): Mano Izquierda (63 pts muñeca/palma + 3 muñeca rel hombros + 3 normal de palma)
+   *   - 90..158 (69): Mano Derecha (63 pts muñeca/palma + 3 muñeca rel hombros + 3 normal de palma)
+   */
+  function extractDynamicFrameFeatures(poseLandmarks = null, handResults = null) {
+    const out = new Float32Array(DYNAMIC_NUM_FEATURES);
+    const hasShoulders =
+      Array.isArray(poseLandmarks) &&
+      poseLandmarks.length >= 17 &&
+      Boolean(poseLandmarks[11] && poseLandmarks[12]);
+
+    let midX = 0;
+    let midY = 0;
+    let midZ = 0;
+    let shoulderWidth = 1;
+
+    if (hasShoulders) {
+      const ls = poseLandmarks[11];
+      const rs = poseLandmarks[12];
+      midX = (ls.x + rs.x) / 2;
+      midY = (ls.y + rs.y) / 2;
+      midZ = ((ls.z || 0) + (rs.z || 0)) / 2;
+      shoulderWidth = dist3(ls, rs) || 1e-6;
+
+      for (let i = 0; i < DYNAMIC_POSE_INDICES.length; i += 1) {
+        const pt = poseLandmarks[DYNAMIC_POSE_INDICES[i]];
+        if (!pt) continue;
+        out[i * 3] = (pt.x - midX) / shoulderWidth;
+        out[i * 3 + 1] = (pt.y - midY) / shoulderWidth;
+        out[i * 3 + 2] = ((pt.z || 0) - midZ) / shoulderWidth;
+      }
+    }
+
+    const allLandmarks = handResults && Array.isArray(handResults.landmarks) ? handResults.landmarks : [];
+    const allHandedness = handResults && Array.isArray(handResults.handedness) ? handResults.handedness : [];
+    const slots = assignAnatomicalHands(allLandmarks, allHandedness, poseLandmarks);
+
+    const fillHandSlot = (lm, side, baseOffset) => {
+      if (!Array.isArray(lm) || lm.length < 21) return;
+      const wrist = lm[0];
+      const middleMcp = lm[9];
+      const palmSize = dist3(wrist, middleMcp) || 1e-6;
+
+      for (let j = 0; j < 21; j += 1) {
+        const p = lm[j];
+        out[baseOffset + j * 3] = (p.x - wrist.x) / palmSize;
+        out[baseOffset + j * 3 + 1] = (p.y - wrist.y) / palmSize;
+        out[baseOffset + j * 3 + 2] = ((p.z || 0) - (wrist.z || 0)) / palmSize;
+      }
+
+      if (hasShoulders) {
+        out[baseOffset + 63] = (wrist.x - midX) / shoulderWidth;
+        out[baseOffset + 64] = (wrist.y - midY) / shoulderWidth;
+        out[baseOffset + 65] = ((wrist.z || 0) - midZ) / shoulderWidth;
+      }
+
+      const palm = computePalmOrientation3D(lm, side);
+      out[baseOffset + 66] = palm.nx;
+      out[baseOffset + 67] = palm.ny;
+      out[baseOffset + 68] = palm.nz;
+    };
+
+    fillHandSlot(slots.Left, 'Left', 21);
+    fillHandSlot(slots.Right, 'Right', 90);
+
+    for (let k = 0; k < out.length; k += 1) {
+      if (!Number.isFinite(out[k])) out[k] = 0;
+    }
+    return out;
+  }
+
+  /**
+   * Motor 2 (Alfabeto A–Z + Ñ · ./models/alfabeto_lsp/):
+   * Calcula las 16 características [15 ángulos internos de articulación + 'angulo' 0..360°]
+   * y las estandariza con (x - scalerMean[i]) / scalerStd[i] cuando se proveen escaladores.
+   */
+  function extractAlphabetFeatures(landmarks, scalerMean = null, scalerStd = null) {
+    const out = new Float32Array(16);
+    if (!Array.isArray(landmarks) || landmarks.length < 21) return out;
+
+    for (let i = 0; i < ALPHABET_JOINT_TRIPLETS.length; i += 1) {
+      const [a, b, c] = ALPHABET_JOINT_TRIPLETS[i];
+      out[i] = angleDeg(landmarks[a], landmarks[b], landmarks[c]);
+    }
+
+    let angulo = (Math.atan2(landmarks[0].y - landmarks[9].y, landmarks[9].x - landmarks[0].x) * 180) / Math.PI;
+    if (angulo < 0) angulo += 360;
+    out[15] = angulo;
+
+    if (Array.isArray(scalerMean) && Array.isArray(scalerStd) && scalerMean.length >= 16 && scalerStd.length >= 16) {
+      for (let i = 0; i < 16; i += 1) {
+        const std = scalerStd[i] || 1;
+        out[i] = (out[i] - scalerMean[i]) / std;
+      }
+    }
+
+    for (let k = 0; k < out.length; k += 1) {
+      if (!Number.isFinite(out[k])) out[k] = 0;
+    }
+    return out;
+  }
+
+  /**
+   * Detector de trayectorias dinámicas para letras J, Ñ y Z del Alfabeto LSP usando metadata.dynamicLettersRules.
+   * @param {Array<{t:number,palmSize:number,landmarks:Array,staticLabel:string|null,prob:number}>} trackBuffer
+   * @param {object} [dynamicRules]
+   * @returns {{label:string,score:number}|null}
+   */
+  function detectDynamicAlphabetLetter(trackBuffer, dynamicRules = null) {
+    if (!Array.isArray(trackBuffer) || trackBuffer.length < 8) return null;
+    const rules = dynamicRules || DEFAULT_DYNAMIC_ALPHABET_RULES;
+
+    const getSlice = (winFrames) => {
+      const n = Math.max(8, Number(winFrames) || 20);
+      return trackBuffer.length > n ? trackBuffer.slice(trackBuffer.length - n) : trackBuffer;
+    };
+
+    const measureLandmarkStats = (frames, lmIdx) => {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      let palmSum = 0;
+      let valid = 0;
+      let reversals = 0;
+      let dir = 0;
+      let anchorX = null;
+
+      for (let i = 0; i < frames.length; i += 1) {
+        const f = frames[i];
+        const pt = f && Array.isArray(f.landmarks) ? f.landmarks[lmIdx] : null;
+        if (!pt) continue;
+        palmSum += f.palmSize || 0.1;
+        valid += 1;
+        if (pt.x < minX) minX = pt.x;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.y > maxY) maxY = pt.y;
+        if (anchorX === null) {
+          anchorX = pt.x;
+        } else {
+          const avgP = palmSum / valid || 0.1;
+          const dx = pt.x - anchorX;
+          if (Math.abs(dx) >= 0.04 * avgP) {
+            const nextDir = dx > 0 ? 1 : -1;
+            if (dir !== 0 && nextDir !== dir) reversals += 1;
+            dir = nextDir;
+            anchorX = pt.x;
+          }
+        }
+      }
+      if (valid < 6) return null;
+      const avgPalm = palmSum / valid || 0.1;
+      return {
+        avgPalm,
+        spanX: (maxX - minX) / avgPalm,
+        spanY: (maxY - minY) / avgPalm,
+        reversals
+      };
+    };
+
+    const countMatchingStatic = (frames, acceptedLabels) => {
+      let count = 0;
+      let maxProb = 0;
+      for (let i = 0; i < frames.length; i += 1) {
+        const lbl = frames[i].staticLabel;
+        if (lbl && acceptedLabels.includes(lbl)) {
+          count += 1;
+          if ((frames[i].prob || 0) > maxProb) maxProb = frames[i].prob || 0;
+        }
+      }
+      return { count, maxProb };
+    };
+
+    // 1. Letra Z: base estática D, índice [8] en zigzag (24 frames)
+    const zRule = rules.Z || DEFAULT_DYNAMIC_ALPHABET_RULES.Z;
+    const zSlice = getSlice(zRule.windowFrames || 24);
+    const zBase = countMatchingStatic(zSlice, [zRule.baseStaticLabel || 'D']);
+    if (zSlice.length >= 10 && zBase.count >= 2) {
+      const lmIdx = typeof zRule.trackedLandmark === 'number' ? zRule.trackedLandmark : 8;
+      const zStats = measureLandmarkStats(zSlice, lmIdx);
+      if (zStats && zStats.spanX >= 0.35 && zStats.spanY >= 0.25 && zStats.reversals >= 2) {
+        // Admite trazo normal o espejado (h1 -> diagonal abajo opuesta -> h2)
+        const checkZigzag = (sign) => {
+          let s1 = false;
+          let s2 = false;
+          let s3 = false;
+          for (let i = 2; i < zSlice.length; i += 1) {
+            const p0 = zSlice[i - 2].landmarks && zSlice[i - 2].landmarks[lmIdx];
+            const p1 = zSlice[i].landmarks && zSlice[i].landmarks[lmIdx];
+            if (!p0 || !p1) continue;
+            const dx = ((p1.x - p0.x) / zStats.avgPalm) * sign;
+            const dy = (p1.y - p0.y) / zStats.avgPalm;
+            if (!s1 && dx > 0.06 && Math.abs(dy) < 0.14) s1 = true;
+            else if (s1 && !s2 && dx < -0.06 && dy > 0.06) s2 = true;
+            else if (s2 && !s3 && dx > 0.06 && Math.abs(dy) < 0.14) s3 = true;
+          }
+          return s1 && s2 && s3;
+        };
+        if (checkZigzag(1) || checkZigzag(-1)) {
+          return { label: 'Z', score: Math.max(0.86, zBase.maxProb) };
+        }
+      }
+    }
+
+    // 2. Letra Ñ: base estática N (o M/U/V durante batido), muñeca [0] oscilando horizontalmente (20 frames)
+    const enieRule = rules['Ñ'] || DEFAULT_DYNAMIC_ALPHABET_RULES['Ñ'];
+    const enieSlice = getSlice(enieRule.windowFrames || 20);
+    const enieBase = countMatchingStatic(enieSlice, [enieRule.baseStaticLabel || 'N', 'M', 'U', 'V']);
+    if (enieSlice.length >= 8 && enieBase.count >= 2) {
+      const lmIdx = typeof enieRule.trackedLandmark === 'number' ? enieRule.trackedLandmark : 0;
+      const enieStats = measureLandmarkStats(enieSlice, lmIdx);
+      if (enieStats && enieStats.spanX >= 0.30 && enieStats.spanX > enieStats.spanY * 0.9 && enieStats.reversals >= 2) {
+        return { label: 'Ñ', score: Math.max(0.86, enieBase.maxProb) };
+      }
+    }
+
+    // 3. Letra J: base estática I, meñique [20] bajando y girando en gancho (20 frames)
+    const jRule = rules.J || DEFAULT_DYNAMIC_ALPHABET_RULES.J;
+    const jSlice = getSlice(jRule.windowFrames || 20);
+    const jBase = countMatchingStatic(jSlice, [jRule.baseStaticLabel || 'I']);
+    if (jSlice.length >= 8 && jBase.count >= 2) {
+      const lmIdx = typeof jRule.trackedLandmark === 'number' ? jRule.trackedLandmark : 20;
+      const avgPalm =
+        jSlice.reduce((acc, f) => acc + (f.palmSize || 0.1), 0) / jSlice.length || 0.1;
+      const pFirst = jSlice[0].landmarks && jSlice[0].landmarks[lmIdx];
+      let pMid = null;
+      let maxY = -Infinity;
+      const lo = Math.floor(jSlice.length * 0.3);
+      const hi = Math.ceil(jSlice.length * 0.85);
+      for (let i = lo; i < hi; i += 1) {
+        const pt = jSlice[i].landmarks && jSlice[i].landmarks[lmIdx];
+        if (pt && pt.y > maxY) {
+          maxY = pt.y;
+          pMid = pt;
+        }
+      }
+      const pLast = jSlice[jSlice.length - 1].landmarks && jSlice[jSlice.length - 1].landmarks[lmIdx];
+      if (pFirst && pMid && pLast) {
+        const dropY = (pMid.y - pFirst.y) / avgPalm;
+        const hookDx = Math.abs(pLast.x - pMid.x) / avgPalm;
+        const hookUpY = (pMid.y - pLast.y) / avgPalm;
+        if (dropY >= 0.28 && hookDx >= 0.16 && hookUpY >= -0.05) {
+          return { label: 'J', score: Math.max(0.86, jBase.maxProb) };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Encadena las señas y letras confirmadas en español legible integrando espacios de deletreo y ¿...?.
+   * @param {Array<{id?:string,kind:'word'|'letter'|'space', text:string}>} tokens
    * @param {string} [expression='neutro'] 'pregunta' | 'negacion_enfasis' | 'urgencia_dolor' | 'neutro'
    * @returns {string}
    */
@@ -944,6 +1326,8 @@
     tokens.forEach((token) => {
       if (token.kind === 'letter') {
         letterRun += token.text;
+      } else if (token.kind === 'space') {
+        flushLetters();
       } else {
         flushLetters();
         parts.push({ text: token.text, kind: 'word' });
@@ -951,6 +1335,7 @@
     });
     flushLetters();
 
+    if (parts.length === 0) return '';
     let sentence = parts.map((p) => p.text).join(' ');
     sentence = sentence.charAt(0).toUpperCase() + sentence.slice(1);
     if (parts[parts.length - 1].kind === 'word') {
@@ -959,7 +1344,7 @@
     }
 
     const hasQueryIntent =
-      /\b(consulta|ayuda|necesito|dni|monto|por favor|entiendo|corregir|espera)\b/i.test(sentence) ||
+      /\b(consulta|ayuda|necesito|dni|monto|por favor|entiendo|corregir|espera|cómo|cuándo|dónde|cuánto|qué)\b/i.test(sentence) ||
       tokens.some((t) => t.id === 'indice' || t.id === 'por_favor' || t.kind === 'letter');
 
     if (expression === 'pregunta' && hasQueryIntent) {
@@ -971,12 +1356,22 @@
   }
 
   let latestDescriptorSnapshot = null;
+  let activeInterpreterModeSnapshot = 'words';
+  let activeTfStatusSnapshot = { ready: false, loading: false, dynamicReady: false, alphabetReady: false, error: null };
 
   function getLastDescriptor() {
     return latestDescriptorSnapshot;
   }
 
-  // API pública para pruebas unitarias, telemetría y entrenamiento futuro (sin alterar DOM)
+  function getInterpreterMode() {
+    return activeInterpreterModeSnapshot;
+  }
+
+  function getTfEngineStatus() {
+    return Object.freeze({ ...activeTfStatusSnapshot });
+  }
+
+  // API pública para pruebas unitarias, telemetría y verificación (sin alterar DOM)
   window.SenaSeguraVision = Object.freeze({
     classifyHand,
     resolveMultiHandGesture,
@@ -986,17 +1381,121 @@
     computeSpatialContext,
     analyzeNonManualExpressions,
     analyzeTrajectory3D,
+    extractDynamicFrameFeatures,
+    extractAlphabetFeatures,
+    detectDynamicAlphabetLetter,
+    humanizeGloss,
     composeSentence,
+    loadTfModels,
     getLastDescriptor,
+    getInterpreterMode,
+    getTfEngineStatus,
     GESTURES
   });
 
   /* =========================================================
-     3. CARGA DINÁMICA DE MOTORES DE VISIÓN (BAJO DEMANDA)
+     3. CARGA DINÁMICA DE MOTORES DE VISIÓN + TENSORFLOW.JS (BAJO DEMANDA)
      ========================================================= */
   let visionModulePromise = null;
   let loadedHandConnections = HAND_CONNECTIONS_FALLBACK;
   const scriptPromises = new Map();
+  let tfModelsPromise = null;
+  let loadedTfModels = null;
+
+  /**
+   * Calcula el prefijo relativo hacia ./models sin usar rutas absolutas con '/' inicial,
+   * garantizando compatibilidad 100 % con GitHub Pages (/repositorio/pages/... o /pages/...).
+   */
+  function resolveRelativeModelsRoot() {
+    const pathname = String(window.location && window.location.pathname ? window.location.pathname : '');
+    return /\/pages(?:\/[^/]*)?$/.test(pathname) ? '../models' : './models';
+  }
+
+  async function loadGraphModelWithFallback(candidateDirs, expectedMetadataName) {
+    let lastErr = null;
+    for (let i = 0; i < candidateDirs.length; i += 1) {
+      const dir = candidateDirs[i];
+      try {
+        const metaRes = await withTimeout(fetch(`${dir}/metadata.json`, { cache: 'default' }), LOAD_TIMEOUT_MS);
+        if (!metaRes.ok) throw new Error(`metadata-http-${metaRes.status}`);
+        const metadata = await metaRes.json();
+        const model = await withTimeout(window.tf.loadGraphModel(`${dir}/model.json`), LOAD_TIMEOUT_MS);
+        return { dir, metadata, model, name: expectedMetadataName };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error(`graph-model-load-failed:${expectedMetadataName}`);
+  }
+
+  function warmupTfModel(entry, shape) {
+    if (!entry || !entry.model || !window.tf) return;
+    window.tf.tidy(() => {
+      const dummy = window.tf.zeros(shape, 'float32');
+      const out = entry.model.predict(dummy);
+      if (Array.isArray(out)) out.forEach((t) => t.dataSync());
+      else if (out && typeof out.dataSync === 'function') out.dataSync();
+    });
+  }
+
+  function loadTfModels({ onProgress } = {}) {
+    if (loadedTfModels) return Promise.resolve(loadedTfModels);
+    if (tfModelsPromise) return tfModelsPromise;
+    if (window.location.protocol === 'file:') {
+      const err = new Error('file-protocol');
+      activeTfStatusSnapshot = { ready: false, loading: false, dynamicReady: false, alphabetReady: false, error: err.message };
+      return Promise.reject(err);
+    }
+
+    activeTfStatusSnapshot = { ready: false, loading: true, dynamicReady: false, alphabetReady: false, error: null };
+    const report = (msg) => {
+      if (typeof onProgress === 'function') onProgress(msg);
+    };
+
+    tfModelsPromise = (async () => {
+      try {
+        report('Descargando motor TensorFlow.js bajo demanda…');
+        await loadLegacyScript(TFJS_SCRIPT_URL);
+        if (!window.tf || typeof window.tf.loadGraphModel !== 'function') {
+          throw new Error('tfjs-unavailable');
+        }
+        await window.tf.ready();
+
+        const root = resolveRelativeModelsRoot();
+        report('Descargando modelos IA LSP (vocabulario y alfabeto)…');
+        const [dynamic, alphabet] = await Promise.all([
+          loadGraphModelWithFallback([`${root}/senas_dinamicas`, `${root}/model_senas_3enlaces`], 'senas_dinamicas'),
+          loadGraphModelWithFallback([`${root}/alfabeto_lsp`, `${root}/model_alfabeto_lsp`], 'alfabeto_lsp')
+        ]);
+
+        report('Preparando redes neuronales en tu navegador…');
+        warmupTfModel(dynamic, [1, dynamic.metadata.sequenceLength || DYNAMIC_SEQ_LEN, dynamic.metadata.numFeatures || DYNAMIC_NUM_FEATURES]);
+        warmupTfModel(alphabet, [1, alphabet.metadata.numFeatures || 16]);
+
+        loadedTfModels = { dynamic, alphabet };
+        activeTfStatusSnapshot = {
+          ready: true,
+          loading: false,
+          dynamicReady: Boolean(dynamic && dynamic.model),
+          alphabetReady: Boolean(alphabet && alphabet.model),
+          error: null
+        };
+        return loadedTfModels;
+      } catch (err) {
+        tfModelsPromise = null;
+        activeTfStatusSnapshot = {
+          ready: false,
+          loading: false,
+          dynamicReady: false,
+          alphabetReady: false,
+          error: err ? String(err.message || err) : 'tfjs-load-error'
+        };
+        throw err;
+      }
+    })();
+
+    return tfModelsPromise;
+  }
 
   function withTimeout(promise, ms) {
     return new Promise((resolve, reject) => {
@@ -1089,8 +1588,11 @@
     const placeholderText = $('vision-placeholder-text');
     const btnStart = $('btn-vision-start');
     const btnSimulate = $('btn-vision-simulate');
+    const btnModeWords = $('btn-vision-mode-words');
+    const btnModeSpell = $('btn-vision-mode-spell');
     const btnSpeak = $('btn-vision-speak');
     const btnUndo = $('btn-vision-undo');
+    const btnClear = $('btn-vision-clear');
     const btnEscalate = $('btn-vision-escalate');
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
@@ -1117,14 +1619,19 @@
     const btnSimulateLabel = btnSimulate.querySelector('span') || btnSimulate;
     const DEFAULT_SENTENCE = 'Muestra una seña y mantenla un instante para empezar la oración.';
     const DEFAULT_LAST_DETECT = 'Última seña: — · Confianza: —';
-    const DEFAULT_PROGRESS_LABEL = `Estabilidad de la seña (${CONFIRM_MS} ms)`;
+    const DEFAULT_PROGRESS_WORDS = 'Estabilidad de seña dinámica (118 palabras)';
+    const DEFAULT_PROGRESS_SPELL = `Estabilidad de letra (${CONFIRM_SPELL_MS} ms)`;
+    const lowPowerDevice =
+      window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
 
     let mode = 'idle'; // idle | loading | live | simulation
+    let interpreterMode = 'words'; // words | spell
     let sessionToken = 0;
     let stream = null;
-    // visionEngine: { type: 'tasks', level: 1|2, landmarker, poseLandmarker, faceLandmarker } | { type: 'legacy', level: 3, hands }
+    // visionEngine: { type: 'tasks', level: 1|2, handLandmarker, poseLandmarker, faceLandmarker } | { type: 'legacy', level: 3, hands }
     let visionEngine = null;
     let enginePromise = null;
+    let tfModels = null;
     let running = false;
     let rafId = 0;
     let frameCounter = 0;
@@ -1143,10 +1650,52 @@
     let handsDownSince = null;
     let speechTimer = null;
     let sentenceTokens = [];
+    let dynamicEvalCounter = 0;
     const lastAddedAt = {};
     const motionBuffer = [];
     const voteBuffer = [];
+    const dynamicSeqBuffer = [];
+    const spellTrackBuffer = [];
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, meta: null };
+    const dynCandidate = { id: null, streak: 0, lastProb: 0, since: 0 };
+    const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, isDynamic: false };
+
+    function getDefaultProgressLabel() {
+      return interpreterMode === 'spell' ? DEFAULT_PROGRESS_SPELL : DEFAULT_PROGRESS_WORDS;
+    }
+
+    function setInterpreterMode(nextInterpreterMode, { silent = false } = {}) {
+      const normalized = nextInterpreterMode === 'spell' ? 'spell' : 'words';
+      const changed = interpreterMode !== normalized;
+      interpreterMode = normalized;
+      activeInterpreterModeSnapshot = normalized;
+
+      if (btnModeWords) {
+        const isWords = normalized === 'words';
+        btnModeWords.classList.toggle('is-active', isWords);
+        btnModeWords.setAttribute('aria-pressed', String(isWords));
+      }
+      if (btnModeSpell) {
+        const isSpell = normalized === 'spell';
+        btnModeSpell.classList.toggle('is-active', isSpell);
+        btnModeSpell.setAttribute('aria-pressed', String(isSpell));
+      }
+
+      if (changed) {
+        // Conserva cámara, MediaPipe y modelos TF.js cargados; solo reinicia ventanas transitorias de frames
+        resetDetection();
+      } else if (progressLabel) {
+        progressLabel.textContent = getDefaultProgressLabel();
+      }
+
+      if (!silent && mode === 'live') {
+        sentNote.textContent =
+          normalized === 'spell'
+            ? 'Modo Deletreo activo: sostén cada letra ~0.5 s (J, Ñ y Z requieren trazo).'
+            : 'Modo Señas (118 palabras) activo: realiza la seña fluida frente a la cámara.';
+        sentNote.hidden = false;
+      }
+    }
 
     /* ---------- UI helpers ---------- */
     function updateHandsCount(count) {
@@ -1204,8 +1753,10 @@
       sentenceEl.textContent = text || DEFAULT_SENTENCE;
       sentenceEl.classList.toggle('is-empty', !text);
       const hasTokens = sentenceTokens.length > 0;
+      const canReset = hasTokens || Boolean(lastConfirmed);
       btnSpeak.disabled = !hasTokens;
-      btnUndo.disabled = !hasTokens && !lastConfirmed;
+      btnUndo.disabled = !canReset;
+      if (btnClear) btnClear.disabled = !canReset;
     }
 
     function resetOutput() {
@@ -1219,7 +1770,7 @@
       sentNote.textContent = '';
       setUrgent(false);
       setProgress(0);
-      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+      if (progressLabel) progressLabel.textContent = getDefaultProgressLabel();
       renderSentence();
     }
 
@@ -1231,15 +1782,29 @@
       detection.scoreSum = 0;
       detection.scoreN = 0;
       detection.meta = null;
+      dynCandidate.id = null;
+      dynCandidate.streak = 0;
+      dynCandidate.lastProb = 0;
+      dynCandidate.since = 0;
+      spellCandidate.label = null;
+      spellCandidate.since = 0;
+      spellCandidate.lastSeen = 0;
+      spellCandidate.confirmed = false;
+      spellCandidate.scoreSum = 0;
+      spellCandidate.scoreN = 0;
+      spellCandidate.isDynamic = false;
+      dynamicEvalCounter = 0;
       motionBuffer.length = 0;
       voteBuffer.length = 0;
+      dynamicSeqBuffer.length = 0;
+      spellTrackBuffer.length = 0;
       prevPalmOrientation = null;
       latestPoseLandmarks = null;
       latestFaceLandmarks = null;
       latestFaceBlendshapes = null;
       handsDownSince = null;
       setProgress(0);
-      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+      if (progressLabel) progressLabel.textContent = getDefaultProgressLabel();
     }
 
     /* ---------- Cámara y ciclo de vida ---------- */
@@ -1386,47 +1951,43 @@
         minTrackingConfidence: 0.5
       });
 
-      // Nivel 1 completo solo en equipos con recursos suficientes; en móviles ligeros conserva Nivel 2
-      const lowPower =
-        window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
+      // PoseLandmarker siempre activo para alimentar las 159 características de Motor 1;
+      // FaceLandmarker se reserva a dispositivos con recursos suficientes.
+      const [poseRes, faceRes] = await Promise.allSettled([
+        PoseLandmarker
+          ? createTaskWithCpuFallback(PoseLandmarker, vision, {
+            baseOptions: { modelAssetPath: POSE_MODEL_URL },
+            runningMode: 'VIDEO',
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.45,
+            minTrackingConfidence: 0.45
+          })
+          : Promise.resolve(null),
+        !lowPowerDevice && FaceLandmarker
+          ? createTaskWithCpuFallback(FaceLandmarker, vision, {
+            baseOptions: { modelAssetPath: FACE_MODEL_URL },
+            runningMode: 'VIDEO',
+            numFaces: 1,
+            outputFaceBlendshapes: true,
+            minFaceDetectionConfidence: 0.45,
+            minTrackingConfidence: 0.45
+          })
+          : Promise.resolve(null)
+      ]);
 
       let poseLandmarker = null;
       let faceLandmarker = null;
 
-      if (!lowPower) {
-        const [poseRes, faceRes] = await Promise.allSettled([
-          PoseLandmarker
-            ? createTaskWithCpuFallback(PoseLandmarker, vision, {
-              baseOptions: { modelAssetPath: POSE_MODEL_URL },
-              runningMode: 'VIDEO',
-              numPoses: 1,
-              minPoseDetectionConfidence: 0.45,
-              minTrackingConfidence: 0.45
-            })
-            : Promise.resolve(null),
-          FaceLandmarker
-            ? createTaskWithCpuFallback(FaceLandmarker, vision, {
-              baseOptions: { modelAssetPath: FACE_MODEL_URL },
-              runningMode: 'VIDEO',
-              numFaces: 1,
-              outputFaceBlendshapes: true,
-              minFaceDetectionConfidence: 0.45,
-              minTrackingConfidence: 0.45
-            })
-            : Promise.resolve(null)
-        ]);
+      if (poseRes.status === 'fulfilled' && poseRes.value) {
+        poseLandmarker = poseRes.value;
+      } else if (poseRes.status === 'rejected') {
+        console.warn('[Cámara IA]', poseRes.reason);
+      }
 
-        if (poseRes.status === 'fulfilled' && poseRes.value) {
-          poseLandmarker = poseRes.value;
-        } else if (poseRes.status === 'rejected') {
-          console.warn('[Cámara IA]', poseRes.reason);
-        }
-
-        if (faceRes.status === 'fulfilled' && faceRes.value) {
-          faceLandmarker = faceRes.value;
-        } else if (faceRes.status === 'rejected') {
-          console.warn('[Cámara IA]', faceRes.reason);
-        }
+      if (faceRes.status === 'fulfilled' && faceRes.value) {
+        faceLandmarker = faceRes.value;
+      } else if (faceRes.status === 'rejected') {
+        console.warn('[Cámara IA]', faceRes.reason);
       }
 
       const level = poseLandmarker || faceLandmarker ? 1 : 2;
@@ -1521,9 +2082,21 @@
       showNotice('');
       resetOutput();
       setStatus('loading');
+      statusText.textContent = 'Descargando modelos IA…';
+      placeholderText.textContent = 'Cargando motor MediaPipe y redes neuronales LSP (118 señas y alfabeto)… Permite el acceso a la cámara si el navegador lo solicita.';
       btnStart.focus();
 
-      const [camResult, libResult] = await Promise.allSettled([openCamera(), getVisionEngine()]);
+      const updateProgressMsg = (msg) => {
+        if (token !== sessionToken || mode !== 'loading') return;
+        statusText.textContent = 'Descargando modelos IA…';
+        placeholderText.textContent = `${msg} Permite el acceso a la cámara si el navegador lo solicita.`;
+      };
+
+      const [camResult, libResult, tfResult] = await Promise.allSettled([
+        openCamera(),
+        getVisionEngine(),
+        loadTfModels({ onProgress: updateProgressMsg })
+      ]);
 
       if (token !== sessionToken) {
         if (camResult.status === 'fulfilled') {
@@ -1545,6 +2118,14 @@
         return;
       }
       visionEngine = libResult.value;
+
+      if (tfResult.status === 'fulfilled') {
+        tfModels = tfResult.value;
+      } else {
+        tfModels = null;
+        console.warn('[Cámara IA · TF.js]', tfResult.reason);
+        showNotice('Modelos neuronales TF.js no disponibles en esta red: operando con reconocimiento geométrico base.');
+      }
 
       try {
         video.srcObject = stream;
@@ -1569,6 +2150,7 @@
         lastVideoTime = -1;
         lastSendAt = 0;
         setStatus('live');
+        if (progressLabel) progressLabel.textContent = getDefaultProgressLabel();
         rafId = requestAnimationFrame(loop);
       } catch (err) {
         console.warn('[Cámara IA]', err);
@@ -1577,7 +2159,7 @@
       }
     }
 
-    /** Bucle de video ~30 fps: Manos en cada frame; Pose + Face cada 3 frames cuando Nivel 1 activo. */
+    /** Bucle de video ~30 fps: Manos + Pose continuo en Modo Señas dinámicas; Face cada 3 frames. */
     function loop() {
       if (!running || !visionEngine) return;
       rafId = requestAnimationFrame(loop);
@@ -1595,10 +2177,14 @@
           lastDetectTs = ts;
           const handRes = visionEngine.handLandmarker.detectForVideo(video, ts);
 
-          if (visionEngine.level === 1 && frameCounter % AUX_DETECT_STRIDE === 0) {
+          const poseStride = interpreterMode === 'words' ? (lowPowerDevice ? 2 : 1) : AUX_DETECT_STRIDE;
+          const runPoseNow = visionEngine.poseLandmarker && frameCounter % poseStride === 0;
+          const runFaceNow = visionEngine.faceLandmarker && frameCounter % AUX_DETECT_STRIDE === 0;
+
+          if (runPoseNow || runFaceNow) {
             const auxTs = Math.max(lastAuxDetectTs + 1, ts);
             lastAuxDetectTs = auxTs;
-            if (visionEngine.poseLandmarker) {
+            if (runPoseNow) {
               try {
                 const poseRes = visionEngine.poseLandmarker.detectForVideo(video, auxTs);
                 latestPoseLandmarks =
@@ -1608,7 +2194,7 @@
                 visionEngine.poseLandmarker = null;
               }
             }
-            if (visionEngine.faceLandmarker) {
+            if (runFaceNow) {
               try {
                 const faceRes = visionEngine.faceLandmarker.detectForVideo(video, auxTs);
                 latestFaceLandmarks =
@@ -1734,6 +2320,271 @@
       });
     }
 
+    function handleDynamicWordsTf(results, frameMeta, now) {
+      const dynEntry = tfModels && tfModels.dynamic;
+      if (!dynEntry || !dynEntry.model || !window.tf) return false;
+
+      const meta = dynEntry.metadata || {};
+      const seqLen = meta.sequenceLength || DYNAMIC_SEQ_LEN;
+      const numFeat = meta.numFeatures || DYNAMIC_NUM_FEATURES;
+      const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.7;
+      const labels = Array.isArray(meta.labels) ? meta.labels : [];
+
+      const vec = extractDynamicFrameFeatures(latestPoseLandmarks, results);
+      if (dynamicSeqBuffer.length >= seqLen) dynamicSeqBuffer.shift();
+      dynamicSeqBuffer.push(vec);
+
+      if (dynamicSeqBuffer.length < seqLen) {
+        setProgress((dynamicSeqBuffer.length / seqLen) * 0.45);
+        if (progressLabel) {
+          progressLabel.textContent = `Capturando secuencia dinámica (${dynamicSeqBuffer.length}/${seqLen})…`;
+        }
+        return true;
+      }
+
+      dynamicEvalCounter += 1;
+      if (dynamicEvalCounter % 2 !== 0 && dynCandidate.streak === 0) {
+        return true;
+      }
+
+      const probs = window.tf.tidy(() => {
+        const flat = new Float32Array(seqLen * numFeat);
+        for (let t = 0; t < seqLen; t += 1) {
+          flat.set(dynamicSeqBuffer[t], t * numFeat);
+        }
+        const input = window.tf.tensor3d(flat, [1, seqLen, numFeat], 'float32');
+        const out = dynEntry.model.predict(input);
+        const outTensor = Array.isArray(out) ? out[0] : out;
+        return Array.from(outTensor.dataSync());
+      });
+
+      let rawBestIdx = -1;
+      let rawBestProb = -1;
+      let bestIdx = -1;
+      let bestProb = -1;
+      for (let i = 0; i < probs.length; i += 1) {
+        const p = probs[i];
+        if (p > rawBestProb) {
+          rawBestProb = p;
+          rawBestIdx = i;
+        }
+        const lbl = labels[i];
+        if (lbl && !IGNORED_GLOSSES.has(lbl) && p > bestProb) {
+          bestProb = p;
+          bestIdx = i;
+        }
+      }
+
+      const topRawLabel = rawBestIdx >= 0 ? labels[rawBestIdx] : '';
+      const gloss = bestIdx >= 0 ? labels[bestIdx] : '';
+      const word = humanizeGloss(gloss);
+
+      if (IGNORED_GLOSSES.has(topRawLabel) || !word || bestProb < threshold) {
+        dynCandidate.streak = 0;
+        dynCandidate.id = null;
+        setProgress(0.25);
+        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_WORDS;
+        return true;
+      }
+
+      const pct = Math.round(bestProb * 100);
+      if (dynCandidate.id === gloss) {
+        dynCandidate.streak += 1;
+        dynCandidate.lastProb = bestProb;
+      } else {
+        dynCandidate.id = gloss;
+        dynCandidate.streak = 1;
+        dynCandidate.lastProb = bestProb;
+        dynCandidate.since = now;
+      }
+
+      setProgress(Math.min(1, 0.45 + (dynCandidate.streak / DYNAMIC_STREAK_REQUIRED) * 0.55));
+      if (progressLabel) progressLabel.textContent = `Confirmando seña: ${word}…`;
+      lastDetectEl.textContent = `Seña detectada: ${word} · Confianza: ${pct}%`;
+
+      latestDescriptorSnapshot = Object.freeze({
+        level: frameMeta.level,
+        interpreterMode: 'words',
+        gestureId: `dyn:${gloss}`,
+        gloss,
+        word,
+        palm: frameMeta.palm,
+        spatial: frameMeta.spatial,
+        nonManual: frameMeta.nonManual,
+        confidence: bestProb,
+        timestamp: now
+      });
+
+      if (dynCandidate.streak >= DYNAMIC_STREAK_REQUIRED) {
+        const tokenId = `dyn:${gloss}`;
+        const last = lastAddedAt[tokenId];
+        if (typeof last !== 'number' || now - last >= COOLDOWN_MS) {
+          lastAddedAt[tokenId] = now;
+          if (frameMeta.nonManual && frameMeta.nonManual.expression && frameMeta.nonManual.expression !== 'neutro') {
+            activeSentenceExpression = frameMeta.nonManual.expression;
+          }
+          const confirmedToken = { id: tokenId, kind: 'word', text: word, phrase: word, label: word };
+          lastConfirmed = confirmedToken;
+          sentenceTokens.push({ id: tokenId, kind: 'word', text: word });
+          lastDetectEl.textContent = `Última seña: ${word} · Confianza: ${pct}%`;
+          renderSentence();
+          sentNote.textContent = 'Baja las manos 2 s para enviar y leer automáticamente.';
+          sentNote.hidden = false;
+        }
+        // Recorta parte de la ventana para evitar repeticiones en bucle de la misma seña
+        dynamicSeqBuffer.splice(0, 12);
+        dynCandidate.streak = 0;
+        dynCandidate.id = null;
+      }
+      return true;
+    }
+
+    function feedSpellLetter(label, score, now, { isDynamic = false, previewLabel = null, previewProb = 0 } = {}) {
+      if (label && label === spellCandidate.label) {
+        spellCandidate.lastSeen = now;
+        spellCandidate.scoreSum += score;
+        spellCandidate.scoreN += 1;
+        spellCandidate.isDynamic = spellCandidate.isDynamic || isDynamic;
+      } else if (spellCandidate.label && now - spellCandidate.lastSeen < GRACE_MS) {
+        // Mantiene progreso ante micro-parpadeos
+      } else {
+        spellCandidate.label = label;
+        spellCandidate.since = now;
+        spellCandidate.lastSeen = now;
+        spellCandidate.confirmed = false;
+        spellCandidate.scoreSum = label ? score : 0;
+        spellCandidate.scoreN = label ? 1 : 0;
+        spellCandidate.isDynamic = Boolean(isDynamic);
+      }
+
+      if (!spellCandidate.label) {
+        setProgress(0);
+        if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_SPELL;
+        if (previewLabel && previewProb >= 0.45) {
+          const shown = previewLabel === '' ? 'Espacio' : previewLabel;
+          lastDetectEl.textContent = `Deletreo en vivo: ${shown} · Confianza: ${Math.round(previewProb * 100)}%`;
+        }
+        return;
+      }
+
+      const displayChar = spellCandidate.label === SPACE_TOKEN_LABEL ? 'Espacio' : `Letra ${spellCandidate.label}`;
+      const avgProb = spellCandidate.scoreN ? spellCandidate.scoreSum / spellCandidate.scoreN : score;
+      const pct = Math.round(avgProb * 100);
+      const targetMs = spellCandidate.isDynamic ? CONFIRM_SPELL_DYN_MS : CONFIRM_SPELL_MS;
+      const progress = Math.min(1, (now - spellCandidate.since) / targetMs);
+      setProgress(progress);
+
+      if (progressLabel) progressLabel.textContent = `Estabilizando: ${displayChar} (${targetMs} ms)`;
+      lastDetectEl.textContent = `Deletreo en vivo: ${displayChar} · Confianza: ${pct}%`;
+
+      if (progress >= 1 && !spellCandidate.confirmed) {
+        spellCandidate.confirmed = true;
+        const isSpace = spellCandidate.label === SPACE_TOKEN_LABEL;
+        const tokenId = `spell:${spellCandidate.label}`;
+        const last = lastAddedAt[tokenId];
+        const canSpace =
+          !isSpace || (sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter');
+
+        if (canSpace && (typeof last !== 'number' || now - last >= SPELL_COOLDOWN_MS)) {
+          lastAddedAt[tokenId] = now;
+          const token = {
+            id: tokenId,
+            kind: isSpace ? 'space' : 'letter',
+            text: isSpace ? ' ' : spellCandidate.label,
+            label: displayChar
+          };
+          lastConfirmed = token;
+          sentenceTokens.push({ id: token.id, kind: token.kind, text: token.text });
+          renderSentence();
+          lastDetectEl.textContent = `Última letra: ${displayChar} · Confianza: ${pct}%`;
+          sentNote.textContent = 'Sostén postura neutra para separar palabras o pulsa “Enviar y leer al funcionario”.';
+          sentNote.hidden = false;
+          if (spellCandidate.isDynamic) {
+            spellTrackBuffer.length = 0;
+          }
+        }
+      }
+    }
+
+    function handleAlphabetTf(primaryHand, aspect, frameMeta, now) {
+      const alphaEntry = tfModels && tfModels.alphabet;
+      if (!alphaEntry || !alphaEntry.model || !window.tf) return false;
+
+      const meta = alphaEntry.metadata || {};
+      const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.75;
+      const labels = Array.isArray(meta.labels) ? meta.labels : [];
+
+      const features = extractAlphabetFeatures(primaryHand, meta.scalerMean, meta.scalerStd);
+      const probs = window.tf.tidy(() => {
+        const input = window.tf.tensor2d(features, [1, 16], 'float32');
+        const out = alphaEntry.model.predict(input);
+        const outTensor = Array.isArray(out) ? out[0] : out;
+        return Array.from(outTensor.dataSync());
+      });
+
+      let bestIdx = 0;
+      let bestProb = -1;
+      for (let i = 0; i < probs.length; i += 1) {
+        if (probs[i] > bestProb) {
+          bestProb = probs[i];
+          bestIdx = i;
+        }
+      }
+
+      const rawLabel = bestIdx < labels.length ? labels[bestIdx] : '';
+      const aspectLandmarks = primaryHand.map((p) => ({ x: p.x * aspect, y: p.y }));
+      const palmSize =
+        Math.hypot(aspectLandmarks[9].x - aspectLandmarks[0].x, aspectLandmarks[9].y - aspectLandmarks[0].y) || 0.1;
+
+      if (spellTrackBuffer.length >= MOTION_WINDOW) spellTrackBuffer.shift();
+      spellTrackBuffer.push({
+        t: now,
+        palmSize,
+        landmarks: aspectLandmarks,
+        staticLabel: bestProb >= threshold ? rawLabel : null,
+        prob: bestProb
+      });
+
+      const dynLetter = detectDynamicAlphabetLetter(spellTrackBuffer, meta.dynamicLettersRules);
+      let resolvedLabel = null;
+      let resolvedScore = 0;
+      let isDynamic = false;
+
+      if (dynLetter) {
+        resolvedLabel = dynLetter.label;
+        resolvedScore = dynLetter.score;
+        isDynamic = true;
+      } else if (bestProb >= threshold) {
+        if (rawLabel === '') {
+          const canInsertSpace =
+            sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter';
+          if (canInsertSpace) {
+            resolvedLabel = SPACE_TOKEN_LABEL;
+            resolvedScore = bestProb;
+          }
+        } else {
+          resolvedLabel = rawLabel;
+          resolvedScore = bestProb;
+        }
+      }
+
+      latestDescriptorSnapshot = Object.freeze({
+        level: frameMeta.level,
+        interpreterMode: 'spell',
+        gestureId: resolvedLabel ? `spell:${resolvedLabel}` : null,
+        palm: frameMeta.palm,
+        confidence: resolvedScore || bestProb,
+        timestamp: now
+      });
+
+      feedSpellLetter(resolvedLabel, resolvedScore, now, {
+        isDynamic,
+        previewLabel: rawLabel,
+        previewProb: bestProb
+      });
+      return true;
+    }
+
     function handleResults(results, now = performance.now()) {
       if (!running || !results) return;
       clearCanvas();
@@ -1741,7 +2592,7 @@
       const allWorldLandmarks = Array.isArray(results.worldLandmarks) ? results.worldLandmarks : [];
       const allHandedness = Array.isArray(results.handedness) ? results.handedness : [];
 
-      if (visionEngine && visionEngine.level === 1 && latestPoseLandmarks) {
+      if (visionEngine && visionEngine.poseLandmarker && latestPoseLandmarks) {
         drawShoulderReference(latestPoseLandmarks);
       }
       updateHandsCount(allLandmarks.length);
@@ -1749,7 +2600,12 @@
       if (allLandmarks.length === 0) {
         motionBuffer.length = 0;
         voteBuffer.length = 0;
+        dynamicSeqBuffer.length = 0;
+        spellTrackBuffer.length = 0;
+        dynCandidate.streak = 0;
+        dynCandidate.id = null;
         prevPalmOrientation = null;
+        if (interpreterMode === 'spell') feedSpellLetter(null, 0, now);
         feedGesture(null, 0, now);
         if (handsDownSince === null) handsDownSince = now;
         if (sentenceTokens.length > 0 && now - handsDownSince >= AUTO_SEND_PAUSE_MS) {
@@ -1782,9 +2638,6 @@
       });
 
       const resolved = resolveMultiHandGesture(handEntries, detection.id, { spatial, nonManual, trajectory });
-      if (voteBuffer.length >= VOTE_WINDOW) voteBuffer.shift();
-      voteBuffer.push(resolved ? { id: resolved.id, score: resolved.score } : { id: null, score: 0 });
-      const smoothed = majorityVoteGesture(voteBuffer);
 
       const primaryPalm = (handEntries[0] && handEntries[0].palm) || null;
       const palmOrientation = primaryPalm ? primaryPalm.orientation : 'frente';
@@ -1804,8 +2657,33 @@
         nonManual,
         trajectory
       };
+
+      // Seguridad prioritaria inmediata: la seña de auxilio interrumpe incluso durante secuencias dinámicas
+      if (resolved && resolved.id === 'auxilio') {
+        feedGesture('auxilio', resolved.score, now, { fastConfirm: true, meta: frameMeta });
+        return;
+      }
+
+      if (interpreterMode === 'spell') {
+        if (handleAlphabetTf(allLandmarks[0], aspect, frameMeta, now)) return;
+      } else if (handleDynamicWordsTf(results, frameMeta, now)) {
+        return;
+      }
+
+      // Respaldo geométrico (7 parámetros LSP) si TF.js no pudo cargar en red restringida
+      let filteredResolved = resolved;
+      if (interpreterMode === 'spell' && resolved) {
+        const g = GESTURE_BY_ID[resolved.id];
+        if (!g || (g.kind !== 'letter' && g.kind !== 'space')) filteredResolved = null;
+      }
+
+      if (voteBuffer.length >= VOTE_WINDOW) voteBuffer.shift();
+      voteBuffer.push(filteredResolved ? { id: filteredResolved.id, score: filteredResolved.score } : { id: null, score: 0 });
+      const smoothed = majorityVoteGesture(voteBuffer);
+
       latestDescriptorSnapshot = Object.freeze({
         level: frameMeta.level,
+        interpreterMode,
         gestureId: smoothed.id,
         palm: primaryPalm,
         spatial,
@@ -1815,7 +2693,7 @@
         timestamp: now
       });
 
-      const fastConfirm = resolved && resolved.id === 'palma' && trajectory.type === 'oscilacion_h';
+      const fastConfirm = filteredResolved && filteredResolved.id === 'palma' && trajectory.type === 'oscilacion_h';
       feedGesture(smoothed.id, smoothed.score, now, { fastConfirm, meta: frameMeta });
     }
 
@@ -1892,10 +2770,11 @@
       if (canAdd) {
         lastAddedAt[id] = now;
         const isLetter = gesture.kind === 'letter';
+        const isSpace = gesture.kind === 'space';
         sentenceTokens.push({
           id,
-          kind: isLetter ? 'letter' : 'word',
-          text: isLetter ? gesture.letter : gesture.phrase
+          kind: isSpace ? 'space' : (isLetter ? 'letter' : 'word'),
+          text: isSpace ? ' ' : (isLetter ? gesture.letter : gesture.phrase)
         });
         renderSentence();
         sentNote.textContent = isSimulated
@@ -1985,6 +2864,17 @@
       }
     }
 
+    function clearAllOutput() {
+      resetOutput();
+      dynamicSeqBuffer.length = 0;
+      spellTrackBuffer.length = 0;
+      dynCandidate.streak = 0;
+      dynCandidate.id = null;
+      spellCandidate.label = null;
+      sentNote.textContent = 'Texto borrado. Listo para una nueva seña o deletreo.';
+      sentNote.hidden = false;
+    }
+
     /* ---------- Escalar a intérprete humano ---------- */
     function escalate() {
       stopCamera();
@@ -2003,13 +2893,13 @@
       }
     }
 
-    /* ---------- Cuadrícula compacta (ventanilla + teclado A–Z) y guía ---------- */
+    /* ---------- Cuadrícula compacta (ventanilla + teclado A–Z + Ñ) y guía ---------- */
     GESTURES.forEach((gesture) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.setAttribute('data-gesture', gesture.id);
 
-      if (gesture.kind === 'letter' && lettersBar) {
+      if ((gesture.kind === 'letter' || gesture.kind === 'space') && lettersBar) {
         btn.className = 'vision-gesture-btn vision-letter-chip';
         btn.setAttribute('aria-label', gesture.label);
         btn.title = `${gesture.label}: ${gesture.hint}`;
@@ -2045,9 +2935,12 @@
         const descWrap = document.createElement('span');
         const strong = document.createElement('strong');
         strong.textContent = `${gesture.label} (${gesture.hands}):`;
-        const detail = gesture.kind === 'letter'
-          ? ` añade “${gesture.letter}” · ${gesture.hint}`
-          : ` “${gesture.phrase}”`;
+        let detail = ` “${gesture.phrase}”`;
+        if (gesture.kind === 'letter') {
+          detail = ` añade “${gesture.letter}” · ${gesture.hint}`;
+        } else if (gesture.kind === 'space') {
+          detail = ` separa palabras · ${gesture.hint}`;
+        }
         descWrap.append(strong, detail);
 
         li.append(guideEmoji, descWrap);
@@ -2086,6 +2979,9 @@
 
     btnSpeak.addEventListener('click', () => sendSentence({ auto: false }));
     btnUndo.addEventListener('click', undoLast);
+    if (btnClear) btnClear.addEventListener('click', clearAllOutput);
+    if (btnModeWords) btnModeWords.addEventListener('click', () => setInterpreterMode('words'));
+    if (btnModeSpell) btnModeSpell.addEventListener('click', () => setInterpreterMode('spell'));
     btnEscalate.addEventListener('click', escalate);
 
     panel.addEventListener('keydown', (e) => {
@@ -2132,6 +3028,20 @@
       }
       visionEngine = null;
       enginePromise = null;
+      if (loadedTfModels) {
+        [loadedTfModels.dynamic, loadedTfModels.alphabet].forEach((entry) => {
+          if (entry && entry.model && typeof entry.model.dispose === 'function') {
+            try {
+              entry.model.dispose();
+            } catch (_) {
+              /* grafo TF.js ya liberado */
+            }
+          }
+        });
+      }
+      tfModels = null;
+      loadedTfModels = null;
+      tfModelsPromise = null;
     };
     window.addEventListener('beforeunload', releaseOnExit);
     window.addEventListener('pagehide', releaseOnExit);
@@ -2140,6 +3050,7 @@
       window.speechSynthesis.getVoices();
     }
 
+    setInterpreterMode('words', { silent: true });
     resetOutput();
     setStatus('idle');
   }

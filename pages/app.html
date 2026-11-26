@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=12">
-  <script src="../js/main.js?v=12" defer></script>
-  <script src="../js/vision-ai.js?v=12" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=13">
+  <script src="../js/main.js?v=13" defer></script>
+  <script src="../js/vision-ai.js?v=13" defer></script>
 </head>
 <body id="inicio" class="app-page">
   <a class="skip-link" href="#app-main">Saltar al contenido principal</a>
@@ -223,6 +223,15 @@
                     </div>
                   </div>
 
+                  <div class="vision-mode-switch" role="group" aria-label="Modo del intérprete de cámara">
+                    <button type="button" class="vision-mode-btn is-active" id="btn-vision-mode-words" aria-pressed="true">
+                      Modo Señas (118 palabras)
+                    </button>
+                    <button type="button" class="vision-mode-btn" id="btn-vision-mode-spell" aria-pressed="false">
+                      Modo Deletreo (Alfabeto A–Z + Ñ)
+                    </button>
+                  </div>
+
                   <p class="vision-notice" id="vision-notice" role="status" hidden></p>
 
                   <div class="vision-stage" id="vision-stage">
@@ -246,7 +255,7 @@
                   <div class="vision-simulation" id="vision-simulation" hidden>
                     <p class="vision-simulation-title" id="vision-simulation-title">Señas rápidas de ventanilla (sin cámara)</p>
                     <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
-                    <p class="vision-simulation-subtitle" id="vision-letters-title">Deletreo LSP (19 letras A–Z)</p>
+                    <p class="vision-simulation-subtitle" id="vision-letters-title">Deletreo LSP (Alfabeto A–Z + Ñ)</p>
                     <div class="vision-letters-bar" id="vision-letters-bar" role="group" aria-labelledby="vision-letters-title"></div>
                   </div>
 
@@ -277,6 +286,9 @@
                       <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-undo" disabled>
                         <span>Deshacer</span>
                       </button>
+                      <button type="button" class="btn btn-outline-primary vision-btn" id="btn-vision-clear" disabled>
+                        <span>Limpiar</span>
+                      </button>
                       <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
                         <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
                         <span>Escalar a Intérprete Humano (&lt;30 s)</span>
@@ -285,7 +297,7 @@
                   </div>
 
                   <details class="vision-guide" id="vision-guide">
-                    <summary class="vision-guide-summary">Ver señas reconocidas</summary>
+                    <summary class="vision-guide-summary">Guía rápida: 118 señas dinámicas LSP y alfabeto completo (A–Z + Ñ)</summary>
                     <ul class="vision-guide-list" id="vision-guide-list"></ul>
                   </details>
                 </section>

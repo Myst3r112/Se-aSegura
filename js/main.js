@@ -158,8 +158,38 @@
         }
       ],
       dictationSample: 'Expediente 00412-2026 verificado en mesa de partes accesible.'
+    },
+    'Otra sede / General': {
+      subtitle: 'Otra sede / Atención general',
+      prompt: 'Indícanos brevemente tu consulta o gestión para orientarte.',
+      staffBtnLabel: 'Ajustar referencia (Personal)',
+      dataFields: [
+        { label: 'DNI del ciudadano', shortLabel: 'DNI', value: '00000000' },
+        {
+          label: 'Referencia (Ventanilla)',
+          shortLabel: 'Referencia',
+          value: 'Atención general',
+          roleNote: 'Registrado por ventanilla'
+        }
+      ],
+      procedures: [
+        'Orientación e información general',
+        'Mesa de partes y recepción documental',
+        'Reclamo o libro de reclamaciones'
+      ],
+      templates: [
+        {
+          label: 'Confirmar DNI',
+          getText: (fields) => `Confirmo mi DNI: ${fields[0].value} para atención general.`
+        },
+        { label: 'Repetir en LSP', text: 'Por favor, repite en Lengua de Señas Peruana.' },
+        { label: 'Pedir constancia', text: 'Necesito constancia de mi atención.' }
+      ],
+      dictationSample: 'Consulta general atendida en ventanilla accesible.'
     }
   };
+
+  const OTHER_PROCEDURE_OPTION = 'Otro trámite / Consulta general';
 
   /* Términos del Glosario Técnico LSP (Figma P10) */
   const GLOSSARY_TERMS = [
@@ -236,6 +266,8 @@
     channel: 'lsp',
     sector: 'Banco',
     procedure: 'Consulta de saldo y retiro',
+    customProcedure: '',
+    consoleProcedureOverride: null,
     emergencyActive: false,
     emergencyType: null,
     selectedCrisis: null,
@@ -650,9 +682,14 @@
    * Construye la URL de verificación directa para el QR del comprobante.
    * Garantiza compatibilidad <=106 bytes (QR V1–V6 Nivel M).
    */
-  function buildReceiptVerifyUrl(code) {
+  function buildReceiptVerifyUrl(code, sector = '', procedure = '') {
     const querySuffix = `?verificar=${encodeURIComponent(code)}#marco-legal`;
+    const detailSuffix = `?verificar=${encodeURIComponent(code)}&s=${encodeURIComponent(sector || '')}&m=${encodeURIComponent(procedure || '')}#marco-legal`;
     try {
+      if (sector || procedure) {
+        const detailedUrl = new URL(`index.html${detailSuffix}`, window.location.href).href;
+        if (encodeUtf8Bytes(detailedUrl).length <= 106) return detailedUrl;
+      }
       const fullUrl = new URL(`index.html${querySuffix}`, window.location.href).href;
       if (encodeUtf8Bytes(fullUrl).length <= 106) return fullUrl;
     } catch (_) {
@@ -939,7 +976,11 @@
 
     const channelChips = document.querySelectorAll('.pref-chip[data-channel]');
     const sectorChips = document.querySelectorAll('.pref-chip[data-sim-sector]');
+    const simSectorRow = document.getElementById('sim-sector-row');
     const procedureSelect = document.getElementById('sim-procedure-select');
+    const procedureCustomWrap = document.getElementById('sim-procedure-custom-wrap');
+    const procedureCustomInput = document.getElementById('sim-procedure-custom');
+    const simMainGrid = document.getElementById('sim-main-grid');
 
     const textModeCard = document.getElementById('sim-textmode-card');
     const textSwitchBtns = document.querySelectorAll('[data-switch-channel]');
@@ -983,10 +1024,17 @@
 
     const chatSectorLabel = document.getElementById('sim-chat-sector-label');
     const consoleSectorLabel = document.getElementById('console-sector-label');
+    const sensitiveCard = document.getElementById('sim-sensitive-card');
+    const chatDisclaimer = document.getElementById('sim-chat-disclaimer');
     const sensitiveDataBox = document.getElementById('sim-sensitive-data');
     const consoleDataBox = document.getElementById('console-data-block');
+    const consoleStaffEditWrap = document.getElementById('console-staff-edit-wrap');
     const consolePriorityVal = document.getElementById('console-priority-value');
     const consoleProcedureVal = document.getElementById('console-procedure-value');
+    const btnEditProcedure = document.getElementById('btn-edit-procedure');
+    const consoleProcedureEditForm = document.getElementById('console-procedure-edit-form');
+    const consoleProcedureInput = document.getElementById('console-procedure-input');
+    const btnCancelProcedure = document.getElementById('btn-cancel-procedure');
     const chatMessagesBox = document.getElementById('sim-chat-messages');
     const consoleChatFeed = document.getElementById('console-chat-feed');
     const quickTemplatesBox = document.getElementById('sim-quick-templates');
@@ -1256,6 +1304,81 @@
       updateInterpreterCaption();
     }
 
+    function getEffectiveSector() {
+      if (state.channel === 'camara' && !state.emergencyActive) {
+        return 'Atención general';
+      }
+      return state.sector;
+    }
+
+    function getEffectiveProcedure() {
+      if (state.consoleProcedureOverride) {
+        return state.consoleProcedureOverride;
+      }
+      if (state.emergencyActive) {
+        return (
+          [state.emergencyType, state.selectedCrisis].filter(Boolean).join(' · ') ||
+          'Atención prioritaria de emergencia (<30 s)'
+        );
+      }
+      if (state.channel === 'camara') {
+        return 'Comunicación libre LSP';
+      }
+      if (state.procedure === OTHER_PROCEDURE_OPTION) {
+        return state.customProcedure.trim() || 'Consulta general';
+      }
+      return state.procedure;
+    }
+
+    function closeConsoleProcedureForm(restoreFocus = false) {
+      if (!consoleProcedureEditForm) return;
+      consoleProcedureEditForm.hidden = true;
+      if (btnEditProcedure) {
+        btnEditProcedure.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) btnEditProcedure.focus();
+      }
+    }
+
+    function syncChannelContextUI() {
+      const isCamera = state.channel === 'camara' && !state.emergencyActive;
+      if (simMainGrid) {
+        simMainGrid.setAttribute('data-active-channel', state.channel);
+        if (!isCamera) simMainGrid.classList.remove('is-vision-expanded');
+      }
+      if (simSectorRow) {
+        simSectorRow.hidden = isCamera || state.emergencyActive;
+      }
+      if (sensitiveCard) {
+        sensitiveCard.hidden = isCamera;
+        if (isCamera) closeCitizenDniForm(false);
+      }
+      if (chatDisclaimer) chatDisclaimer.hidden = isCamera;
+      if (quickTemplatesBox) quickTemplatesBox.hidden = isCamera;
+      if (consoleDataBox) consoleDataBox.hidden = isCamera;
+      if (consoleStaffEditWrap) consoleStaffEditWrap.hidden = isCamera;
+      if (btnChangeSector) {
+        btnChangeSector.textContent = isCamera ? '← Volver al inicio' : '← Cambiar sede';
+      }
+
+      const config = SIM_SECTORS[state.sector] || SIM_SECTORS.Banco;
+      const sectorSubtitle = isCamera ? 'Atención general · Comunicación libre LSP' : config.subtitle;
+      if (chatSectorLabel) chatSectorLabel.textContent = sectorSubtitle;
+      if (consoleSectorLabel) consoleSectorLabel.textContent = sectorSubtitle;
+      if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
+
+      if (
+        state.chatMessages.length === 1 &&
+        state.chatMessages[0] &&
+        state.chatMessages[0].type === 'staff'
+      ) {
+        state.chatMessages[0].text = isCamera
+          ? 'Canal Cámara IA activo. Seña o deletrea libremente en LSP sin formularios previos.'
+          : config.prompt;
+        renderChat();
+      }
+      updateSessionMeta();
+    }
+
     function updateSessionMeta() {
       if (!sessionMeta) return;
       const channelLabel = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).meta;
@@ -1266,7 +1389,7 @@
           : state.sessionActive
             ? 'Atención en curso'
             : 'Sesión lista para iniciar';
-      sessionMeta.textContent = `Sin login · ${statusLabel} · ${state.sector} (${channelLabel})`;
+      sessionMeta.textContent = `Sin login · ${statusLabel} · ${getEffectiveSector()} (${channelLabel})`;
     }
 
     function renderSensitiveData() {
@@ -1425,25 +1548,27 @@
       chatEpoch += 1;
       stopDictation();
       state.sector = sectorName;
+      state.customProcedure = '';
+      state.consoleProcedureOverride = null;
       const config = SIM_SECTORS[sectorName];
       if (!config) return;
 
       state.sensitiveFields = config.dataFields.map((f) => ({ ...f }));
       closeSensitiveEditForm(false);
+      closeConsoleProcedureForm(false);
       renderSensitiveData();
 
-      if (chatSectorLabel) chatSectorLabel.textContent = config.subtitle;
-      if (consoleSectorLabel) consoleSectorLabel.textContent = config.subtitle;
+      if (procedureCustomWrap) procedureCustomWrap.hidden = true;
+      if (procedureCustomInput) procedureCustomInput.value = '';
       if (procedureSelect) {
         procedureSelect.textContent = '';
-        config.procedures.forEach((proc) => {
+        config.procedures.concat(OTHER_PROCEDURE_OPTION).forEach((proc) => {
           const option = document.createElement('option');
           option.value = proc;
           option.textContent = proc;
           procedureSelect.appendChild(option);
         });
         state.procedure = config.procedures[0];
-        if (consoleProcedureVal) consoleProcedureVal.textContent = state.procedure;
       }
       if (quickTemplatesBox) {
         quickTemplatesBox.textContent = '';
@@ -1465,7 +1590,7 @@
         }
       ];
       renderChat();
-      updateSessionMeta();
+      syncChannelContextUI();
       updateLiveBadge();
       updateOneTapButton();
       updateStepsGuide();
@@ -1493,7 +1618,7 @@
         const epoch = chatEpoch;
         setTimeout(() => {
           if (epoch !== chatEpoch) return;
-          appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${state.procedure}. Continuamos con tu atención.`, 'staff');
+          appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${getEffectiveProcedure()}. Continuamos con tu atención.`, 'staff');
         }, 450);
       });
     }
@@ -1512,7 +1637,7 @@
       updateOneTapButton();
       updateLiveBadge();
       updateStepsGuide();
-      updateSessionMeta();
+      syncChannelContextUI();
       updateInterpreterCaption();
     }
 
@@ -1535,7 +1660,7 @@
           updateSessionMeta();
           appendMessage(
             'Sistema SeñaSegura',
-            `Atención iniciada de forma inmediata (${state.sector} · ${state.procedure}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
+            `Atención iniciada de forma inmediata (${getEffectiveSector()} · ${getEffectiveProcedure()}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
             'staff'
           );
           updateStepsGuide();
@@ -1571,7 +1696,7 @@
           updateSessionMeta();
           appendMessage(
             'Sistema SeñaSegura',
-            `Intérprete LSP en línea (${state.sector} · ${state.procedure}). Atención iniciada en 1 toque.`,
+            `Intérprete LSP en línea (${getEffectiveSector()} · ${getEffectiveProcedure()}). Atención iniciada en 1 toque.`,
             'staff'
           );
           updateStepsGuide();
@@ -1617,7 +1742,7 @@
       updateConsolePriorityContext();
       updateCriticalBanner();
       playEmergencyTone();
-      updateSessionMeta();
+      syncChannelContextUI();
       updateInterpreterCaption();
 
       let secondsLeft = 3;
@@ -1673,7 +1798,7 @@
       updateOneTapButton();
       updateLiveBadge();
       updateStepsGuide();
-      updateSessionMeta();
+      syncChannelContextUI();
       updateInterpreterCaption();
     }
 
@@ -1716,7 +1841,7 @@
 
       updateConsolePriorityContext();
       updateCriticalBanner();
-      updateSessionMeta();
+      syncChannelContextUI();
       updateInterpreterCaption();
     }
 
@@ -1781,7 +1906,7 @@
       if (channelBadge) channelBadge.setAttribute('data-channel-active', ch);
       if (channelBadgeText) channelBadgeText.textContent = `Canal activo: ${CHANNEL_INFO[ch].badge}`;
 
-      updateSessionMeta();
+      syncChannelContextUI();
       updateInterpreterCaption();
 
       // Avisa al módulo de visión (detiene la cámara al salir de "Cámara IA (Gestos)")
@@ -1816,9 +1941,64 @@
     if (procedureSelect) {
       procedureSelect.addEventListener('change', () => {
         state.procedure = procedureSelect.value;
-        if (consoleProcedureVal) consoleProcedureVal.textContent = state.procedure;
+        state.consoleProcedureOverride = null;
+        const isOther = state.procedure === OTHER_PROCEDURE_OPTION;
+        if (procedureCustomWrap) procedureCustomWrap.hidden = !isOther;
+        if (isOther && procedureCustomInput) {
+          procedureCustomInput.focus({ preventScroll: true });
+        } else if (procedureCustomInput) {
+          state.customProcedure = '';
+          procedureCustomInput.value = '';
+        }
+        if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
         updateSessionMeta();
       });
+    }
+
+    if (procedureCustomInput) {
+      procedureCustomInput.addEventListener('input', () => {
+        state.customProcedure = procedureCustomInput.value;
+        state.consoleProcedureOverride = null;
+        if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
+        updateSessionMeta();
+      });
+    }
+
+    if (consoleProcedureEditForm && consoleProcedureInput) {
+      if (btnEditProcedure) {
+        btnEditProcedure.addEventListener('click', () => {
+          if (!consoleProcedureEditForm.hidden) {
+            closeConsoleProcedureForm(false);
+            return;
+          }
+          consoleProcedureInput.value = getEffectiveProcedure();
+          consoleProcedureEditForm.hidden = false;
+          btnEditProcedure.setAttribute('aria-expanded', 'true');
+          consoleProcedureInput.focus({ preventScroll: true });
+        });
+      }
+
+      consoleProcedureEditForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const fallbackProc = state.channel === 'camara' ? 'Comunicación libre LSP' : 'Consulta general';
+        const val = consoleProcedureInput.value.trim() || fallbackProc;
+        state.consoleProcedureOverride = val;
+        if (consoleProcedureVal) consoleProcedureVal.textContent = val;
+        updateSessionMeta();
+        closeConsoleProcedureForm(true);
+        appendMessage('Intérprete LSP (Consola)', `Motivo / trámite actualizado en vivo: ${val}.`, 'staff');
+      });
+
+      consoleProcedureEditForm.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeConsoleProcedureForm(true);
+        }
+      });
+    }
+
+    if (btnCancelProcedure) {
+      btnCancelProcedure.addEventListener('click', () => closeConsoleProcedureForm(true));
     }
 
     // Turnos de interpretación
@@ -2304,7 +2484,7 @@
           if (epoch !== chatEpoch) return;
           appendMessage(
             'Personal de ventanilla',
-            `Mensaje confirmado en ${state.sector}. Puedes finalizar cuando estés listo para recibir tu código.`,
+            `Mensaje confirmado en ${getEffectiveSector()}. Puedes finalizar cuando estés listo para recibir tu código.`,
             'staff'
           );
         }, 500);
@@ -2343,6 +2523,8 @@
       state.lastReceiptCode = code;
 
       const channelName = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).receipt;
+      const finishedSector = getEffectiveSector();
+      const finishedProcedure = getEffectiveProcedure();
       const nowStr = new Date().toLocaleString('es-PE', {
         dateStyle: 'short',
         timeStyle: 'short'
@@ -2350,8 +2532,8 @@
 
       receiptRegistry.set(code, {
         code,
-        sector: state.sector,
-        procedure: state.procedure,
+        sector: finishedSector,
+        procedure: finishedProcedure,
         channel: channelName,
         status: state.emergencyActive
           ? 'Atención prioritaria finalizada (<30 s)'
@@ -2361,7 +2543,6 @@
       });
 
       // Purga inmediata del chat local, bloc de notas y restablecimiento de datos ficticios
-      const finishedProcedure = state.procedure;
       chatEpoch += 1;
       stopDictation();
       if (state.connecting) cancelConnecting();
@@ -2396,6 +2577,7 @@
 
       // Actualizar UI del modal de cierre y vista previa PDF
       const codeEl = document.getElementById('closure-code-display');
+      const procedureMetaEl = document.getElementById('closure-procedure-meta');
       const qrBox = document.getElementById('closure-qr-container');
       const qrCaption = document.getElementById('closure-qr-caption');
       const pdfCode = document.getElementById('pdf-preview-code');
@@ -2403,16 +2585,17 @@
       const pdfChannel = document.getElementById('pdf-preview-channel');
       const pdfQr = document.getElementById('pdf-preview-qr');
 
-      const verifyUrl = buildReceiptVerifyUrl(code);
+      const verifyUrl = buildReceiptVerifyUrl(code, finishedSector, finishedProcedure);
       const qrSvgNode = buildDynamicQrSvg(verifyUrl, code);
       if (codeEl) codeEl.textContent = code;
+      if (procedureMetaEl) procedureMetaEl.textContent = `Sede: ${finishedSector} · Trámite: ${finishedProcedure}`;
       if (qrBox) qrBox.replaceChildren(qrSvgNode);
       if (qrCaption) {
         qrCaption.textContent = '';
         qrCaption.append(code, document.createElement('br'), 'QR verificable');
       }
       if (pdfCode) pdfCode.textContent = code;
-      if (pdfSector) pdfSector.textContent = `Atención finalizada · Sector: ${state.sector} (${finishedProcedure})`;
+      if (pdfSector) pdfSector.textContent = `Atención finalizada · Sede: ${finishedSector} (${finishedProcedure})`;
       if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
       if (pdfQr) pdfQr.replaceChildren(qrSvgNode.cloneNode(true));
 
@@ -2745,7 +2928,7 @@
       }
     }
 
-    function verifyReceiptCode(rawInput) {
+    function verifyReceiptCode(rawInput, urlParams = null) {
       let raw = String(rawInput || '').trim().toUpperCase();
       if (/^\d{8}$/.test(raw) || raw === '84920') {
         raw = `SEG-${raw}`;
@@ -2753,11 +2936,14 @@
 
       const stored = receiptRegistry.get(raw);
       const isEightDigitPattern = /^SEG-\d{8}$/.test(raw);
+      const urlSector = urlParams ? String(urlParams.get('s') || '').trim() : '';
+      const urlProc = urlParams ? String(urlParams.get('m') || '').trim() : '';
 
       if (stored || isEightDigitPattern) {
         const record = stored || {
           code: raw,
-          sector: 'Atención institucional',
+          sector: urlSector || 'Atención institucional',
+          procedure: urlProc || '',
           channel: 'Lengua de Señas Peruana / Texto',
           status: 'Cierre confirmado · Sin grabación de video',
           timestamp: 'Registro verificado (formato 8 dígitos)',
@@ -2776,12 +2962,20 @@
           p1.append(codeStrong, ` · ${record.status}`);
 
           const p2 = document.createElement('p');
-          p2.textContent = `Sector: ${record.sector} · Canal: ${record.channel}`;
+          p2.textContent = `Sede: ${record.sector} · Canal: ${record.channel}`;
+
+          const nodes = [p1, p2];
+          if (record.procedure) {
+            const pProc = document.createElement('p');
+            pProc.textContent = `Trámite: ${record.procedure}`;
+            nodes.push(pProc);
+          }
 
           const p3 = document.createElement('p');
           p3.textContent = `Fecha: ${record.timestamp} · Purga local aplicada`;
+          nodes.push(p3);
 
-          resultDetails.replaceChildren(p1, p2, p3);
+          resultDetails.replaceChildren(...nodes);
         }
         if (resultFooter) {
           resultFooter.textContent = record.isDemoBase
@@ -2810,7 +3004,8 @@
       verifyReceiptCode(input.value);
     });
 
-    const queryCode = new URLSearchParams(window.location.search).get('verificar');
+    const queryParams = new URLSearchParams(window.location.search);
+    const queryCode = queryParams.get('verificar');
     if (queryCode && queryCode.trim()) {
       let normalizedQuery = queryCode.trim().toUpperCase();
       if (/^\d{8}$/.test(normalizedQuery) || normalizedQuery === '84920') {
@@ -2818,7 +3013,7 @@
       }
       if (receiptRegistry.has(normalizedQuery) || /^SEG-\d{8}$/.test(normalizedQuery)) {
         input.value = normalizedQuery;
-        verifyReceiptCode(normalizedQuery);
+        verifyReceiptCode(normalizedQuery, queryParams);
       }
     }
   }

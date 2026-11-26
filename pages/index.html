@@ -9,9 +9,9 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=16">
-  <script src="../js/main.js?v=16" defer></script>
-  <script src="../js/vision-ai.js?v=16" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=17">
+  <script src="../js/main.js?v=17" defer></script>
+  <script src="../js/vision-ai.js?v=17" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -421,6 +421,10 @@
                     <span class="emergency-type-name">Violencia de Género (100)</span>
                     <span class="emergency-type-sub">Línea de protección y ayuda</span>
                   </button>
+                  <button type="button" class="emergency-type-btn emergency-type-other" data-emergency-type="Otra emergencia" aria-pressed="false">
+                    <span class="emergency-type-name">Otra emergencia</span>
+                    <span class="emergency-type-sub">Otro incidente urgente sin pasos extra</span>
+                  </button>
                 </div>
               </div>
 
@@ -499,13 +503,14 @@
                 </div>
               </div>
 
-              <div class="sim-sector-row">
-                <div class="pref-group" role="group" aria-label="Sector institucional">
-                  <span class="pref-label">Sector</span>
+              <div class="sim-sector-row" id="sim-sector-row">
+                <div class="pref-group" role="group" aria-label="Sede o sector institucional">
+                  <span class="pref-label">Sede</span>
                   <button type="button" class="pref-chip is-active" data-sim-sector="Banco" aria-pressed="true">Banco</button>
                   <button type="button" class="pref-chip" data-sim-sector="Comisaría" aria-pressed="false">Comisaría</button>
                   <button type="button" class="pref-chip" data-sim-sector="Salud" aria-pressed="false">Salud</button>
                   <button type="button" class="pref-chip" data-sim-sector="Municipal" aria-pressed="false">Municipal</button>
+                  <button type="button" class="pref-chip" data-sim-sector="Otra sede / General" aria-pressed="false">Otra sede / General</button>
                 </div>
 
                 <div class="pref-group pref-procedure">
@@ -514,7 +519,18 @@
                     <option value="Consulta de saldo y retiro">Consulta de saldo y retiro</option>
                     <option value="Apertura de cuenta">Apertura de cuenta</option>
                     <option value="Bloqueo o reposición de tarjeta">Bloqueo o reposición de tarjeta</option>
+                    <option value="Otro trámite / Consulta general">Otro trámite / Consulta general</option>
                   </select>
+                  <div class="procedure-custom-wrap" id="sim-procedure-custom-wrap" hidden>
+                    <label for="sim-procedure-custom" class="visually-hidden">Detalle breve de tu consulta o trámite (opcional)</label>
+                    <input
+                      type="text"
+                      id="sim-procedure-custom"
+                      class="chat-input procedure-custom-input"
+                      placeholder="Describe brevemente tu consulta (opcional)"
+                      maxlength="100"
+                      autocomplete="off">
+                  </div>
                 </div>
               </div>
             </div>
@@ -535,6 +551,7 @@
                       <div class="vision-view-toggles" role="group" aria-label="Opciones visuales de cámara">
                         <button type="button" class="vision-toggle-btn is-active" id="btn-vision-overlay" aria-pressed="true">Ver enfoque IA</button>
                         <button type="button" class="vision-toggle-btn is-active" id="btn-vision-mirror" aria-pressed="true">Espejo</button>
+                        <button type="button" class="vision-toggle-btn" id="btn-vision-expand" aria-pressed="false" aria-label="Ampliar vista de cámara a ancho completo">Ampliar vista</button>
                       </div>
                       <span class="vision-hands-count" id="vision-hands-count" hidden aria-live="polite" aria-label="Manos detectadas: 0 de 2">Manos: 0 / 2</span>
                       <div class="vision-status" id="vision-status" data-state="idle" role="status">
@@ -614,10 +631,13 @@
                           <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
                           <span>Enviar y leer al funcionario</span>
                         </button>
-                        <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-undo" disabled>
+                        <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-space" disabled aria-label="Insertar espacio entre palabras deletreadas">
+                          <span>Espacio</span>
+                        </button>
+                        <button type="button" class="btn btn-secondary vision-btn vision-btn-compact" id="btn-vision-undo" disabled>
                           <span>Deshacer</span>
                         </button>
-                        <button type="button" class="btn btn-outline-primary vision-btn" id="btn-vision-clear" disabled>
+                        <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-clear" disabled>
                           <span>Limpiar</span>
                         </button>
                       </div>
@@ -633,6 +653,7 @@
                   <details class="vision-guide" id="vision-guide">
                     <summary class="vision-guide-summary">Cómo usar el reconocimiento IA unificado (118 señas LSP + Alfabeto A–Z y Ñ)</summary>
                     <ul class="vision-guide-list" id="vision-guide-list"></ul>
+                    <div class="vision-letter-ref" id="vision-letter-ref" aria-label="Referencia rápida de letras clave en LSP"></div>
                   </details>
                 </section>
 
@@ -768,7 +789,7 @@
                   </div>
                 </div>
 
-                <div class="sensitive-data-card">
+                <div class="sensitive-data-card" id="sim-sensitive-card">
                   <div class="sensitive-data-values" id="sim-sensitive-data">
                     <div class="sensitive-row">
                       <span class="sensitive-role">DNI del ciudadano</span>
@@ -801,7 +822,7 @@
                   </form>
                 </div>
 
-                <p class="chat-disclaimer">
+                <p class="chat-disclaimer" id="sim-chat-disclaimer">
                   Datos ficticios. No ingreses información real en esta demostración.
                 </p>
 
@@ -908,7 +929,7 @@
                   <p>Monto: S/ 150.00</p>
                 </div>
 
-                <div class="console-staff-edit">
+                <div class="console-staff-edit" id="console-staff-edit-wrap">
                   <button
                     type="button"
                     class="btn-soft console-staff-edit-btn"
@@ -935,11 +956,38 @@
                   <dd>Intérprete LSP (<span id="console-interpreter-state">Disponible</span>)</dd>
                   <dt>Prioridad</dt>
                   <dd id="console-priority-value">Atención de prueba</dd>
-                  <dt>Trámite</dt>
-                  <dd id="console-procedure-value">Consulta de saldo y retiro</dd>
+                  <dt>Trámite / Motivo</dt>
+                  <dd class="console-procedure-dd">
+                    <span id="console-procedure-value">Consulta de saldo y retiro</span>
+                    <button
+                      type="button"
+                      class="btn-soft console-procedure-edit-btn"
+                      id="btn-edit-procedure"
+                      aria-expanded="false"
+                      aria-controls="console-procedure-edit-form">
+                      Editar motivo / trámite
+                    </button>
+                  </dd>
                   <dt>Privacidad</dt>
                   <dd>Evita repetir datos sensibles en voz alta.</dd>
                 </dl>
+
+                <form class="sensitive-edit-form console-procedure-form" id="console-procedure-edit-form" hidden>
+                  <div class="sensitive-edit-field">
+                    <label for="console-procedure-input">Motivo o trámite real atendido (constancia)</label>
+                    <input
+                      type="text"
+                      id="console-procedure-input"
+                      class="chat-input"
+                      placeholder="Ej. Consulta general o trámite atendido"
+                      maxlength="100"
+                      autocomplete="off">
+                  </div>
+                  <div class="sensitive-edit-actions">
+                    <button type="submit" class="btn-soft btn-save-data" id="btn-save-procedure">Guardar trámite</button>
+                    <button type="button" class="btn-soft" id="btn-cancel-procedure">Cancelar</button>
+                  </div>
+                </form>
 
                 <div class="console-chat-panel">
                   <p class="console-notes-label" id="console-chat-heading">Mensajes de Ventanilla (en vivo)</p>
@@ -1401,6 +1449,7 @@
         <div class="closure-card">
           <p class="closure-label">Tu código de atención</p>
           <p class="closure-code" id="closure-code-display">SEG-84920418</p>
+          <p class="closure-procedure-meta" id="closure-procedure-meta">Sede: Banco · Trámite: Consulta de saldo y retiro</p>
           <p class="muted-text">Compártelo en ventanilla para continuar o verificar tu atención.</p>
 
           <div class="closure-actions">

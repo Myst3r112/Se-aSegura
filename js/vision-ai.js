@@ -45,7 +45,8 @@
   const HAND_DROPOUT_GRACE_FRAMES = 5; // tolerancia ~160 ms sin vaciar ventana deslizante
   const HAND_EMA_ALPHA = 0.55; // suavizado ligero EMA de landmarks de manos
   const POSE_EMA_ALPHA = 0.45; // suavizado ligero EMA de landmarks de torso
-  const ALPHA_FEATURE_EMA = 0.5; // EMA equivalente a ~3 frames para el vector [16]
+  const ALPHA_FEATURE_EMA = 0.48; // EMA ligero (~3 frames) para el vector [16] antes de estandarizar
+  const SPELL_SESSION_HOLD_MS = 2800; // protege sesión de deletreo activa frente al motor de 118 señas
   const MAX_TRAIL_POINTS = 14; // estela visual de trazos J, Ñ, Z y señas dinámicas
   const HUD_TOP2_THROTTLE_MS = 140; // lectura fluida del Top-2 sin parpadeo excesivo
   const MIN_FRAME_INTERVAL_MS = 33; // ~30 fps máx.
@@ -55,7 +56,7 @@
   const DYNAMIC_NUM_FEATURES = 159;
   const DYNAMIC_STREAK_REQUIRED = 2; // 2 ventanas consecutivas (>= threshold) antes de confirmar
   const VOTE_WINDOW = 6; // suavizado temporal por mayoría
-  const AUTO_SEND_PAUSE_MS = 2000;
+  const AUTO_SEND_PAUSE_MS = 6500; // pausa larga (>=6 s) solo para señas de palabra; deletreo espera envío manual
   const LOAD_TIMEOUT_MS = 30000;
   const SCRIPT_TIMEOUT_MS = 15000;
 
@@ -1466,21 +1467,117 @@
   }
 
   /**
+   * Detecta si el índice está claramente extendido y los dedos medio, anular y meñique están recogidos
+   * (base postural compartida por D estática y el inicio/recorrido de Z).
+   */
+  function isIndexClearlyExtended(landmarks, aspect = 1) {
+    if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+    const pts = landmarks.map((p) => ({
+      x: p.x * safeAspect,
+      y: p.y,
+      z: typeof p.z === 'number' ? p.z * safeAspect : 0
+    }));
+
+    const indexExtended =
+      angleDeg(pts[5], pts[6], pts[7]) >= 136 &&
+      angleDeg(pts[6], pts[7], pts[8]) >= 128 &&
+      dist3(pts[0], pts[8]) > dist3(pts[0], pts[6]) * 1.16;
+    if (!indexExtended) return false;
+
+    const idxReach = dist3(pts[0], pts[8]) || 1e-6;
+    return (
+      dist3(pts[0], pts[12]) < idxReach * 0.85 &&
+      dist3(pts[0], pts[16]) < idxReach * 0.83 &&
+      dist3(pts[0], pts[20]) < idxReach * 0.83
+    );
+  }
+
+  /**
+   * Desempate geométrico auxiliar ligero cuando el Top-2 neuronal duda entre M y N (diferencia < 0.18).
+   * Cuenta si 3 dedos (M) o 2 dedos (N) cubren al pulgar proyectado sobre la línea de nudillos [5..17].
+   */
+  function disambiguateMN(landmarks, aspect = 1, rawLabel, bestProb, secondLabel, secondProb, threshold = 0.75) {
+    const isMNPair =
+      (rawLabel === 'M' && secondLabel === 'N') || (rawLabel === 'N' && secondLabel === 'M');
+    if (!isMNPair || Math.abs((bestProb || 0) - (secondProb || 0)) >= 0.18) return null;
+    if (!Array.isArray(landmarks) || landmarks.length < 21) return null;
+
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+    const pts = landmarks.map((p) => ({
+      x: p.x * safeAspect,
+      y: p.y,
+      z: typeof p.z === 'number' ? p.z * safeAspect : 0
+    }));
+    const palm = dist3(pts[0], pts[9]) || 1e-6;
+    const vx = pts[17].x - pts[5].x;
+    const vy = pts[17].y - pts[5].y;
+    const axisLen2 = vx * vx + vy * vy || 1e-6;
+    const tThumb = ((pts[4].x - pts[5].x) * vx + (pts[4].y - pts[5].y) * vy) / axisLen2;
+    const ringAligned =
+      Math.abs(pts[16].y - pts[12].y) / palm <= 0.24 && dist3(pts[14], pts[10]) / palm <= 0.42;
+
+    const foldedOverThumb = tThumb >= 0.61 || (tThumb >= 0.54 && ringAligned) ? 3 : 2;
+    const winner = foldedOverThumb === 3 ? 'M' : 'N';
+    const combinedProb = (bestProb || 0) + (secondProb || 0);
+    const resolvedScore =
+      combinedProb >= threshold
+        ? Math.min(0.95, Math.max(bestProb || 0, (bestProb || 0) + (secondProb || 0) * 0.6))
+        : bestProb || 0;
+    return { label: winner, score: resolvedScore, foldedOverThumb };
+  }
+
+  /**
+   * Detecta movimiento amplio de brazo/codo propio de una seña dinámica (118 señas),
+   * diferenciándolo de los micro-ajustes o trazos cortos J/Ñ/Z de una sesión de deletreo.
+   */
+  function detectWideArmMotion(macroBuffer) {
+    if (!Array.isArray(macroBuffer) || macroBuffer.length < 4) return false;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let palmSum = 0;
+    let minElbow = Infinity;
+    let maxElbow = -Infinity;
+
+    for (let i = 0; i < macroBuffer.length; i += 1) {
+      const f = macroBuffer[i];
+      if (!f) continue;
+      if (f.x < minX) minX = f.x;
+      if (f.x > maxX) maxX = f.x;
+      if (f.y < minY) minY = f.y;
+      if (f.y > maxY) maxY = f.y;
+      palmSum += f.palmSize || 0.1;
+      if (typeof f.elbowDeg === 'number' && Number.isFinite(f.elbowDeg)) {
+        if (f.elbowDeg < minElbow) minElbow = f.elbowDeg;
+        if (f.elbowDeg > maxElbow) maxElbow = f.elbowDeg;
+      }
+    }
+    if (!Number.isFinite(minX)) return false;
+    const avgPalm = palmSum / macroBuffer.length || 0.1;
+    const wristDispNorm = Math.hypot(maxX - minX, maxY - minY);
+    const wristDispPalms = wristDispNorm / avgPalm;
+    const elbowDelta = minElbow !== Infinity && maxElbow !== -Infinity ? maxElbow - minElbow : 0;
+    return wristDispPalms >= 0.90 || wristDispNorm >= 0.24 || elbowDelta >= 28;
+  }
+
+  /**
    * Detector de trayectorias dinámicas para letras J, Ñ y Z del Alfabeto LSP usando metadata.dynamicLettersRules.
-   * @param {Array<{t:number,palmSize:number,landmarks:Array,staticLabel:string|null,prob:number}>} trackBuffer
+   * @param {Array<{t:number,palmSize:number,landmarks:Array,staticLabel:string|null,prob:number,indexExtended?:boolean}>} trackBuffer
    * @param {object} [dynamicRules]
    * @returns {{label:string,score:number}|null}
    */
   function detectDynamicAlphabetLetter(trackBuffer, dynamicRules = null) {
-    if (!Array.isArray(trackBuffer) || trackBuffer.length < 8) return null;
+    if (!Array.isArray(trackBuffer) || trackBuffer.length < 7) return null;
     const rules = dynamicRules || DEFAULT_DYNAMIC_ALPHABET_RULES;
 
     const getSlice = (winFrames) => {
-      const n = Math.max(8, Number(winFrames) || 20);
+      const n = Math.max(7, Number(winFrames) || 20);
       return trackBuffer.length > n ? trackBuffer.slice(trackBuffer.length - n) : trackBuffer;
     };
 
-    const measureLandmarkStats = (frames, lmIdx) => {
+    const measureLandmarkStats = (frames, lmIdx, revStepRatio = 0.03) => {
       let minX = Infinity;
       let maxX = -Infinity;
       let minY = Infinity;
@@ -1506,7 +1603,7 @@
         } else {
           const avgP = palmSum / valid || 0.1;
           const dx = pt.x - anchorX;
-          if (Math.abs(dx) >= 0.03 * avgP) {
+          if (Math.abs(dx) >= revStepRatio * avgP) {
             const nextDir = dx > 0 ? 1 : -1;
             if (dir !== 0 && nextDir !== dir) reversals += 1;
             dir = nextDir;
@@ -1524,28 +1621,73 @@
       };
     };
 
-    const countMatchingStatic = (frames, acceptedLabels) => {
+    const measureFingerRotationalStats = (frames) => {
+      let minRelX = Infinity;
+      let maxRelX = -Infinity;
+      let valid = 0;
+      let reversals = 0;
+      let dir = 0;
+      let anchor = null;
+      for (let i = 0; i < frames.length; i += 1) {
+        const lm = frames[i] && frames[i].landmarks;
+        if (!Array.isArray(lm) || lm.length < 13 || !lm[0] || !lm[5] || !lm[8] || !lm[9] || !lm[12]) continue;
+        const palm = frames[i].palmSize || 0.1;
+        const centerX = (lm[5].x + lm[8].x + lm[9].x + lm[12].x) / 4;
+        const relX = (centerX - lm[0].x) / palm;
+        valid += 1;
+        if (relX < minRelX) minRelX = relX;
+        if (relX > maxRelX) maxRelX = relX;
+        if (anchor === null) {
+          anchor = relX;
+        } else {
+          const d = relX - anchor;
+          if (Math.abs(d) >= 0.022) {
+            const nextDir = d > 0 ? 1 : -1;
+            if (dir !== 0 && nextDir !== dir) reversals += 1;
+            dir = nextDir;
+            anchor = relX;
+          }
+        }
+      }
+      if (valid < 6) return null;
+      return { spanX: maxRelX - minRelX, reversals };
+    };
+
+    const countMatchingStatic = (frames, acceptedLabels, minProb = 0) => {
       let count = 0;
       let maxProb = 0;
       for (let i = 0; i < frames.length; i += 1) {
         const lbl = frames[i].staticLabel;
-        if (lbl && acceptedLabels.includes(lbl)) {
+        const p = frames[i].prob || 0;
+        if (lbl && acceptedLabels.includes(lbl) && p >= minProb) {
           count += 1;
-          if ((frames[i].prob || 0) > maxProb) maxProb = frames[i].prob || 0;
+          if (p > maxProb) maxProb = p;
         }
       }
       return { count, maxProb };
     };
 
-    // 1. Letra Z: base estática D, índice [8] en zigzag (24 frames)
+    // 1. Letra Z: base estática D o índice claramente extendido (>= 0.38 en movimiento), trazo zig-zag tolerante
     const zRule = rules.Z || DEFAULT_DYNAMIC_ALPHABET_RULES.Z;
     const zSlice = getSlice(zRule.windowFrames || 24);
-    const zBase = countMatchingStatic(zSlice, [zRule.baseStaticLabel || 'D']);
-    if (zSlice.length >= 10 && zBase.count >= 2) {
+    let zBaseCount = 0;
+    let zMaxProb = 0;
+    for (let i = 0; i < zSlice.length; i += 1) {
+      const f = zSlice[i];
+      const p = f.prob || 0;
+      const idxOk =
+        typeof f.indexExtended === 'boolean'
+          ? f.indexExtended
+          : Array.isArray(f.landmarks) && isIndexClearlyExtended(f.landmarks, 1);
+      if (f.staticLabel === (zRule.baseStaticLabel || 'D') || (idxOk && p >= 0.38)) {
+        zBaseCount += 1;
+        if (p > zMaxProb) zMaxProb = p;
+      }
+    }
+    if (zSlice.length >= 9 && zBaseCount >= 2) {
       const lmIdx = typeof zRule.trackedLandmark === 'number' ? zRule.trackedLandmark : 8;
-      const zStats = measureLandmarkStats(zSlice, lmIdx);
-      if (zStats && zStats.spanX >= 0.35 && zStats.spanY >= 0.25 && zStats.reversals >= 2) {
-        // Admite trazo normal o espejado (h1 -> diagonal abajo opuesta -> h2)
+      const zStats = measureLandmarkStats(zSlice, lmIdx, 0.028);
+      if (zStats && zStats.spanX >= 0.25 && zStats.spanY >= 0.17 && zStats.reversals >= 2) {
         const checkZigzag = (sign) => {
           let s1 = false;
           let s2 = false;
@@ -1556,27 +1698,45 @@
             if (!p0 || !p1) continue;
             const dx = ((p1.x - p0.x) / zStats.avgPalm) * sign;
             const dy = (p1.y - p0.y) / zStats.avgPalm;
-            if (!s1 && dx > 0.06 && Math.abs(dy) < 0.14) s1 = true;
-            else if (s1 && !s2 && dx < -0.06 && dy > 0.06) s2 = true;
-            else if (s2 && !s3 && dx > 0.06 && Math.abs(dy) < 0.14) s3 = true;
+            if (!s1 && dx > 0.045 && Math.abs(dy) <= Math.max(0.11, dx * 0.85)) {
+              s1 = true;
+            } else if (s1 && !s2 && dx < -0.045 && dy > 0.04) {
+              s2 = true;
+            } else if (s2 && !s3 && dx > 0.045 && Math.abs(dy) <= Math.max(0.11, dx * 0.85)) {
+              s3 = true;
+            }
           }
           return s1 && s2 && s3;
         };
         if (checkZigzag(1) || checkZigzag(-1)) {
-          return { label: 'Z', score: Math.max(0.86, zBase.maxProb) };
+          return { label: 'Z', score: Math.max(0.86, zMaxProb) };
         }
       }
     }
 
-    // 2. Letra Ñ: base N (o M/U/V/H durante batido rápido), muñeca [0] oscilando horizontalmente
+    // 2. Letra Ñ: base N (o M/U/V/H en giro rápido), oscilación en muñeca [0] o puntas/nudillos [8, 12, 5, 9]
     const enieRule = rules['Ñ'] || DEFAULT_DYNAMIC_ALPHABET_RULES['Ñ'];
     const enieSlice = getSlice(enieRule.windowFrames || 20);
-    const enieBase = countMatchingStatic(enieSlice, [enieRule.baseStaticLabel || 'N', 'M', 'U', 'V', 'H']);
-    if (enieSlice.length >= 8 && enieBase.count >= 2) {
-      const lmIdx = typeof enieRule.trackedLandmark === 'number' ? enieRule.trackedLandmark : 0;
-      const enieStats = measureLandmarkStats(enieSlice, lmIdx);
-      if (enieStats && enieStats.spanX >= 0.22 && enieStats.spanX > enieStats.spanY * 0.75 && enieStats.reversals >= 2) {
-        return { label: 'Ñ', score: Math.max(0.86, enieBase.maxProb) };
+    const enieBase = countMatchingStatic(enieSlice, [enieRule.baseStaticLabel || 'N', 'M', 'U', 'V', 'H'], 0.35);
+    if (enieSlice.length >= 7 && enieBase.count >= 2) {
+      const idxStats = measureLandmarkStats(enieSlice, 8, 0.022);
+      const lastLm = enieSlice[enieSlice.length - 1] && enieSlice[enieSlice.length - 1].landmarks;
+      const looksLikeZ = Boolean(idxStats && idxStats.spanY >= 0.32 && isIndexClearlyExtended(lastLm, 1));
+      if (!looksLikeZ) {
+        const wristIdx = typeof enieRule.trackedLandmark === 'number' ? enieRule.trackedLandmark : 0;
+        const wristStats = measureLandmarkStats(enieSlice, wristIdx, 0.022);
+        const wristTriggered = Boolean(
+          wristStats && wristStats.spanX >= 0.14 && wristStats.spanX > wristStats.spanY * 0.65 && wristStats.reversals >= 2
+        );
+        const fingerTriggered = [8, 12, 5, 9].some((idx) => {
+          const st = measureLandmarkStats(enieSlice, idx, 0.022);
+          return Boolean(st && st.spanX >= 0.13 && st.spanX > st.spanY * 0.62 && st.reversals >= 2);
+        });
+        const rotStats = measureFingerRotationalStats(enieSlice);
+        const rotTriggered = Boolean(rotStats && rotStats.spanX >= 0.10 && rotStats.reversals >= 2);
+        if (wristTriggered || fingerTriggered || rotTriggered) {
+          return { label: 'Ñ', score: Math.max(0.86, enieBase.maxProb) };
+        }
       }
     }
 
@@ -1689,6 +1849,9 @@
     smoothAlphabetRawFeatures,
     smoothLandmarksEMA,
     analyzeBiomechanics,
+    isIndexClearlyExtended,
+    disambiguateMN,
+    detectWideArmMotion,
     detectDynamicAlphabetLetter,
     detectIlyEmergency,
     isWristSteady,
@@ -1896,6 +2059,8 @@
     const aiReadyEl = $('vision-ai-ready');
     const btnOverlay = $('btn-vision-overlay');
     const btnMirror = $('btn-vision-mirror');
+    const btnExpand = $('btn-vision-expand');
+    const simMainGrid = $('sim-main-grid');
     const hudEl = $('vision-hud');
     const hudFramingEl = $('vision-hud-framing');
     const hudActivityEl = $('vision-hud-activity');
@@ -1907,6 +2072,7 @@
     const btnStart = $('btn-vision-start');
     const btnSimulate = $('btn-vision-simulate');
     const btnSpeak = $('btn-vision-speak');
+    const btnSpace = $('btn-vision-space');
     const btnUndo = $('btn-vision-undo');
     const btnClear = $('btn-vision-clear');
     const btnEscalate = $('btn-vision-escalate');
@@ -1914,6 +2080,7 @@
     const simGrid = $('vision-gesture-grid');
     const lettersBar = $('vision-letters-bar');
     const guideList = $('vision-guide-list');
+    const letterRefBox = $('vision-letter-ref');
     const sentenceEl = $('vision-sentence');
     const lastDetectEl = $('vision-last-detect');
     const sentNote = $('vision-sent-note');
@@ -1950,6 +2117,7 @@
     let preloadUsingIdle = false;
     let overlayEnabled = true;
     let mirrorEnabled = true;
+    let visionExpanded = false;
     let running = false;
     let rafId = 0;
     let frameCounter = 0;
@@ -1967,6 +2135,7 @@
     let lastConfirmed = null;
     let lastProgressPct = -1;
     let handsDownSince = null;
+    let lastLetterConfirmedAt = 0;
     let missingHandFrames = 0;
     let speechTimer = null;
     let sentenceTokens = [];
@@ -1979,6 +2148,8 @@
     const dynamicFlatInput = new Float32Array(DYNAMIC_SEQ_LEN * DYNAMIC_NUM_FEATURES);
     const smoothedHandSlots = { Left: null, Right: null };
     const trailPoints = [];
+    const wristMacroBuffer = [];
+    const MAX_WRIST_MACRO = 10;
     const lastAddedAt = {};
     const motionBuffer = [];
     const voteBuffer = [];
@@ -2027,6 +2198,16 @@
       }
     }
 
+    function setVisionExpanded(nextExpanded) {
+      visionExpanded = Boolean(nextExpanded);
+      if (simMainGrid) simMainGrid.classList.toggle('is-vision-expanded', visionExpanded);
+      if (btnExpand) {
+        btnExpand.classList.toggle('is-active', visionExpanded);
+        btnExpand.setAttribute('aria-pressed', String(visionExpanded));
+        btnExpand.textContent = visionExpanded ? 'Vista normal' : 'Ampliar vista';
+      }
+    }
+
     function resetSpellCandidate() {
       spellCandidate.label = null;
       spellCandidate.since = 0;
@@ -2035,7 +2216,6 @@
       spellCandidate.scoreSum = 0;
       spellCandidate.scoreN = 0;
       spellCandidate.isDynamic = false;
-      alphaFeatureRawEma = null;
     }
 
     function resetDynamicCandidate() {
@@ -2099,11 +2279,13 @@
 
     function renderSentence() {
       const text = composeSentence(sentenceTokens, activeSentenceExpression);
-      sentenceEl.textContent = text || DEFAULT_SENTENCE;
+      const hasTrailingSpace = sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'space';
+      sentenceEl.textContent = text ? (hasTrailingSpace ? `${text} ␣` : text) : DEFAULT_SENTENCE;
       sentenceEl.classList.toggle('is-empty', !text);
       const hasTokens = sentenceTokens.length > 0;
       const canReset = hasTokens || Boolean(lastConfirmed);
       btnSpeak.disabled = !hasTokens;
+      if (btnSpace) btnSpace.disabled = !hasTokens || hasTrailingSpace;
       btnUndo.disabled = !canReset;
       if (btnClear) btnClear.disabled = !canReset;
     }
@@ -2137,9 +2319,12 @@
       isDynamicInferring = false;
       isAlphabetInferring = false;
       missingHandFrames = 0;
+      lastLetterConfirmedAt = 0;
+      alphaFeatureRawEma = null;
       smoothedHandSlots.Left = null;
       smoothedHandSlots.Right = null;
       trailPoints.length = 0;
+      wristMacroBuffer.length = 0;
       lastHudTop2At = 0;
       lastHudTop2Text = '';
       if (hudTop2El) hudTop2El.textContent = 'Enfoque: esperando seña…';
@@ -2873,10 +3058,11 @@
      * Prioridad 2 · Vocabulario Dinámico (118 señas · ./models/senas_dinamicas/).
      * Alimenta [1, 30, 159] con landmarks suavizados y evalúa sin bloqueo (outTensor.data()).
      */
-    function evaluateDynamicWordsTf(results, now, handCount, bio) {
+    function evaluateDynamicWordsTf(results, now, handCount, bio, options = {}) {
       const dynEntry = tfModels && tfModels.dynamic;
       if (!dynEntry || !dynEntry.model || !window.tf) return;
 
+      const { pauseWordDispatch = false } = options;
       const meta = dynEntry.metadata || {};
       const seqLen = meta.sequenceLength || DYNAMIC_SEQ_LEN;
       const numFeat = meta.numFeatures || DYNAMIC_NUM_FEATURES;
@@ -2887,6 +3073,11 @@
       const vec = extractDynamicFrameFeatures(smoothedPoseLandmarks || latestPoseLandmarks, results);
       if (dynamicSeqBuffer.length >= seqLen) dynamicSeqBuffer.shift();
       dynamicSeqBuffer.push(vec);
+
+      if (pauseWordDispatch) {
+        resetDynamicCandidate();
+        return;
+      }
 
       if (dynamicSeqBuffer.length < seqLen) {
         if (!spellPossible || (!spellCandidate.label && handCount >= 2)) {
@@ -3014,7 +3205,7 @@
               sentenceTokens.push({ id: tokenId, kind: 'word', text: word });
               lastDetectEl.textContent = `Última seña: ${word} · Confianza: ${pct}%`;
               renderSentence();
-              sentNote.textContent = 'Baja las manos 2 s para enviar y leer automáticamente.';
+              sentNote.textContent = 'Pausa ~6 s sin manos para enviar o pulsa “Enviar y leer al funcionario”.';
               sentNote.hidden = false;
             }
             dynamicSeqBuffer.splice(0, 12);
@@ -3074,10 +3265,11 @@
         const tokenId = `spell:${spellCandidate.label}`;
         const last = lastAddedAt[tokenId];
         const canSpace =
-          !isSpace || (sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter');
+          !isSpace || (sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind !== 'space');
 
         if (canSpace && (typeof last !== 'number' || now - last >= SPELL_COOLDOWN_MS)) {
           lastAddedAt[tokenId] = now;
+          lastLetterConfirmedAt = now;
           const token = {
             id: tokenId,
             kind: isSpace ? 'space' : 'letter',
@@ -3088,7 +3280,7 @@
           sentenceTokens.push({ id: token.id, kind: token.kind, text: token.text });
           renderSentence();
           lastDetectEl.textContent = `Última letra: ${displayChar} · Confianza: ${pct}%`;
-          sentNote.textContent = 'Baja las manos 2 s para enviar o sostén postura neutra para separar palabras.';
+          sentNote.textContent = 'Letra confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
           sentNote.hidden = false;
           resetDynamicCandidate();
           if (spellCandidate.isDynamic) {
@@ -3101,7 +3293,7 @@
     /**
      * Prioridad 3 · Alfabeto LSP (A–Z + Ñ · ./models/alfabeto_lsp/).
      * Usa landmarks normalizados con proporción `x * aspect` + EMA de 3 frames antes de estandarizar,
-     * orientación consistente en cámara espejada y lectura Top-2 en el HUD.
+     * orientación consistente en cámara espejada y recalibración D/Z, M/N y Ñ con Top-2 en el HUD.
      */
     function evaluateAlphabetTf(primaryHand, aspect, bio, now) {
       const alphaEntry = tfModels && tfModels.alphabet;
@@ -3117,16 +3309,18 @@
       const palmSize =
         Math.hypot(aspectLandmarks[9].x - aspectLandmarks[0].x, aspectLandmarks[9].y - aspectLandmarks[0].y) || 0.1;
 
+      const prevRaw = alphaFeatureRawEma;
       const rawNow = extractAlphabetRawFeatures(primaryHand, aspect, !mirrorEnabled);
-      const smoothedRaw = smoothAlphabetRawFeatures(alphaFeatureRawEma, rawNow, ALPHA_FEATURE_EMA);
-      alphaFeatureRawEma = smoothedRaw;
+      alphaFeatureRawEma = smoothAlphabetRawFeatures(prevRaw, rawNow, ALPHA_FEATURE_EMA);
 
       const features = extractAlphabetFeatures(primaryHand, meta.scalerMean, meta.scalerStd, {
         aspect,
         mirroredInput: !mirrorEnabled,
-        prevRaw: alphaFeatureRawEma,
-        emaAlpha: 1
+        prevRaw,
+        emaAlpha: ALPHA_FEATURE_EMA
       });
+
+      const idxExtendedNow = isIndexClearlyExtended(primaryHand, aspect);
 
       let outTensor = null;
       try {
@@ -3172,11 +3366,18 @@
             t: evalNow || now,
             palmSize,
             landmarks: aspectLandmarks,
-            staticLabel: bestProb >= 0.45 ? rawLabel : null,
-            prob: bestProb
+            staticLabel: bestProb >= 0.38 ? rawLabel : null,
+            prob: bestProb,
+            indexExtended: idxExtendedNow
           });
 
           const dynLetter = detectDynamicAlphabetLetter(spellTrackBuffer, meta.dynamicLettersRules);
+          const mnResolved = !dynLetter
+            ? disambiguateMN(primaryHand, aspect, rawLabel, bestProb, secondLabelRaw, secondProb, threshold)
+            : null;
+          const effectiveLabel = mnResolved ? mnResolved.label : rawLabel;
+          const effectiveProb = mnResolved ? mnResolved.score : bestProb;
+
           const handIsQuiet = bio.activity === 'estatico' && isWristSteady(spellTrackBuffer, 5);
           let resolvedLabel = null;
           let resolvedScore = 0;
@@ -3186,22 +3387,40 @@
             resolvedLabel = dynLetter.label;
             resolvedScore = dynLetter.score;
             isDynamic = true;
-          } else if (bestProb >= threshold && handIsQuiet) {
-            if (rawLabel === '') {
-              const canInsertSpace =
-                sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'letter';
-              if (canInsertSpace) {
-                resolvedLabel = SPACE_TOKEN_LABEL;
-                resolvedScore = bestProb;
+          } else if (handIsQuiet) {
+            const dInTop2 = rawLabel === 'D' ? bestProb : (secondLabelRaw === 'D' ? secondProb : 0);
+            const thumbCircleDist =
+              Math.min(
+                Math.hypot(aspectLandmarks[4].x - aspectLandmarks[12].x, aspectLandmarks[4].y - aspectLandmarks[12].y),
+                Math.hypot(aspectLandmarks[4].x - aspectLandmarks[11].x, aspectLandmarks[4].y - aspectLandmarks[11].y)
+              ) / palmSize;
+
+            if (effectiveProb >= threshold) {
+              if (effectiveLabel === '') {
+                const canInsertSpace =
+                  sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind !== 'space';
+                if (canInsertSpace) {
+                  resolvedLabel = SPACE_TOKEN_LABEL;
+                  resolvedScore = effectiveProb;
+                }
+              } else {
+                resolvedLabel = effectiveLabel;
+                resolvedScore = effectiveProb;
               }
-            } else {
-              resolvedLabel = rawLabel;
-              resolvedScore = bestProb;
+            } else if (idxExtendedNow && dInTop2 >= 0.48 && thumbCircleDist < 0.46) {
+              resolvedLabel = 'D';
+              resolvedScore = Math.max(threshold, dInTop2);
             }
           }
 
-          const hudLbl1 = dynLetter ? dynLetter.label : (rawLabel === '' ? 'Espacio' : rawLabel);
-          const hudProb1 = dynLetter ? dynLetter.score : bestProb;
+          const hudLbl1 = dynLetter
+            ? dynLetter.label
+            : resolvedLabel === 'D'
+              ? 'D'
+              : effectiveLabel === ''
+                ? 'Espacio'
+                : effectiveLabel;
+          const hudProb1 = dynLetter ? dynLetter.score : (resolvedScore || effectiveProb);
           const hudLbl2 = secondLabelRaw === '' ? 'Espacio' : secondLabelRaw;
           updateHud(
             { top2Text: formatTop2Text(hudLbl1, hudProb1, hudLbl2, secondProb) },
@@ -3213,7 +3432,7 @@
             source: 'alphabet_lsp',
             gestureId: resolvedLabel ? `spell:${resolvedLabel}` : null,
             wristSteady: handIsQuiet,
-            confidence: resolvedScore || bestProb,
+            confidence: resolvedScore || effectiveProb,
             timestamp: evalNow
           });
 
@@ -3263,7 +3482,9 @@
 
         smoothedHandSlots.Left = null;
         smoothedHandSlots.Right = null;
+        alphaFeatureRawEma = null;
         trailPoints.length = 0;
+        wristMacroBuffer.length = 0;
         motionBuffer.length = 0;
         voteBuffer.length = 0;
         dynamicSeqBuffer.length = 0;
@@ -3272,15 +3493,34 @@
         resetSpellCandidate();
         prevPalmOrientation = null;
         feedGesture(null, 0, now);
-        if (handsDownSince === null) handsDownSince = now;
-        if (sentenceTokens.length > 0 && now - handsDownSince >= AUTO_SEND_PAUSE_MS) {
-          sendSentence({ auto: true });
+        if (sentenceTokens.length > 0) {
+          const hasSpelledLetters = sentenceTokens.some((t) => t.kind === 'letter' || t.kind === 'space');
+          if (hasSpelledLetters) {
+            handsDownSince = null;
+            sentNote.textContent = 'Pausa en deletreo: tus letras se conservan. Usa “Espacio” o “Enviar y leer al funcionario” cuando termines.';
+            sentNote.hidden = false;
+          } else {
+            if (handsDownSince === null) handsDownSince = now;
+            const elapsed = now - handsDownSince;
+            const remainingSec = Math.max(1, Math.ceil((AUTO_SEND_PAUSE_MS - elapsed) / 1000));
+            sentNote.textContent = `Enviando en ${remainingSec} s… Levanta la mano para continuar o pulsa “Enviar y leer al funcionario”.`;
+            sentNote.hidden = false;
+            if (elapsed >= AUTO_SEND_PAUSE_MS) {
+              sendSentence({ auto: true });
+            }
+          }
         }
         return;
       }
 
       missingHandFrames = 0;
-      handsDownSince = null;
+      if (handsDownSince !== null) {
+        handsDownSince = null;
+        if (sentenceTokens.length > 0) {
+          sentNote.textContent = 'Mano detectada: continuando la oración.';
+          sentNote.hidden = false;
+        }
+      }
 
       // Suavizado EMA temporal por ranura anatómica (Left / Right) manteniendo correspondencia
       const assigned = assignAnatomicalHands(rawLandmarks, allHandedness, poseForFrame);
@@ -3367,25 +3607,50 @@
           return;
         }
 
-        const isSpellFocus = handsForFrame.length === 1 && bio.activity === 'estatico' && dynCandidate.streak === 0;
+        let spellingSessionActive = false;
+        if (handsForFrame.length >= 2) {
+          lastLetterConfirmedAt = 0;
+          wristMacroBuffer.length = 0;
+          if (spellCandidate.label || spellTrackBuffer.length > 0) {
+            resetSpellCandidate();
+            spellTrackBuffer.length = 0;
+          }
+        } else {
+          const h0 = handsForFrame[0];
+          const palmSize0 =
+            Math.hypot((h0[9].x - h0[0].x) * aspect, h0[9].y - h0[0].y) || 0.1;
+          if (wristMacroBuffer.length >= MAX_WRIST_MACRO) wristMacroBuffer.shift();
+          wristMacroBuffer.push({
+            x: h0[0].x,
+            y: h0[0].y,
+            palmSize: palmSize0,
+            elbowDeg: bio.rightElbowDeg !== null ? bio.rightElbowDeg : bio.leftElbowDeg
+          });
+          const wideArmMotion = detectWideArmMotion(wristMacroBuffer);
+          if (wideArmMotion) lastLetterConfirmedAt = 0;
+          const recentSpell = lastLetterConfirmedAt > 0 && now - lastLetterConfirmedAt <= SPELL_SESSION_HOLD_MS;
+          const steadySingleHand = bio.activity === 'estatico' || quickSteady || Boolean(spellCandidate.label);
+          spellingSessionActive = !wideArmMotion && (recentSpell || steadySingleHand);
+          if (spellingSessionActive && dynCandidate.streak > 0) {
+            resetDynamicCandidate();
+          }
+        }
+
         updateHud(
           {
             framingText: bio.framingLabel,
             framingTone: bio.framingTone,
-            activityText: isSpellFocus ? 'Leyendo letra' : 'Escuchando seña',
-            activityTone: isSpellFocus ? 'spell' : 'active'
+            activityText: spellingSessionActive ? 'Deletreo activo' : 'Escuchando seña',
+            activityTone: spellingSessionActive ? 'spell' : 'active'
           },
           now
         );
 
-        if (handsForFrame.length >= 2 && (spellCandidate.label || spellTrackBuffer.length > 0)) {
-          resetSpellCandidate();
-          spellTrackBuffer.length = 0;
-        }
-
         const smoothedResults = { landmarks: handsForFrame, handedness: smoothedHandedness };
-        // Prioridad 2 (Vocabulario dinámico · 118 señas) + Prioridad 3 (Alfabeto A–Z + Ñ con 1 mano)
-        evaluateDynamicWordsTf(smoothedResults, now, handsForFrame.length, bio);
+        // Prioridad 2 (Vocabulario dinámico · 118 señas, pausada en deletreo activo) + Prioridad 3 (Alfabeto A–Z + Ñ)
+        evaluateDynamicWordsTf(smoothedResults, now, handsForFrame.length, bio, {
+          pauseWordDispatch: spellingSessionActive
+        });
         if (handsForFrame.length === 1 && dynCandidate.streak === 0 && activeTf.alphabet) {
           evaluateAlphabetTf(handsForFrame[0], aspect, bio, now);
         }
@@ -3553,7 +3818,9 @@
         renderSentence();
         sentNote.textContent = isSimulated
           ? 'Pulsa “Enviar y leer al funcionario” cuando la oración esté lista.'
-          : 'Baja las manos 2 s para enviar y leer automáticamente.';
+          : (isLetter || isSpace)
+            ? 'Letra añadida. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.'
+            : 'Baja las manos ~6 s para enviar o pulsa “Enviar y leer al funcionario”.';
         sentNote.hidden = false;
         if (gesture.urgent) sendSentence({ auto: true });
       } else {
@@ -3624,6 +3891,16 @@
       sentNote.hidden = false;
     }
 
+    function insertSpace() {
+      if (sentenceTokens.length === 0 || sentenceTokens[sentenceTokens.length - 1].kind === 'space') return;
+      sentenceTokens.push({ id: `spell:${SPACE_TOKEN_LABEL}`, kind: 'space', text: ' ' });
+      lastLetterConfirmedAt = performance.now();
+      resetSpellCandidate();
+      renderSentence();
+      sentNote.textContent = 'Espacio insertado. Continúa deletreando la siguiente palabra.';
+      sentNote.hidden = false;
+    }
+
     function undoLast() {
       if (sentenceTokens.length > 0) {
         const removed = sentenceTokens.pop();
@@ -3690,9 +3967,18 @@
       },
       {
         emoji: '\u{2423}',
-        title: 'Espacio y envío automático:',
-        detail: ' sostén postura neutra tras deletrear para separar palabras, o baja las manos 2 s para enviar y leer al funcionario.'
+        title: 'Espacio y envío sin apuros:',
+        detail: ' pulsa “Espacio” o sostén postura neutra para separar palabras. Al deletrear no se envía a los 2 s: pulsa “Enviar y leer al funcionario” al terminar.'
       }
+    ];
+
+    const LETTER_CONFUSION_GUIDE = [
+      { letter: 'D', tip: 'Índice vertical arriba; pulgar y dedo medio forman un círculo al frente.' },
+      { letter: 'M', tip: 'Tres dedos (índice, medio y anular) doblados cubriendo el pulgar.' },
+      { letter: 'N', tip: 'Solo dos dedos (índice y medio) doblados sobre el pulgar.' },
+      { letter: 'Ñ', tip: 'Forma la N y agita o gira suavemente la muñeca de lado a lado.' },
+      { letter: 'J', tip: 'Meñique extendido (como I) trazando una curva hacia abajo y adentro.' },
+      { letter: 'Z', tip: 'Índice extendido (como D) dibujando un zig-zag: lado, diagonal y lado.' }
     ];
 
     GESTURES.forEach((gesture) => {
@@ -3745,6 +4031,32 @@
       });
     }
 
+    if (letterRefBox) {
+      const refTitle = document.createElement('p');
+      refTitle.className = 'vision-letter-ref-title';
+      refTitle.textContent = 'Posición rápida para letras que suelen confundirse (D, M, N, Ñ, J, Z)';
+
+      const refGrid = document.createElement('div');
+      refGrid.className = 'vision-letter-ref-grid';
+
+      LETTER_CONFUSION_GUIDE.forEach((item) => {
+        const card = document.createElement('div');
+        card.className = 'vision-letter-ref-card';
+
+        const badge = document.createElement('span');
+        badge.className = 'vision-letter-ref-badge';
+        badge.textContent = item.letter;
+
+        const txt = document.createElement('span');
+        txt.textContent = item.tip;
+
+        card.append(badge, txt);
+        refGrid.appendChild(card);
+      });
+
+      letterRefBox.replaceChildren(refTitle, refGrid);
+    }
+
     /* ---------- Eventos ---------- */
     (simBox || simGrid).addEventListener('click', (e) => {
       const btn = e.target.closest('.vision-gesture-btn[data-gesture]');
@@ -3775,6 +4087,7 @@
     });
 
     btnSpeak.addEventListener('click', () => sendSentence({ auto: false }));
+    if (btnSpace) btnSpace.addEventListener('click', insertSpace);
     btnUndo.addEventListener('click', undoLast);
     if (btnClear) btnClear.addEventListener('click', clearAllOutput);
     btnEscalate.addEventListener('click', escalate);
@@ -3799,6 +4112,12 @@
       });
     }
 
+    if (btnExpand) {
+      btnExpand.addEventListener('click', () => {
+        setVisionExpanded(!visionExpanded);
+      });
+    }
+
     panel.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && mode !== 'idle') {
         e.preventDefault();
@@ -3809,11 +4128,13 @@
 
     document.addEventListener('senasegura:channelchange', (e) => {
       if (!e.detail || e.detail.channel !== 'camara') {
+        setVisionExpanded(false);
         resetToIdle();
       }
     });
 
     document.addEventListener('senasegura:purge', () => {
+      setVisionExpanded(false);
       resetToIdle();
       cancelSpeech();
     });

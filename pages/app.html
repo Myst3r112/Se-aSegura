@@ -9,10 +9,12 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=22">
-  <script src="../js/main.js?v=22" defer></script>
-  <script src="../js/gemini-lsp.js?v=22" defer></script>
-  <script src="../js/vision-ai.js?v=22" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=23">
+  <script src="../js/qr-iso.js?v=23" defer></script>
+  <script src="../js/main.js?v=23" defer></script>
+  <script src="../js/gemini-lsp.js?v=23" defer></script>
+  <script src="../js/vision-math.js?v=23" defer></script>
+  <script src="../js/vision-ai.js?v=23" defer></script>
 </head>
 <body id="inicio" class="app-page">
   <a class="skip-link" href="#app-main">Saltar al contenido principal</a>
@@ -41,8 +43,10 @@
           </span>
         </button>
         <button type="button" class="btn-scale-step" id="btn-font-decrease" aria-label="Reducir tamaño de texto">A−</button>
+        <span class="a11y-scale-badge" id="app-font-scale-value" aria-live="polite">100%</span>
         <button type="button" class="btn-scale-step" id="btn-font-increase" aria-label="Aumentar tamaño de texto">A+</button>
       </div>
+      <button type="button" class="btn-a11y-reset" id="btn-a11y-reset" aria-label="Restablecer accesibilidad">Restablecer</button>
 
       <div class="app-header-actions">
         <button type="button" class="btn btn-emergency app-emergency-btn" id="btn-emergency-mode" aria-pressed="false">
@@ -71,7 +75,7 @@
               <span class="channel-card-sub">Videollamada humana en vivo</span>
             </button>
             <button type="button" class="pref-chip channel-card" data-channel="camara" aria-pressed="false" aria-controls="vision-panel">
-              <span class="channel-card-title">Cámara IA</span>
+              <span class="channel-card-title">Cámara IA (Gestos)</span>
               <span class="channel-card-sub">Señas cotidianas a texto y voz</span>
             </button>
             <button type="button" class="pref-chip channel-card" data-channel="texto" aria-pressed="false" aria-controls="sim-textmode-card">
@@ -123,18 +127,21 @@
           </div>
         </section>
 
-        <section class="app-operate" id="app-operate" hidden aria-label="Atención en curso" tabindex="-1">
+        <section class="app-operate" id="app-operate" hidden aria-labelledby="app-operate-title" tabindex="-1">
           <div class="app-operate-top">
             <div class="app-operate-nav">
               <button type="button" class="btn-soft btn-change-sector" id="btn-change-sector">
                 ← Cambiar sede
               </button>
-              <p class="sim-session-meta" id="sim-session-meta">Sin login · Sesión lista para iniciar</p>
+              <div>
+                <h1 id="app-operate-title" class="app-operate-title">Atención en curso · Modo Ventanilla</h1>
+                <p class="sim-session-meta" id="sim-session-meta" aria-live="polite">Sin login · Sesión lista para iniciar</p>
+              </div>
             </div>
             <div class="pref-group app-channel-switch" role="group" aria-label="Cambiar canal de comunicación">
               <span class="pref-label">Canal</span>
               <button type="button" class="pref-chip is-active" data-channel="lsp" aria-pressed="true">Intérprete LSP</button>
-              <button type="button" class="pref-chip" data-channel="camara" aria-pressed="false" aria-controls="vision-panel">Cámara IA</button>
+              <button type="button" class="pref-chip" data-channel="camara" aria-pressed="false" aria-controls="vision-panel">Cámara IA (Gestos)</button>
               <button type="button" class="pref-chip" data-channel="texto" aria-pressed="false" aria-controls="sim-textmode-card">Texto / Lectura</button>
             </div>
           </div>
@@ -223,7 +230,7 @@
                 <section class="vision-panel" id="vision-panel" hidden aria-labelledby="vision-title" data-support-avoid>
                   <div class="vision-top-bar">
                     <div class="vision-title-group">
-                      <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
+                      <h2 class="vision-title" id="vision-title">Cámara IA (Gestos)</h2>
                       <span class="vision-ai-ready" id="vision-ai-ready" data-ready="loading" role="status" aria-live="polite">Preparando IA…</span>
                     </div>
 
@@ -355,7 +362,7 @@
                 <section class="textmode-card" id="sim-textmode-card" hidden aria-labelledby="textmode-card-title">
                   <div class="textmode-card-header">
                     <span class="textmode-pill">Modo Texto / Lectura Activo</span>
-                    <h4 class="h2-title" id="textmode-card-title">Atención cotidiana en texto claro</h4>
+                    <h2 class="h2-title" id="textmode-card-title">Atención cotidiana en texto claro</h2>
                   </div>
                   <p class="textmode-card-desc">
                     Usa el panel de <strong>Mensajería Asistida</strong> a la derecha para escribir, tocar una plantilla rápida o usar el dictado de voz. Es autónomo e inmediato: no requiere videollamada ni cámara.
@@ -433,14 +440,14 @@
                     title="Finalizar atención">
                     <img src="../assets/icons/hangup.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
                   </button>
-                  <p class="call-controls-note" id="sim-controls-note">Vista demostrativa · No se graba video</p>
+                  <p class="call-controls-note" id="sim-controls-note" role="status" aria-live="polite">Vista demostrativa · No se graba video</p>
                 </div>
               </div>
 
               <!-- Columna Chat Asistido -->
               <aside class="sim-chat-column" aria-label="Mensajería asistida para datos sensibles" data-support-avoid>
                 <div class="chat-header">
-                  <h4 class="chat-title">Mensajería Asistida</h4>
+                  <h2 class="chat-title">Mensajería Asistida</h2>
                   <p class="chat-subtitle" id="sim-chat-sector-label">Banco · Datos de ejemplo</p>
                 </div>
 
@@ -490,9 +497,9 @@
 
                 <!-- Plantillas rápidas + Dictado de voz simulado -->
                 <div class="quick-templates" id="sim-quick-templates" role="group" aria-label="Plantillas rápidas de respuesta">
-                  <button type="button" class="template-chip" data-template="Confirmo mi DNI: 00000000 y monto S/ 150.00.">Confirmar DNI y monto</button>
-                  <button type="button" class="template-chip" data-template="Por favor, repite en Lengua de Señas Peruana.">Repetir en LSP</button>
-                  <button type="button" class="template-chip" data-template="Necesito constancia impresa de la operación.">Pedir constancia</button>
+                  <button type="button" class="template-chip" data-template-index="0">Confirmar DNI y monto</button>
+                  <button type="button" class="template-chip" data-template-index="1">Repetir en LSP</button>
+                  <button type="button" class="template-chip" data-template-index="2">Pedir constancia</button>
                 </div>
 
                 <form class="chat-form" id="sim-chat-form">
@@ -536,12 +543,12 @@
         </section>
       </div>
 
-      <!-- VISTA REMOTA: CONSOLA DEL INTÉRPRETE (Figma P8, P9, P10) -->
           <!-- VISTA 2: CONSOLA DEL INTÉRPRETE (Figma P8, P9, P10) -->
           <div class="sim-workspace sim-console-workspace" id="sim-view-consola" hidden role="region" aria-label="Consola del Intérprete">
+            <h1 class="visually-hidden">SeñaSegura · Modo Consola del Intérprete</h1>
             <div class="sim-top-bar">
               <div>
-                <h3 class="display-title-sm">SeñaSegura · Consola del Intérprete</h3>
+                <h2 class="display-title-sm">SeñaSegura · Consola del Intérprete</h2>
                 <p class="sim-session-meta">Sesión de demostración · Solo datos ficticios · Sin grabación de video</p>
               </div>
               <div class="sim-network-group">
@@ -586,7 +593,7 @@
 
             <div class="console-grid">
               <aside class="console-context-card">
-                <h4 class="h2-title">Contexto de la sesión</h4>
+                <h3 class="h2-title">Contexto de la sesión</h3>
                 <p class="console-sector-title" id="console-sector-label">Banco · Datos de ejemplo</p>
                 <div class="console-data-block" id="console-data-block">
                   <p>DNI: 00000000</p>

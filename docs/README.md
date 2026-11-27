@@ -21,9 +21,11 @@ SeñaSegura/
 ├── css/
 │   └── styles.css              # Tokens oficiales, layout responsive, Alto Contraste y @media print
 ├── js/
-│   ├── main.js                 # Lógica modular compartida en Vanilla JS (ES6+) para index.html y app.html (incluye QR SVG V1–V6 URL verificable)
+│   ├── qr-iso.js               # Codificador puro ISO/IEC 18004 (V1–V6 Nivel M) y QR SVG local sin red
+│   ├── main.js                 # Lógica modular compartida en Vanilla JS (ES6+) para index.html y app.html
 │   ├── gemini-lsp.js           # Capa híbrida opcional (gemini-3.8-flash) para refinar glosas/deletreo únicamente en LSP peruana (solo texto; fallback 100 % offline)
-│   └── vision-ai.js            # Cámara IA unificada LSP: precarga silenciosa + árbitro neuronal 60 FPS en TensorFlow.js (118 señas dinámicas + MLP 90D Zero-Ambiguity + Micro-GRU trayectorias J, Ñ, Z) sobre MediaPipe + respaldo geométrico
+│   ├── vision-math.js          # Álgebra 3D pura, canonicalización 90D, suavizado EMA y biomecánica sin acceso al DOM
+│   └── vision-ai.js            # Cámara IA unificada LSP: precarga silenciosa + árbitro neuronal 60 FPS en TensorFlow.js (118 señas dinámicas + MLP 90D Zero-Ambiguity + Micro-GRU trayectorias J, Ñ, Z) sobre MediaPipe + respaldo geométrico y canvas responsive
 ├── workers/
 │   └── gemini-lsp-proxy.js     # Plantilla Cloudflare Worker gratuita con CORS seguro para GitHub Pages sin exponer GEMINI_API_KEY
 ├── models/
@@ -68,12 +70,12 @@ Extraídos del sistema de diseño de SeñaSegura en Figma (`Atkinson Hyperlegibl
 
 ## 3. Cobertura de las 30 Historias de Usuario Core (MUST HAVE)
 
-- **Accesibilidad Global (HU-033, HU-034, HU-036):**
+- **Accesibilidad Global (HU-033, HU-034, HU-036, HU-039):**
   - Interruptor de Alto Contraste (`#121820` / `#F59E0B` / `#FFFFFF`) persistido en `localStorage`.
-  - Escalado tipográfico `A−` / `A+` y accesos directos (`100%`, `125%`, `150%`) mediante `data-font-scale` en `<html>`.
-  - Foco visible de `3px` con `Tab`/`Enter`, enlace de salto al contenido y atributos ARIA completos (`role="switch"`, `role="tablist"`, `aria-live`, `aria-expanded`, `<dialog>`).
+  - Escalado tipográfico `A−` / `A+`, badge de porcentaje en vivo (`100%`, `125%`, `150%`) y botón **`Restablecer`** (HU-039 CA03) mediante `data-font-scale` en `<html>`.
+  - Foco visible de `3px` con `Tab`/`Enter`, enlace de salto al contenido, respeto integral a `@media (prefers-reduced-motion: reduce)` y atributos ARIA completos (`role="switch"`, `role="tablist"`, `aria-live`, `aria-expanded`, `<dialog>`).
 - **Hero e Impacto (HU-041, HU-045):**
-  - Menú hamburguesa accesible en dispositivos móviles (`<768px`).
+  - Menú hamburguesa accesible en móviles/tablets y escalado `150%` (`<=1120px` y `<=1280px` al `150%`), sin desbordamiento horizontal entre `320px` y `1920px`.
   - Titular bimodal, tarjeta explicativa y vista previa en tablet.
   - KPIs animados al entrar en pantalla (`+232,000`, `<30 s`, `20 → 7 min`, `100%`) y pestañas por sector (*Agencias Bancarias*, *Comisarías*, *Centros de Salud*).
 - **Arquitectura de Dos Vistas (Figma P1–P12):**
@@ -85,9 +87,9 @@ Extraídos del sistema de diseño de SeñaSegura en Figma (`Atkinson Hyperlegibl
   - **Visibilidad contextual y opción "Otros" (H2 / H8):** En `Cámara IA` se ocultan los selectores de Sede/Trámite y las tarjetas de datos ficticios (registrando `Atención general` / `Comunicación libre LSP`); en `Intérprete LSP` y `Texto / Lectura` se incluyen `Otra sede / General` y `Otro trámite / Consulta general` con campo breve opcional (`Consulta general` si queda vacío). Separación estricta entre `DNI del ciudadano` editable por el ciudadano en Ventanilla y el campo de ventanilla modificable solo desde Consola.
   - **Modo Emergencia (HU-009, HU-011, HU-014, HU-015):** Acceso en 1 toque sin formularios previos ni selectores de trámite, manteniendo los 3 tipos prioritarios (`105`, `106`, `100`), botón grande **`Otra emergencia`** y 4 pictogramas rápidos `>= 80×80 px`.
   - **Consola del Intérprete (P8–P10):** Banner de alerta crítica, ajuste exclusivo del personal (`Monto`, `Referencia`, `Área`, `Expediente`), **edición en vivo del motivo o trámite real atendido** sincronizado con el cierre (PDF/TXT/QR), feed en vivo de Mensajes de Ventanilla, autovista PiP, bloc de notas y Glosario Técnico LSP.
-  - **Videollamada HD y Contingencia (HU-017, HU-018, HU-021, HU-023, HU-040):** Controles de micrófono, cámara, ángulo, pantalla completa con subtítulo en vivo y botón discreto `Simular microcorte` en la barra inferior.
+  - **Videollamada HD y Contingencia (HU-017, HU-018, HU-021, HU-023, HU-040):** Controles de micrófono (silencio `data-muted="true"` y estado en vivo `#sim-controls-note`), cámara, ángulo, pantalla completa con subtítulo en vivo y botón discreto `Simular microcorte` en la barra inferior.
 - **Cierre, Calificación, Trazabilidad y Verificador Web (P6 · HU-025, HU-026, HU-029, HU-031, HU-032):**
-  - Generación de código único de 8 dígitos (`SEG-XXXXXXXX`) con botón de copiado rápido, código QR ISO/IEC 18004 (V1–V6 Nivel M) escaneable en SVG puro local (`document.createElementNS`) que codifica la URL directa `?verificar=SEG-XXXXXXXX#marco-legal` sin peticiones de red, descarga real en **PDF (`constancia-SEG-XXXXXXXX.pdf`)** mediante `jspdf@2.5.2` cargado bajo demanda con QR vectorial e ID `INT-LSP-042` (con respaldo `.txt` offline), vista previa PDF con impresión directa (`@media print`), **calificación opcional de la experiencia en cierre (P6)** y purga local inmediata (incluyendo detención y limpieza de Cámara IA).
+  - Generación de código único de 8 dígitos (`SEG-XXXXXXXX`) con botón de copiado rápido, código QR ISO/IEC 18004 (V1–V6 Nivel M) escaneable en SVG puro local (`js/qr-iso.js`, `document.createElementNS`) que codifica la URL directa `?verificar=SEG-XXXXXXXX#marco-legal` sin peticiones de red, descarga real en **PDF (`constancia-SEG-XXXXXXXX.pdf`)** mediante `jspdf@2.5.2` cargado bajo demanda con QR vectorial e ID `INT-LSP-042` (con respaldo `.txt` offline), vista previa PDF con impresión directa (`@media print`), **calificación opcional de la experiencia en cierre (P6)** y purga local inmediata al cerrar, cargar o restaurar caché (`DOMContentLoaded` / `pageshow` bfcache, incluyendo detención y limpieza de Cámara IA).
   - Verificador web con auto-verificación por URL (`?verificar=SEG-XXXXXXXX`) capaz de validar el ejemplo base (`SEG-84920` o `84920`) y los códigos generados en sesión con estado visual diferenciado.
 - **Respaldo Normativo, FAQ y Formulario B2G/B2B (HU-042, HU-043, HU-044, HU-048):**
   - Respaldo explícito a la **Ley N.° 29535** (Lengua de Señas Peruana), **Ley N.° 29733** (Protección de Datos Personales) y política de **No grabación de video**, con modal de *Ficha de Conformidad*.

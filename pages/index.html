@@ -9,10 +9,12 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=22">
-  <script src="../js/main.js?v=22" defer></script>
-  <script src="../js/gemini-lsp.js?v=22" defer></script>
-  <script src="../js/vision-ai.js?v=22" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=23">
+  <script src="../js/qr-iso.js?v=23" defer></script>
+  <script src="../js/main.js?v=23" defer></script>
+  <script src="../js/gemini-lsp.js?v=23" defer></script>
+  <script src="../js/vision-math.js?v=23" defer></script>
+  <script src="../js/vision-ai.js?v=23" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -105,6 +107,7 @@
               A+
             </button>
           </div>
+          <button type="button" class="btn-a11y-reset" id="btn-a11y-reset" aria-label="Restablecer accesibilidad">Restablecer</button>
         </div>
       </div>
     </div>
@@ -144,6 +147,7 @@
           <button type="button" class="btn-scale-preset-mobile" data-scale="125" aria-pressed="false">125%</button>
           <button type="button" class="btn-scale-preset-mobile" data-scale="150" aria-pressed="false">150%</button>
         </div>
+        <button type="button" class="btn-a11y-reset" id="btn-mobile-a11y-reset" aria-label="Restablecer accesibilidad">Restablecer</button>
       </div>
     </div>
   </div>
@@ -381,7 +385,7 @@
             <div class="sim-start-row">
               <button type="button" class="btn btn-primary" id="btn-one-tap-start">
                 <img src="../assets/icons/arrow-white.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
-                <span id="btn-one-tap-label">Iniciar Atención (One-Tap)</span>
+                <span id="btn-one-tap-label">Iniciar Atención</span>
               </button>
 
               <button type="button" class="btn btn-emergency" id="btn-emergency-mode" aria-pressed="false">
@@ -544,7 +548,7 @@
                 <section class="vision-panel" id="vision-panel" hidden aria-labelledby="vision-title" data-support-avoid>
                   <div class="vision-top-bar">
                     <div class="vision-title-group">
-                      <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
+                      <h4 class="vision-title" id="vision-title">Cámara IA (Gestos)</h4>
                       <span class="vision-ai-ready" id="vision-ai-ready" data-ready="loading" role="status" aria-live="polite">Preparando IA…</span>
                     </div>
 
@@ -754,7 +758,7 @@
                     title="Finalizar atención">
                     <img src="../assets/icons/hangup.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary">
                   </button>
-                  <p class="call-controls-note" id="sim-controls-note">Vista demostrativa · No se graba video</p>
+                  <p class="call-controls-note" id="sim-controls-note" role="status" aria-live="polite">Vista demostrativa · No se graba video</p>
                 </div>
               </div>
 
@@ -811,9 +815,9 @@
 
                 <!-- Plantillas rápidas + Dictado de voz simulado -->
                 <div class="quick-templates" id="sim-quick-templates" role="group" aria-label="Plantillas rápidas de respuesta">
-                  <button type="button" class="template-chip" data-template="Confirmo mi DNI: 00000000 y monto S/ 150.00.">Confirmar DNI y monto</button>
-                  <button type="button" class="template-chip" data-template="Por favor, repite en Lengua de Señas Peruana.">Repetir en LSP</button>
-                  <button type="button" class="template-chip" data-template="Necesito constancia impresa de la operación.">Pedir constancia</button>
+                  <button type="button" class="template-chip" data-template-index="0">Confirmar DNI y monto</button>
+                  <button type="button" class="template-chip" data-template-index="1">Repetir en LSP</button>
+                  <button type="button" class="template-chip" data-template-index="2">Pedir constancia</button>
                 </div>
 
                 <form class="chat-form" id="sim-chat-form">
@@ -1165,7 +1169,7 @@
             </button>
             <div class="faq-panel" id="faq-answer-1">
               <p>
-                Toca “Iniciar Atención (One-Tap)”, elige Intérprete LSP, Cámara IA (Gestos) o Texto/Lectura y selecciona el tipo de trámite. No necesitas crear una cuenta ni iniciar sesión.
+                Toca “Iniciar Atención”, elige Intérprete LSP, Cámara IA (Gestos) o Texto/Lectura y selecciona el tipo de trámite. No necesitas crear una cuenta ni iniciar sesión.
               </p>
               <button type="button" class="btn btn-secondary btn-lsp-modal" data-lsp-question="¿Cómo inicio una atención en ventanilla?">
                 <img src="../assets/icons/arrow-primary.svg" alt="" width="24" height="24" class="icon-svg icon-primary">

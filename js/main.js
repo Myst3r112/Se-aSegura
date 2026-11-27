@@ -1,5 +1,6 @@
 /**
  * SeñaSegura · Interactividad modular en Vanilla JS (ES6+)
+ * Depende de `js/qr-iso.js` (`window.SenaSeguraQR`) para la generación QR SVG/PDF local.
  * Cubre las 30 Historias de Usuario Core (accesibilidad global, simulador bimodal,
  * modo emergencia <30s, microcorte, cierre con QR/purga, verificador, FAQ LSP y demo B2G/B2B).
  */
@@ -191,7 +192,6 @@
 
   const OTHER_PROCEDURE_OPTION = 'Otro trámite / Consulta general';
 
-  /* Términos del Glosario Técnico LSP (Figma P10) */
   const GLOSSARY_TERMS = [
     {
       id: 'medida-cautelar',
@@ -231,14 +231,12 @@
     }
   ];
 
-  /* Canales de comunicación del simulador (HU-035) */
   const CHANNEL_INFO = {
     lsp: { badge: 'Intérprete LSP', meta: 'LSP HD', receipt: 'Lengua de Señas Peruana', oneTap: 'Lengua de Señas Peruana' },
     camara: { badge: 'Cámara IA (Gestos)', meta: 'Cámara IA', receipt: 'Cámara IA (Gestos)', oneTap: 'Cámara IA (Gestos)' },
     texto: { badge: 'Texto / Lectura', meta: 'Texto/Lectura', receipt: 'Texto / Lectura', oneTap: 'Texto / Lectura' }
   };
 
-  /* Registro de comprobantes verificables en sesión + ejemplo oficial SEG-84920 */
   const receiptRegistry = new Map([
     [
       'SEG-84920',
@@ -271,7 +269,7 @@
     emergencyActive: false,
     emergencyType: null,
     selectedCrisis: null,
-    turnDirection: 'lsp', // 'lsp' | 'funcionario'
+    turnDirection: 'lsp',
     micMuted: false,
     cameraOff: false,
     cameraAngle: 'Frontal · Intérprete LSP',
@@ -299,7 +297,7 @@
   };
 
   /* =========================================================
-     3. UTILIDADES DE ACCESIBILIDAD Y MODALES
+     3. UTILIDADES DE ACCESIBILIDAD, PRIVACIDAD Y MODALES
      ========================================================= */
   const htmlEl = document.documentElement;
   let lastTriggerElement = null;
@@ -348,13 +346,29 @@
     });
   }
 
+  function purgeTransientInputs() {
+    [
+      'console-private-notes',
+      'sim-chat-input',
+      'edit-field-1',
+      'edit-field-2',
+      'console-procedure-input',
+      'sim-procedure-custom'
+    ].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+  }
+
   function initAccessibilityControls() {
     const contrastBtn = document.getElementById('btn-contrast-toggle');
     const decreaseBtn = document.getElementById('btn-font-decrease');
     const increaseBtn = document.getElementById('btn-font-increase');
     const presetBtns = document.querySelectorAll('.btn-scale-preset, .btn-scale-preset-mobile');
+    const resetBtns = document.querySelectorAll('.btn-a11y-reset');
     const statusText = document.getElementById('a11y-status-text');
     const mobileStatusText = document.getElementById('mobile-a11y-status');
+    const appScaleBadge = document.getElementById('app-font-scale-value');
 
     const SCALES = ['100', '125', '150'];
 
@@ -364,6 +378,7 @@
         : `Alto contraste: No · ${state.fontScale}%`;
       if (statusText) statusText.textContent = label;
       if (mobileStatusText) mobileStatusText.textContent = label;
+      if (appScaleBadge) appScaleBadge.textContent = `${state.fontScale}%`;
     }
 
     function applyContrast(mode) {
@@ -417,17 +432,24 @@
       btn.addEventListener('click', () => applyFontScale(btn.dataset.scale));
     });
 
-    // Restaurar preferencias previas si existen
+    resetBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        applyContrast('normal');
+        applyFontScale('100');
+      });
+    });
+
     try {
       const savedContrast = localStorage.getItem('ss_contrast');
       const savedScale = localStorage.getItem('ss_font_scale');
       if (savedContrast === 'high') applyContrast('high');
       if (savedScale && SCALES.includes(savedScale)) applyFontScale(savedScale);
     } catch (_) {}
+    updateA11yStatus();
   }
 
   /* =========================================================
-     4. MENÚ HAMBURGUESA MÓVIL (<768px)
+     4. MENÚ HAMBURGUESA MÓVIL / ZOOM ALTO
      ========================================================= */
   function initMobileDrawer() {
     const openBtn = document.getElementById('btn-mobile-menu');
@@ -515,9 +537,7 @@
             el.textContent = `20 → ${current} min`;
           }
 
-          if (progress < 1) {
-            requestAnimationFrame(frame);
-          }
+          if (progress < 1) requestAnimationFrame(frame);
         }
         requestAnimationFrame(frame);
       });
@@ -539,7 +559,6 @@
       observer.observe(kpiGrid);
     }
 
-    // Pestañas por sector
     const sectorTabs = document.querySelectorAll('.sector-tab[data-sector-key]');
     const panelTitle = document.getElementById('sector-panel-title');
     const panelSubtitle = document.getElementById('sector-panel-subtitle');
@@ -607,9 +626,7 @@
           ctx.close().catch(() => {});
         }
       }, 450);
-    } catch (_) {
-      // Silencio seguro si el navegador restringe Web Audio
-    }
+    } catch (_) {}
   }
 
   function generate8DigitCode() {
@@ -617,476 +634,224 @@
     return `SEG-${randomPart}`;
   }
 
-  const QR_GF_EXP = new Uint8Array(512);
-  const QR_GF_LOG = new Uint8Array(256);
-  (() => {
-    let val = 1;
-    for (let i = 0; i < 255; i += 1) {
-      QR_GF_EXP[i] = val;
-      QR_GF_LOG[val] = i;
-      val <<= 1;
-      if (val & 0x100) val ^= 0x11d;
-    }
-    for (let i = 255; i < 512; i += 1) {
-      QR_GF_EXP[i] = QR_GF_EXP[i - 255];
-    }
-  })();
-
-  // Códigos de formato ISO/IEC 18004 (ECC Level M = 00, máscaras 0..7 con XOR 0x5412)
-  const QR_FORMAT_M = [0x5412, 0x5125, 0x5e7c, 0x5b4b, 0x45f9, 0x40ce, 0x4f97, 0x4aa0];
-
-  function qrGfMul(a, b) {
-    return a === 0 || b === 0 ? 0 : QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]];
-  }
-
-  function qrRsRemainder(data, ecCount) {
-    let gen = [1];
-    for (let i = 0; i < ecCount; i += 1) {
-      const nxt = new Array(gen.length + 1).fill(0);
-      const root = QR_GF_EXP[i];
-      for (let j = 0; j < gen.length; j += 1) {
-        nxt[j] ^= gen[j];
-        nxt[j + 1] ^= qrGfMul(gen[j], root);
-      }
-      gen = nxt;
-    }
-    const msg = data.concat(new Array(ecCount).fill(0));
-    for (let i = 0; i < data.length; i += 1) {
-      const coef = msg[i];
-      if (coef !== 0) {
-        for (let j = 0; j < gen.length; j += 1) {
-          msg[i + j] ^= qrGfMul(gen[j], coef);
-        }
-      }
-    }
-    return msg.slice(data.length);
-  }
-
-  const QR_VERSIONS_M = [
-    { ver: 1, size: 21, maxBytes: 14, totalData: 16, ecPerBlock: 10, blocks: [16], align: [], rem: 0 },
-    { ver: 2, size: 25, maxBytes: 26, totalData: 28, ecPerBlock: 16, blocks: [28], align: [6, 18], rem: 7 },
-    { ver: 3, size: 29, maxBytes: 42, totalData: 44, ecPerBlock: 26, blocks: [44], align: [6, 22], rem: 7 },
-    { ver: 4, size: 33, maxBytes: 62, totalData: 64, ecPerBlock: 18, blocks: [32, 32], align: [6, 26], rem: 7 },
-    { ver: 5, size: 37, maxBytes: 84, totalData: 86, ecPerBlock: 24, blocks: [43, 43], align: [6, 30], rem: 7 },
-    { ver: 6, size: 41, maxBytes: 106, totalData: 108, ecPerBlock: 16, blocks: [27, 27, 27, 27], align: [6, 34], rem: 7 }
-  ];
-
-  function encodeUtf8Bytes(text) {
-    if (typeof TextEncoder === 'function') {
-      return Array.from(new TextEncoder().encode(String(text)));
-    }
-    return Array.from(String(text)).map((ch) => ch.charCodeAt(0) & 0xff);
-  }
-
-  /**
-   * Construye la URL de verificación directa para el QR del comprobante.
-   * Garantiza compatibilidad <=106 bytes (QR V1–V6 Nivel M).
-   */
-  function buildReceiptVerifyUrl(code, sector = '', procedure = '') {
-    const querySuffix = `?verificar=${encodeURIComponent(code)}#marco-legal`;
-    const detailSuffix = `?verificar=${encodeURIComponent(code)}&s=${encodeURIComponent(sector || '')}&m=${encodeURIComponent(procedure || '')}#marco-legal`;
-    try {
-      if (sector || procedure) {
-        const detailedUrl = new URL(`index.html${detailSuffix}`, window.location.href).href;
-        if (encodeUtf8Bytes(detailedUrl).length <= 106) return detailedUrl;
-      }
-      const fullUrl = new URL(`index.html${querySuffix}`, window.location.href).href;
-      if (encodeUtf8Bytes(fullUrl).length <= 106) return fullUrl;
-    } catch (_) {
-      /* URL relativa de respaldo en contextos no estándar */
-    }
-    const shortUrl = `pages/index.html${querySuffix}`;
-    return encodeUtf8Bytes(shortUrl).length <= 106 ? shortUrl : code;
-  }
-
-  /**
-   * Codifica texto o URL (<=106 bytes UTF-8) en matriz QR ISO/IEC 18004 (V1–V6 Nivel M).
-   * Cero dependencias externas y cero errores en redes offline o restringidas.
-   */
-  function encodeIsoQrMatrix(text) {
-    const raw = encodeUtf8Bytes(text);
-    const spec = QR_VERSIONS_M.find((v) => raw.length <= v.maxBytes);
-    if (!spec) return null;
-
-    const { ver, size, totalData: dataLen, ecPerBlock: ecLen, blocks, align, rem } = spec;
-
-    const bits = [];
-    const pushBits = (val, n) => {
-      for (let b = n - 1; b >= 0; b -= 1) bits.push((val >> b) & 1);
-    };
-    pushBits(0b0100, 4); // Modo byte
-    pushBits(raw.length, 8);
-    raw.forEach((b) => pushBits(b, 8));
-    pushBits(0, Math.min(4, dataLen * 8 - bits.length));
-    while (bits.length % 8 !== 0) bits.push(0);
-
-    const codewords = [];
-    for (let i = 0; i < bits.length; i += 8) {
-      let byte = 0;
-      for (let b = 0; b < 8; b += 1) byte = (byte << 1) | bits[i + b];
-      codewords.push(byte);
-    }
-    const pads = [0xec, 0x11];
-    let padIdx = 0;
-    while (codewords.length < dataLen) {
-      codewords.push(pads[padIdx & 1]);
-      padIdx += 1;
-    }
-
-    // División en bloques y entrelazado estándar ISO/IEC 18004 (V1–V6)
-    let offset = 0;
-    const dataBlocks = blocks.map((count) => {
-      const slice = codewords.slice(offset, offset + count);
-      offset += count;
-      return slice;
-    });
-    const ecBlocks = dataBlocks.map((blk) => qrRsRemainder(blk, ecLen));
-    const full = [];
-    const maxDataLen = Math.max(...blocks);
-    for (let i = 0; i < maxDataLen; i += 1) {
-      dataBlocks.forEach((blk) => {
-        if (i < blk.length) full.push(blk[i]);
-      });
-    }
-    for (let i = 0; i < ecLen; i += 1) {
-      ecBlocks.forEach((ec) => {
-        if (i < ec.length) full.push(ec[i]);
-      });
-    }
-
-    const stream = [];
-    full.forEach((byte) => {
-      for (let b = 7; b >= 0; b -= 1) stream.push((byte >> b) & 1);
-    });
-    const totalDataBits = full.length * 8 + rem;
-    while (stream.length < totalDataBits) stream.push(0);
-
-    const base = Array.from({ length: size }, () => new Uint8Array(size));
-    const func = Array.from({ length: size }, () => new Uint8Array(size));
-    const setFn = (r, c, v) => {
-      if (r >= 0 && r < size && c >= 0 && c < size) {
-        base[r][c] = v ? 1 : 0;
-        func[r][c] = 1;
-      }
-    };
-
-    const drawFinder = (r0, c0) => {
-      for (let dr = -1; dr <= 7; dr += 1) {
-        for (let dc = -1; dc <= 7; dc += 1) {
-          const dark =
-            dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6 &&
-            (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4));
-          setFn(r0 + dr, c0 + dc, dark);
-        }
-      }
-    };
-    drawFinder(0, 0);
-    drawFinder(0, size - 7);
-    drawFinder(size - 7, 0);
-
-    for (let i = 0; i < align.length; i += 1) {
-      for (let j = 0; j < align.length; j += 1) {
-        const ar = align[i];
-        const ac = align[j];
-        const inTopLeft = ar <= 8 && ac <= 8;
-        const inTopRight = ar <= 8 && ac >= size - 9;
-        const inBottomLeft = ar >= size - 9 && ac <= 8;
-        if (inTopLeft || inTopRight || inBottomLeft) continue;
-        for (let dr = -2; dr <= 2; dr += 1) {
-          for (let dc = -2; dc <= 2; dc += 1) {
-            setFn(ar + dr, ac + dc, Math.abs(dr) === 2 || Math.abs(dc) === 2 || (dr === 0 && dc === 0));
-          }
-        }
-      }
-    }
-
-    for (let i = 8; i < size - 8; i += 1) {
-      setFn(6, i, i % 2 === 0);
-      setFn(i, 6, i % 2 === 0);
-    }
-
-    for (let i = 0; i <= 8; i += 1) {
-      if (!func[8][i]) setFn(8, i, 0);
-      if (!func[i][8]) setFn(i, 8, 0);
-    }
-    for (let i = size - 8; i < size; i += 1) {
-      if (!func[8][i]) setFn(8, i, 0);
-    }
-    for (let i = size - 7; i < size; i += 1) {
-      if (!func[i][8]) setFn(i, 8, 0);
-    }
-    setFn(4 * ver + 9, 8, 1); // módulo oscuro fijo
-
-    // Ubica flujo de bits en zigzag de abajo-derecha hacia arriba-izquierda
-    let bi = 0;
-    let up = true;
-    for (let col = size - 1; col > 0; col -= 2) {
-      if (col === 6) col -= 1;
-      for (let step = 0; step < size; step += 1) {
-        const r = up ? size - 1 - step : step;
-        for (let off = 0; off < 2; off += 1) {
-          const c = col - off;
-          if (!func[r][c]) {
-            base[r][c] = stream[bi] || 0;
-            bi += 1;
-          }
-        }
-      }
-      up = !up;
-    }
-
-    const maskPredicates = [
-      (r, c) => (r + c) % 2 === 0,
-      (r) => r % 2 === 0,
-      (_, c) => c % 3 === 0,
-      (r, c) => (r + c) % 3 === 0,
-      (r, c) => (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0,
-      (r, c) => ((r * c) % 2) + ((r * c) % 3) === 0,
-      (r, c) => (((r * c) % 2) + ((r * c) % 3)) % 2 === 0,
-      (r, c) => (((r + c) % 2) + ((r * c) % 3)) % 2 === 0
-    ];
-
-    const writeFormat = (grid, fmtBits) => {
-      const copy1 = [
-        [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
-        [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
-      ];
-      for (let i = 0; i < 15; i += 1) {
-        const bit = (fmtBits >> (14 - i)) & 1;
-        const [r1, c1] = copy1[i];
-        grid[r1][c1] = bit;
-        if (i < 7) {
-          grid[size - 1 - i][8] = bit;
-        } else {
-          grid[8][size - 15 + i] = bit;
-        }
-      }
-    };
-
-    const penaltyScore = (grid) => {
-      let score = 0;
-      let darkCount = 0;
-      for (let r = 0; r < size; r += 1) {
-        let rowRun = 1;
-        let colRun = 1;
-        for (let c = 0; c < size; c += 1) {
-          if (grid[r][c]) darkCount += 1;
-          if (c > 0) {
-            if (grid[r][c] === grid[r][c - 1]) rowRun += 1;
-            else {
-              if (rowRun >= 5) score += rowRun - 2;
-              rowRun = 1;
-            }
-            if (grid[c][r] === grid[c - 1][r]) colRun += 1;
-            else {
-              if (colRun >= 5) score += colRun - 2;
-              colRun = 1;
-            }
-          }
-          if (r > 0 && c > 0 && grid[r][c] === grid[r - 1][c] && grid[r][c] === grid[r][c - 1] && grid[r][c] === grid[r - 1][c - 1]) {
-            score += 3;
-          }
-        }
-        if (rowRun >= 5) score += rowRun - 2;
-        if (colRun >= 5) score += colRun - 2;
-      }
-      const darkPct = (darkCount * 100) / (size * size);
-      score += Math.floor(Math.abs(darkPct - 50) / 5) * 10;
-      return score;
-    };
-
-    let bestGrid = null;
-    let bestScore = Infinity;
-    for (let m = 0; m < 8; m += 1) {
-      const pred = maskPredicates[m];
-      const masked = base.map((row, r) => row.map((v, c) => (func[r][c] ? v : v ^ (pred(r, c) ? 1 : 0))));
-      writeFormat(masked, QR_FORMAT_M[m]);
-      const sc = penaltyScore(masked);
-      if (sc < bestScore) {
-        bestScore = sc;
-        bestGrid = masked;
-      }
-    }
-    return bestGrid;
-  }
-
-  /**
-   * Genera un código QR ISO/IEC 18004 escaneable en nodo SVG puro (DOM explícito).
-   */
-  function buildDynamicQrSvg(payload, labelCode = payload) {
-    const svgNs = 'http://www.w3.org/2000/svg';
-    const matrix = encodeIsoQrMatrix(payload);
-    const size = matrix ? matrix.length : 21;
-    const quietZone = 2;
-    const total = size + quietZone * 2;
-
-    const svg = document.createElementNS(svgNs, 'svg');
-    svg.setAttribute('width', '148');
-    svg.setAttribute('height', '148');
-    svg.setAttribute('viewBox', `0 0 ${total} ${total}`);
-    svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', `Código QR verificable ${labelCode}`);
-
-    const bg = document.createElementNS(svgNs, 'rect');
-    bg.setAttribute('width', String(total));
-    bg.setAttribute('height', String(total));
-    bg.setAttribute('fill', '#FFFFFF');
-    svg.appendChild(bg);
-
-    let pathData = '';
-    for (let r = 0; r < size; r += 1) {
-      for (let c = 0; c < size; c += 1) {
-        if (matrix && matrix[r][c]) {
-          pathData += `M${c + quietZone},${r + quietZone}h1v1h-1z`;
-        }
-      }
-    }
-
-    const path = document.createElementNS(svgNs, 'path');
-    path.setAttribute('d', pathData);
-    path.setAttribute('fill', '#0A2540');
-    svg.appendChild(path);
-    return svg;
+  function placeholderForField(field) {
+    if (!field) return '';
+    const name = (field.shortLabel || field.label || '').toLowerCase();
+    if (name.includes('dni')) return 'Ej. 00000000';
+    if (name.includes('monto') || field.isAmount) return 'Ej. 150.00';
+    if (name.includes('referencia')) return 'Ej. Parte N.° 2026-041';
+    if (name.includes('área')) return 'Ej. Triaje · Prioridad II';
+    if (name.includes('expediente')) return 'Ej. 00412-2026';
+    return '';
   }
 
   function initSimulator() {
+    const $ = (id) => document.getElementById(id);
     const viewTabs = document.querySelectorAll('.sim-view-tab[data-sim-view]');
-    const viewVentanilla = document.getElementById('sim-view-ventanilla');
-    const viewConsola = document.getElementById('sim-view-consola');
-    const btnConsoleBack = document.getElementById('btn-console-back');
-    const btnAppConsole = document.getElementById('btn-app-console');
-    const btnChangeSector = document.getElementById('btn-change-sector');
-    const appWelcome = document.getElementById('app-welcome');
-    const appOperate = document.getElementById('app-operate');
-    const btnWelcomeEmergency = document.getElementById('btn-welcome-emergency');
+    const viewVentanilla = $('sim-view-ventanilla');
+    const viewConsola = $('sim-view-consola');
+    const btnConsoleBack = $('btn-console-back');
+    const btnAppConsole = $('btn-app-console');
+    const btnChangeSector = $('btn-change-sector');
+    const appWelcome = $('app-welcome');
+    const appOperate = $('app-operate');
+    const btnWelcomeEmergency = $('btn-welcome-emergency');
 
-    const stepsGuide = document.getElementById('sim-steps-guide');
+    const stepsGuide = $('sim-steps-guide');
     const stepItems = stepsGuide ? stepsGuide.querySelectorAll('.sim-step-item[data-sim-step]') : [];
 
-    const sessionMeta = document.getElementById('sim-session-meta');
-    const btnOneTap = document.getElementById('btn-one-tap-start');
-    const btnOneTapLabel = document.getElementById('btn-one-tap-label');
-    const idleOneTapText = (btnOneTapLabel && btnOneTapLabel.textContent.trim()) || 'Iniciar Atención (One-Tap)';
-    const btnEmergency = document.getElementById('btn-emergency-mode');
-    const btnExitEmergency = document.getElementById('btn-exit-emergency');
-    const emergencyPanel = document.getElementById('emergency-panel');
-    const emergencyQueueTimer = document.getElementById('emergency-queue-timer');
+    const sessionMeta = $('sim-session-meta');
+    const btnOneTap = $('btn-one-tap-start');
+    const btnOneTapLabel = $('btn-one-tap-label');
+    const idleOneTapText = (btnOneTapLabel && btnOneTapLabel.textContent.trim()) || 'Iniciar Atención';
+    const btnEmergency = $('btn-emergency-mode');
+    const btnExitEmergency = $('btn-exit-emergency');
+    const emergencyPanel = $('emergency-panel');
+    const emergencyQueueTimer = $('emergency-queue-timer');
     const emergencyTypeBtns = document.querySelectorAll('.emergency-type-btn[data-emergency-type]');
     const crisisCards = document.querySelectorAll('.crisis-card[data-crisis]');
 
     const channelChips = document.querySelectorAll('.pref-chip[data-channel]');
     const sectorChips = document.querySelectorAll('.pref-chip[data-sim-sector]');
-    const simSectorRow = document.getElementById('sim-sector-row');
-    const procedureSelect = document.getElementById('sim-procedure-select');
-    const procedureCustomWrap = document.getElementById('sim-procedure-custom-wrap');
-    const procedureCustomInput = document.getElementById('sim-procedure-custom');
-    const simMainGrid = document.getElementById('sim-main-grid');
+    const simSectorRow = $('sim-sector-row');
+    const procedureSelect = $('sim-procedure-select');
+    const procedureCustomWrap = $('sim-procedure-custom-wrap');
+    const procedureCustomInput = $('sim-procedure-custom');
+    const simMainGrid = $('sim-main-grid');
 
-    const textModeCard = document.getElementById('sim-textmode-card');
+    const textModeCard = $('sim-textmode-card');
     const textSwitchBtns = document.querySelectorAll('[data-switch-channel]');
-    const videoStage = document.getElementById('sim-video-stage');
-    const videoBadgesRow = document.getElementById('sim-video-badges');
-    const callControls = document.getElementById('sim-call-controls');
-    const connectingOverlay = document.getElementById('sim-connecting-overlay');
-    const connectingCountdown = document.getElementById('sim-connecting-countdown');
-    const btnCancelConnect = document.getElementById('btn-cancel-connect');
-    const btnEscalateConnect = document.getElementById('btn-escalate-connect');
-    const visionPanel = document.getElementById('vision-panel');
-    const channelBadge = document.getElementById('sim-channel-badge');
-    const channelBadgeText = document.getElementById('sim-channel-badge-text');
-    const cameraOffOverlay = document.getElementById('sim-camera-off-overlay');
-    const cameraAngleLabel = document.getElementById('sim-camera-angle');
-    const liveBadge = document.getElementById('sim-live-badge');
-    const interpreterCaption = document.getElementById('sim-interpreter-caption');
-    const fullscreenCaption = document.getElementById('fullscreen-interpreter-caption');
+    const videoStage = $('sim-video-stage');
+    const videoBadgesRow = $('sim-video-badges');
+    const callControls = $('sim-call-controls');
+    const controlsNote = $('sim-controls-note');
+    const connectingOverlay = $('sim-connecting-overlay');
+    const connectingCountdown = $('sim-connecting-countdown');
+    const btnCancelConnect = $('btn-cancel-connect');
+    const btnEscalateConnect = $('btn-escalate-connect');
+    const visionPanel = $('vision-panel');
+    const channelBadge = $('sim-channel-badge');
+    const channelBadgeText = $('sim-channel-badge-text');
+    const cameraOffOverlay = $('sim-camera-off-overlay');
+    const cameraAngleLabel = $('sim-camera-angle');
+    const liveBadge = $('sim-live-badge');
+    const interpreterCaption = $('sim-interpreter-caption');
+    const fullscreenCaption = $('fullscreen-interpreter-caption');
 
-    const btnToggleTurn = document.getElementById('btn-toggle-turn');
-    const simTurnLabel = document.getElementById('sim-turn-label');
-    const consoleTurnStatus = document.getElementById('console-turn-status');
-    const fullscreenTurnLabel = document.getElementById('fullscreen-turn-label');
-    const btnConsoleToLsp = document.getElementById('btn-console-to-lsp');
-    const btnConsoleToEs = document.getElementById('btn-console-to-es');
+    const btnToggleTurn = $('btn-toggle-turn');
+    const simTurnLabel = $('sim-turn-label');
+    const consoleTurnStatus = $('console-turn-status');
+    const fullscreenTurnLabel = $('fullscreen-turn-label');
+    const btnConsoleToLsp = $('btn-console-to-lsp');
+    const btnConsoleToEs = $('btn-console-to-es');
 
-    const btnMic = document.getElementById('btn-call-mic');
-    const btnCamera = document.getElementById('btn-call-camera');
-    const btnSwitch = document.getElementById('btn-call-switch');
-    const btnFullscreen = document.getElementById('btn-call-fullscreen');
-    const btnHangup = document.getElementById('btn-call-hangup');
-    const btnFinishSession = document.getElementById('btn-finish-session');
+    const btnMic = $('btn-call-mic');
+    const btnCamera = $('btn-call-camera');
+    const btnSwitch = $('btn-call-switch');
+    const btnFullscreen = $('btn-call-fullscreen');
+    const btnHangup = $('btn-call-hangup');
+    const btnFinishSession = $('btn-finish-session');
 
-    const btnOutage = document.getElementById('btn-simulate-outage');
-    const contingencyBanner = document.getElementById('contingency-banner');
-    const contingencyMsg = document.getElementById('contingency-message');
-    const simNetworkStatus = document.getElementById('sim-network-status');
-    const simNetworkLabel = document.getElementById('sim-network-label');
-    const consoleNetworkLabel = document.getElementById('console-network-label');
-    const headerNetworkPill = document.getElementById('header-network-pill');
+    const btnOutage = $('btn-simulate-outage');
+    const contingencyBanner = $('contingency-banner');
+    const contingencyMsg = $('contingency-message');
+    const simNetworkStatus = $('sim-network-status');
+    const simNetworkLabel = $('sim-network-label');
+    const consoleNetworkLabel = $('console-network-label');
+    const headerNetworkPill = $('header-network-pill');
 
-    const chatSectorLabel = document.getElementById('sim-chat-sector-label');
-    const consoleSectorLabel = document.getElementById('console-sector-label');
-    const sensitiveCard = document.getElementById('sim-sensitive-card');
-    const chatDisclaimer = document.getElementById('sim-chat-disclaimer');
-    const sensitiveDataBox = document.getElementById('sim-sensitive-data');
-    const consoleDataBox = document.getElementById('console-data-block');
-    const consoleStaffEditWrap = document.getElementById('console-staff-edit-wrap');
-    const consolePriorityVal = document.getElementById('console-priority-value');
-    const consoleProcedureVal = document.getElementById('console-procedure-value');
-    const btnEditProcedure = document.getElementById('btn-edit-procedure');
-    const consoleProcedureEditForm = document.getElementById('console-procedure-edit-form');
-    const consoleProcedureInput = document.getElementById('console-procedure-input');
-    const btnCancelProcedure = document.getElementById('btn-cancel-procedure');
-    const chatMessagesBox = document.getElementById('sim-chat-messages');
-    const consoleChatFeed = document.getElementById('console-chat-feed');
-    const quickTemplatesBox = document.getElementById('sim-quick-templates');
-    const btnCopyData = document.getElementById('btn-copy-data');
-    const btnEditDni = document.getElementById('btn-edit-dni');
-    const btnEditAmount = document.getElementById('btn-edit-amount');
-    const sensitiveEditForm = document.getElementById('sensitive-edit-form');
-    const editLabel1 = document.getElementById('edit-label-1');
-    const editField1 = document.getElementById('edit-field-1');
-    const sensitiveEditError = document.getElementById('sensitive-edit-error');
-    const btnCancelEditData = document.getElementById('btn-cancel-edit-data');
-    const consoleStaffEditForm = document.getElementById('console-staff-edit-form');
-    const editLabel2 = document.getElementById('edit-label-2');
-    const editField2 = document.getElementById('edit-field-2');
-    const consoleStaffEditError = document.getElementById('console-staff-edit-error');
-    const btnCancelStaffData = document.getElementById('btn-cancel-staff-data');
-    const chatForm = document.getElementById('sim-chat-form');
-    const chatInput = document.getElementById('sim-chat-input');
-    const btnVoiceDictation = document.getElementById('btn-voice-dictation');
+    const chatSectorLabel = $('sim-chat-sector-label');
+    const consoleSectorLabel = $('console-sector-label');
+    const sensitiveCard = $('sim-sensitive-card');
+    const chatDisclaimer = $('sim-chat-disclaimer');
+    const sensitiveDataBox = $('sim-sensitive-data');
+    const consoleDataBox = $('console-data-block');
+    const consoleStaffEditWrap = $('console-staff-edit-wrap');
+    const consolePriorityVal = $('console-priority-value');
+    const consoleProcedureVal = $('console-procedure-value');
+    const btnEditProcedure = $('btn-edit-procedure');
+    const consoleProcedureEditForm = $('console-procedure-edit-form');
+    const consoleProcedureInput = $('console-procedure-input');
+    const btnCancelProcedure = $('btn-cancel-procedure');
+    const chatMessagesBox = $('sim-chat-messages');
+    const consoleChatFeed = $('console-chat-feed');
+    const quickTemplatesBox = $('sim-quick-templates');
+    const btnCopyData = $('btn-copy-data');
+    const btnEditDni = $('btn-edit-dni');
+    const btnEditAmount = $('btn-edit-amount');
+    const sensitiveEditForm = $('sensitive-edit-form');
+    const editLabel1 = $('edit-label-1');
+    const editField1 = $('edit-field-1');
+    const sensitiveEditError = $('sensitive-edit-error');
+    const btnCancelEditData = $('btn-cancel-edit-data');
+    const consoleStaffEditForm = $('console-staff-edit-form');
+    const editLabel2 = $('edit-label-2');
+    const editField2 = $('edit-field-2');
+    const consoleStaffEditError = $('console-staff-edit-error');
+    const btnCancelStaffData = $('btn-cancel-staff-data');
+    const chatForm = $('sim-chat-form');
+    const chatInput = $('sim-chat-input');
+    const btnVoiceDictation = $('btn-voice-dictation');
 
-    // Consola del Intérprete (P8, P9, P10)
     const interpreterStatusChips = document.querySelectorAll('.console-status-chip[data-interpreter-status]');
-    const consoleInterpreterState = document.getElementById('console-interpreter-state');
-    const btnConsoleSimAlert = document.getElementById('btn-console-sim-alert');
-    const consoleCriticalBanner = document.getElementById('console-critical-banner');
-    const consoleCriticalTitle = document.getElementById('console-critical-title');
-    const consoleCriticalSub = document.getElementById('console-critical-sub');
-    const btnAcceptCritical = document.getElementById('btn-accept-critical-emergency');
-    const btnDismissCriticalSim = document.getElementById('btn-dismiss-critical-sim');
-    const consolePipBox = document.getElementById('console-pip-box');
-    const consolePipPreview = document.getElementById('console-pip-preview');
-    const btnTogglePip = document.getElementById('btn-toggle-pip');
-    const btnConsoleSupport = document.getElementById('btn-console-support');
-    const consoleSupportNotice = document.getElementById('console-support-notice');
-    const consolePrivateNotes = document.getElementById('console-private-notes');
-    const btnOpenGlossary = document.getElementById('btn-open-glossary');
+    const consoleInterpreterState = $('console-interpreter-state');
+    const btnConsoleSimAlert = $('btn-console-sim-alert');
+    const consoleCriticalBanner = $('console-critical-banner');
+    const consoleCriticalTitle = $('console-critical-title');
+    const consoleCriticalSub = $('console-critical-sub');
+    const btnAcceptCritical = $('btn-accept-critical-emergency');
+    const btnDismissCriticalSim = $('btn-dismiss-critical-sim');
+    const consolePipBox = $('console-pip-box');
+    const consolePipPreview = $('console-pip-preview');
+    const btnTogglePip = $('btn-toggle-pip');
+    const btnConsoleSupport = $('btn-console-support');
+    const consoleSupportNotice = $('console-support-notice');
+    const consolePrivateNotes = $('console-private-notes');
+    const btnOpenGlossary = $('btn-open-glossary');
 
-    // Glosario LSP (P10)
-    const glossarySearch = document.getElementById('glossary-search');
+    const glossarySearch = $('glossary-search');
     const glossaryFilterBtns = document.querySelectorAll('.glossary-filter-btn[data-glossary-filter]');
-    const glossaryList = document.getElementById('glossary-list');
-    const glossaryEmpty = document.getElementById('glossary-empty');
+    const glossaryList = $('glossary-list');
+    const glossaryEmpty = $('glossary-empty');
 
-    // Calificación de cierre (P6)
     const closureRatingBtns = document.querySelectorAll('.closure-rating-btn[data-rating]');
-    const closureRatingFeedback = document.getElementById('closure-rating-feedback');
+    const closureRatingFeedback = $('closure-rating-feedback');
+    const btnDownloadReceipt = $('btn-download-receipt');
+    const btnPrintTicket = $('btn-print-ticket');
+    const btnCopyClosureCode = $('btn-copy-closure-code');
+    const btnPreviewPdf = $('btn-preview-pdf');
+    const btnPdfDownload = $('btn-pdf-download');
+    const btnPdfPrint = $('btn-pdf-print');
+    const btnClosePdfPreview = $('btn-close-pdf-preview');
 
-    let emergencyInterval = null;
-    let connectingTimer = null;
-    let connectingStepTimer = null;
-    let dictTimer = null;
+    const timers = {
+      emergencyInterval: null,
+      connectingTimer: null,
+      connectingStepTimer: null,
+      dictTimer: null,
+      outageTimer1: null,
+      outageTimer2: null,
+      copyDataTimer: null,
+      copyCodeTimer: null,
+      chatReplyTimer: null,
+      dniFocusTimer: null,
+      staffFocusTimer: null
+    };
     let chatEpoch = 0;
+
+    function stopDictation() {
+      if (timers.dictTimer) {
+        clearInterval(timers.dictTimer);
+        timers.dictTimer = null;
+      }
+      state.dictating = false;
+      if (btnVoiceDictation) {
+        btnVoiceDictation.setAttribute('aria-pressed', 'false');
+        const btnLabel = btnVoiceDictation.querySelector('span');
+        if (btnLabel) btnLabel.textContent = 'Dictado de voz';
+      }
+    }
+
+    function restoreNetworkIndicators() {
+      state.outageActive = false;
+      if (btnOutage) btnOutage.disabled = false;
+      if (simNetworkStatus) simNetworkStatus.classList.remove('is-offline');
+      if (simNetworkLabel) simNetworkLabel.textContent = 'Red Operativa';
+      if (consoleNetworkLabel) consoleNetworkLabel.textContent = 'Red Operativa';
+      if (headerNetworkPill) {
+        headerNetworkPill.classList.remove('is-offline');
+        const span = headerNetworkPill.querySelector('span');
+        if (span) span.textContent = 'Red Operativa';
+      }
+      if (contingencyBanner) contingencyBanner.hidden = true;
+    }
+
+    function clearAllSessionTimers() {
+      if (timers.emergencyInterval) {
+        clearInterval(timers.emergencyInterval);
+        timers.emergencyInterval = null;
+      }
+      [
+        'connectingTimer',
+        'connectingStepTimer',
+        'outageTimer1',
+        'outageTimer2',
+        'copyDataTimer',
+        'copyCodeTimer',
+        'chatReplyTimer',
+        'dniFocusTimer',
+        'staffFocusTimer'
+      ].forEach((key) => {
+        if (timers[key]) {
+          clearTimeout(timers[key]);
+          timers[key] = null;
+        }
+      });
+      stopDictation();
+      if (btnCopyData) btnCopyData.textContent = 'Copiar datos';
+      if (btnCopyClosureCode) btnCopyClosureCode.textContent = 'Copiar código';
+      if (state.outageActive) restoreNetworkIndicators();
+    }
 
     function enterOperateScreen({ focusTarget = true } = {}) {
       if (appWelcome) appWelcome.hidden = true;
@@ -1115,43 +880,6 @@
         btnAppConsole.setAttribute('aria-pressed', String(!isVentanilla));
         btnAppConsole.textContent = isVentanilla ? 'Consola Intérprete' : 'Volver a Ventanilla';
       }
-    }
-
-    viewTabs.forEach((tab) => {
-      tab.addEventListener('click', () => switchSimulatorView(tab.dataset.simView));
-    });
-    bindTablistArrows(viewTabs, (tab) => switchSimulatorView(tab.dataset.simView));
-
-    if (btnAppConsole) {
-      btnAppConsole.addEventListener('click', () => {
-        switchSimulatorView(state.simView === 'consola' ? 'ventanilla' : 'consola');
-      });
-    }
-
-    if (btnConsoleBack) {
-      btnConsoleBack.addEventListener('click', () => switchSimulatorView('ventanilla'));
-    }
-
-    if (btnChangeSector) {
-      btnChangeSector.addEventListener('click', () => {
-        chatEpoch += 1;
-        stopDictation();
-        if (state.connecting) cancelConnecting();
-        state.sessionActive = false;
-        if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
-        closeSensitiveEditForm(false);
-        switchSimulatorView('ventanilla');
-        document.dispatchEvent(new CustomEvent('senasegura:purge'));
-        updateOneTapButton();
-        updateLiveBadge();
-        updateStepsGuide();
-        updateSessionMeta();
-        enterWelcomeScreen();
-        const activeSectorBtn = appWelcome
-          ? appWelcome.querySelector('.pref-chip[data-sim-sector].is-active') || btnOneTap
-          : btnOneTap;
-        if (activeSectorBtn) activeSectorBtn.focus();
-      });
     }
 
     function renderChat() {
@@ -1244,30 +972,6 @@
       }
     }
 
-    function scrollToActiveChannel(focusInput = false) {
-      if (appOperate) {
-        if (focusInput && state.channel === 'camara') {
-          const btnVisionStart = document.getElementById('btn-vision-start');
-          if (btnVisionStart && !btnVisionStart.disabled) btnVisionStart.focus({ preventScroll: true });
-        } else if (focusInput && state.channel === 'texto' && chatInput) {
-          chatInput.focus({ preventScroll: true });
-        }
-        return;
-      }
-      if (state.channel === 'camara') {
-        if (visionPanel) visionPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        if (focusInput) {
-          const btnVisionStart = document.getElementById('btn-vision-start');
-          if (btnVisionStart && !btnVisionStart.disabled) btnVisionStart.focus({ preventScroll: true });
-        }
-      } else if (state.channel === 'texto') {
-        if (textModeCard) textModeCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        if (focusInput && chatInput) chatInput.focus({ preventScroll: true });
-      } else if (videoStage) {
-        videoStage.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }
-
     function updateLiveBadge() {
       if (!liveBadge) return;
       liveBadge.classList.remove('is-emergency', 'is-ready', 'is-connecting');
@@ -1304,30 +1008,68 @@
       updateInterpreterCaption();
     }
 
-    function getEffectiveSector() {
-      if (state.channel === 'camara' && !state.emergencyActive) {
-        return 'Atención general';
+    function syncMicControlsUI() {
+      if (btnMic) {
+        btnMic.setAttribute('aria-pressed', String(state.micMuted));
+        if (state.micMuted) btnMic.setAttribute('data-muted', 'true');
+        else btnMic.removeAttribute('data-muted');
+        btnMic.title = state.micMuted ? 'Micrófono silenciado' : 'Micrófono activo';
       }
+      if (controlsNote) {
+        controlsNote.textContent = state.micMuted
+          ? 'Micrófono silenciado · Audio pausado'
+          : 'Vista demostrativa · No se graba video';
+        controlsNote.classList.toggle('is-muted', state.micMuted);
+      }
+    }
+
+    function getEffectiveSector() {
+      if (state.channel === 'camara' && !state.emergencyActive) return 'Atención general';
       return state.sector;
     }
 
     function getEffectiveProcedure() {
-      if (state.consoleProcedureOverride) {
-        return state.consoleProcedureOverride;
-      }
+      if (state.consoleProcedureOverride) return state.consoleProcedureOverride;
       if (state.emergencyActive) {
         return (
           [state.emergencyType, state.selectedCrisis].filter(Boolean).join(' · ') ||
           'Atención prioritaria de emergencia (<30 s)'
         );
       }
-      if (state.channel === 'camara') {
-        return 'Comunicación libre LSP';
-      }
-      if (state.procedure === OTHER_PROCEDURE_OPTION) {
-        return state.customProcedure.trim() || 'Consulta general';
-      }
+      if (state.channel === 'camara') return 'Comunicación libre LSP';
+      if (state.procedure === OTHER_PROCEDURE_OPTION) return state.customProcedure.trim() || 'Consulta general';
       return state.procedure;
+    }
+
+    function closeCitizenDniForm(restoreFocus = false) {
+      if (!sensitiveEditForm) return;
+      sensitiveEditForm.hidden = true;
+      if (sensitiveEditError) {
+        sensitiveEditError.hidden = true;
+        sensitiveEditError.textContent = '';
+      }
+      if (btnEditDni) {
+        btnEditDni.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) btnEditDni.focus();
+      }
+    }
+
+    function closeConsoleStaffForm(restoreFocus = false) {
+      if (!consoleStaffEditForm) return;
+      consoleStaffEditForm.hidden = true;
+      if (consoleStaffEditError) {
+        consoleStaffEditError.hidden = true;
+        consoleStaffEditError.textContent = '';
+      }
+      if (btnEditAmount) {
+        btnEditAmount.setAttribute('aria-expanded', 'false');
+        if (restoreFocus) btnEditAmount.focus();
+      }
+    }
+
+    function closeSensitiveEditForm(restoreFocus = false) {
+      closeCitizenDniForm(restoreFocus);
+      closeConsoleStaffForm(false);
     }
 
     function closeConsoleProcedureForm(restoreFocus = false) {
@@ -1339,15 +1081,26 @@
       }
     }
 
+    function updateSessionMeta() {
+      if (!sessionMeta) return;
+      const channelLabel = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).meta;
+      const statusLabel = state.emergencyActive
+        ? 'EMERGENCIA PRIORITARIA (<30 s)'
+        : state.connecting
+          ? 'Conectando intérprete LSP (<30 s)…'
+          : state.sessionActive
+            ? 'Atención en curso'
+            : 'Sesión lista para iniciar';
+      sessionMeta.textContent = `Sin login · ${statusLabel} · ${getEffectiveSector()} (${channelLabel})`;
+    }
+
     function syncChannelContextUI() {
       const isCamera = state.channel === 'camara' && !state.emergencyActive;
       if (simMainGrid) {
         simMainGrid.setAttribute('data-active-channel', state.channel);
         if (!isCamera) simMainGrid.classList.remove('is-vision-expanded');
       }
-      if (simSectorRow) {
-        simSectorRow.hidden = isCamera || state.emergencyActive;
-      }
+      if (simSectorRow) simSectorRow.hidden = isCamera || state.emergencyActive;
       if (sensitiveCard) {
         sensitiveCard.hidden = isCamera;
         if (isCamera) closeCitizenDniForm(false);
@@ -1356,9 +1109,7 @@
       if (quickTemplatesBox) quickTemplatesBox.hidden = isCamera;
       if (consoleDataBox) consoleDataBox.hidden = isCamera;
       if (consoleStaffEditWrap) consoleStaffEditWrap.hidden = isCamera;
-      if (btnChangeSector) {
-        btnChangeSector.textContent = isCamera ? '← Volver al inicio' : '← Cambiar sede';
-      }
+      if (btnChangeSector) btnChangeSector.textContent = isCamera ? '← Volver al inicio' : '← Cambiar sede';
 
       const config = SIM_SECTORS[state.sector] || SIM_SECTORS.Banco;
       const sectorSubtitle = isCamera ? 'Atención general · Comunicación libre LSP' : config.subtitle;
@@ -1377,19 +1128,6 @@
         renderChat();
       }
       updateSessionMeta();
-    }
-
-    function updateSessionMeta() {
-      if (!sessionMeta) return;
-      const channelLabel = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).meta;
-      const statusLabel = state.emergencyActive
-        ? 'EMERGENCIA PRIORITARIA (<30 s)'
-        : state.connecting
-          ? 'Conectando intérprete LSP (<30 s)…'
-          : state.sessionActive
-            ? 'Atención en curso'
-            : 'Sesión lista para iniciar';
-      sessionMeta.textContent = `Sin login · ${statusLabel} · ${getEffectiveSector()} (${channelLabel})`;
     }
 
     function renderSensitiveData() {
@@ -1432,37 +1170,6 @@
       if (btnEditAmount && config) {
         btnEditAmount.textContent = config.staffBtnLabel || 'Ajustar monto (Personal)';
       }
-    }
-
-    function closeCitizenDniForm(restoreFocus = false) {
-      if (!sensitiveEditForm) return;
-      sensitiveEditForm.hidden = true;
-      if (sensitiveEditError) {
-        sensitiveEditError.hidden = true;
-        sensitiveEditError.textContent = '';
-      }
-      if (btnEditDni) {
-        btnEditDni.setAttribute('aria-expanded', 'false');
-        if (restoreFocus) btnEditDni.focus();
-      }
-    }
-
-    function closeConsoleStaffForm(restoreFocus = false) {
-      if (!consoleStaffEditForm) return;
-      consoleStaffEditForm.hidden = true;
-      if (consoleStaffEditError) {
-        consoleStaffEditError.hidden = true;
-        consoleStaffEditError.textContent = '';
-      }
-      if (btnEditAmount) {
-        btnEditAmount.setAttribute('aria-expanded', 'false');
-        if (restoreFocus) btnEditAmount.focus();
-      }
-    }
-
-    function closeSensitiveEditForm(restoreFocus = false) {
-      closeCitizenDniForm(restoreFocus);
-      closeConsoleStaffForm(false);
     }
 
     function updateConsolePriorityContext() {
@@ -1526,27 +1233,88 @@
         chip.classList.toggle('is-active', active);
         chip.setAttribute('aria-pressed', String(active));
       });
-      if (consoleInterpreterState) {
-        consoleInterpreterState.textContent = statusLabel;
+      if (consoleInterpreterState) consoleInterpreterState.textContent = statusLabel;
+    }
+
+    function cancelConnecting() {
+      if (timers.connectingTimer) {
+        clearTimeout(timers.connectingTimer);
+        timers.connectingTimer = null;
+      }
+      if (timers.connectingStepTimer) {
+        clearTimeout(timers.connectingStepTimer);
+        timers.connectingStepTimer = null;
+      }
+      state.connecting = false;
+      if (connectingOverlay) connectingOverlay.hidden = true;
+      updateOneTapButton();
+      updateLiveBadge();
+      updateStepsGuide();
+      syncChannelContextUI();
+      updateInterpreterCaption();
+    }
+
+    function scrollToActiveChannel(focusInput = false) {
+      if (appOperate) {
+        if (focusInput && state.channel === 'camara') {
+          const btnVisionStart = $('btn-vision-start');
+          if (btnVisionStart && !btnVisionStart.disabled) btnVisionStart.focus({ preventScroll: true });
+        } else if (focusInput && state.channel === 'texto' && chatInput) {
+          chatInput.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (state.channel === 'camara') {
+        if (visionPanel) visionPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (focusInput) {
+          const btnVisionStart = $('btn-vision-start');
+          if (btnVisionStart && !btnVisionStart.disabled) btnVisionStart.focus({ preventScroll: true });
+        }
+      } else if (state.channel === 'texto') {
+        if (textModeCard) textModeCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (focusInput && chatInput) chatInput.focus({ preventScroll: true });
+      } else if (videoStage) {
+        videoStage.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
 
-    function stopDictation() {
-      if (dictTimer) {
-        clearInterval(dictTimer);
-        dictTimer = null;
-      }
-      state.dictating = false;
-      if (btnVoiceDictation) {
-        btnVoiceDictation.setAttribute('aria-pressed', 'false');
-        const btnLabel = btnVoiceDictation.querySelector('span');
-        if (btnLabel) btnLabel.textContent = 'Dictado de voz';
-      }
+    function setChannel(ch) {
+      if (!CHANNEL_INFO[ch]) return;
+      const previous = state.channel;
+      if (ch !== 'lsp' && state.connecting) cancelConnecting();
+      state.channel = ch;
+
+      channelChips.forEach((btn) => {
+        const active = btn.dataset.channel === ch;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', String(active));
+      });
+
+      const isLsp = ch === 'lsp';
+      const isCamera = ch === 'camara';
+      const isText = ch === 'texto';
+
+      if (videoStage) videoStage.hidden = !isLsp;
+      if (interpreterCaption) interpreterCaption.hidden = !isLsp;
+      if (videoBadgesRow) videoBadgesRow.hidden = !isLsp;
+      if (callControls) callControls.hidden = !isLsp;
+      if (visionPanel) visionPanel.hidden = !isCamera;
+      if (textModeCard) textModeCard.hidden = !isText;
+
+      if (channelBadge) channelBadge.setAttribute('data-channel-active', ch);
+      if (channelBadgeText) channelBadgeText.textContent = `Canal activo: ${CHANNEL_INFO[ch].badge}`;
+
+      syncChannelContextUI();
+      updateInterpreterCaption();
+
+      document.dispatchEvent(new CustomEvent('senasegura:channelchange', {
+        detail: { channel: ch, previous }
+      }));
     }
 
     function updateSectorContext(sectorName) {
       chatEpoch += 1;
-      stopDictation();
+      clearAllSessionTimers();
       state.sector = sectorName;
       state.customProcedure = '';
       state.consoleProcedureOverride = null;
@@ -1597,181 +1365,6 @@
       updateInterpreterCaption();
     }
 
-    // Delegación para plantillas rápidas (sincronizadas con valores editados en vivo)
-    if (quickTemplatesBox) {
-      quickTemplatesBox.addEventListener('click', (e) => {
-        const chip = e.target.closest('.template-chip');
-        if (!chip) return;
-        const config = SIM_SECTORS[state.sector];
-        const idx = Number(chip.dataset.templateIndex);
-        const tpl = config && Number.isInteger(idx) ? config.templates[idx] : null;
-        if (!tpl) return;
-        const text = typeof tpl.getText === 'function' ? tpl.getText(state.sensitiveFields) : tpl.text;
-        if (!text) return;
-
-        state.sessionActive = true;
-        updateOneTapButton();
-        updateLiveBadge();
-        updateSessionMeta();
-        appendMessage('Ciudadano (Plantilla)', text, 'user');
-        updateStepsGuide();
-        const epoch = chatEpoch;
-        setTimeout(() => {
-          if (epoch !== chatEpoch) return;
-          appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${getEffectiveProcedure()}. Continuamos con tu atención.`, 'staff');
-        }, 450);
-      });
-    }
-
-    function cancelConnecting() {
-      if (connectingTimer) {
-        clearTimeout(connectingTimer);
-        connectingTimer = null;
-      }
-      if (connectingStepTimer) {
-        clearTimeout(connectingStepTimer);
-        connectingStepTimer = null;
-      }
-      state.connecting = false;
-      if (connectingOverlay) connectingOverlay.hidden = true;
-      updateOneTapButton();
-      updateLiveBadge();
-      updateStepsGuide();
-      syncChannelContextUI();
-      updateInterpreterCaption();
-    }
-
-    // Inicio One-Tap (HU-001 a HU-005): feedback real, cuenta regresiva y transición a operación
-    if (btnOneTap) {
-      btnOneTap.addEventListener('click', () => {
-        if (state.connecting) return;
-
-        enterOperateScreen({ focusTarget: false });
-
-        if (state.sessionActive) {
-          scrollToActiveChannel(true);
-          return;
-        }
-
-        if (state.channel !== 'lsp') {
-          state.sessionActive = true;
-          updateOneTapButton();
-          updateLiveBadge();
-          updateSessionMeta();
-          appendMessage(
-            'Sistema SeñaSegura',
-            `Atención iniciada de forma inmediata (${getEffectiveSector()} · ${getEffectiveProcedure()}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
-            'staff'
-          );
-          updateStepsGuide();
-          scrollToActiveChannel(true);
-          return;
-        }
-
-        state.connecting = true;
-        if (connectingCountdown) connectingCountdown.textContent = 'Conectando en 2 s…';
-        if (connectingOverlay) connectingOverlay.hidden = false;
-        updateOneTapButton();
-        updateLiveBadge();
-        updateStepsGuide();
-        updateSessionMeta();
-        updateInterpreterCaption();
-        scrollToActiveChannel(false);
-
-        connectingStepTimer = setTimeout(() => {
-          connectingStepTimer = null;
-          if (state.connecting && connectingCountdown) {
-            connectingCountdown.textContent = 'Conectando en 1 s…';
-          }
-        }, 900);
-
-        connectingTimer = setTimeout(() => {
-          connectingTimer = null;
-          connectingStepTimer = null;
-          state.connecting = false;
-          state.sessionActive = true;
-          if (connectingOverlay) connectingOverlay.hidden = true;
-          updateOneTapButton();
-          updateLiveBadge();
-          updateSessionMeta();
-          appendMessage(
-            'Sistema SeñaSegura',
-            `Intérprete LSP en línea (${getEffectiveSector()} · ${getEffectiveProcedure()}). Atención iniciada en 1 toque.`,
-            'staff'
-          );
-          updateStepsGuide();
-        }, 1800);
-      });
-    }
-
-    if (btnCancelConnect) {
-      btnCancelConnect.addEventListener('click', () => {
-        cancelConnecting();
-        if (appWelcome && !state.sessionActive && !state.emergencyActive) {
-          enterWelcomeScreen();
-        }
-        if (btnOneTap) btnOneTap.focus();
-      });
-    }
-
-    if (btnEscalateConnect) {
-      btnEscalateConnect.addEventListener('click', () => {
-        cancelConnecting();
-        activateEmergency();
-      });
-    }
-
-    // Modo Emergencia <30 s (HU-009, HU-011, HU-014, HU-015, Figma P2)
-    function activateEmergency() {
-      if (state.connecting) cancelConnecting();
-      if (state.simView === 'consola') switchSimulatorView('ventanilla');
-      enterOperateScreen({ focusTarget: false });
-      if (state.channel !== 'lsp') {
-        setChannel('lsp');
-      }
-      state.emergencyActive = true;
-      state.sessionActive = true;
-      state.criticalAlertActive = true;
-      state.criticalAccepted = false;
-
-      if (emergencyPanel) emergencyPanel.hidden = false;
-      if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
-      updateOneTapButton();
-      updateLiveBadge();
-      updateStepsGuide();
-      updateConsolePriorityContext();
-      updateCriticalBanner();
-      playEmergencyTone();
-      syncChannelContextUI();
-      updateInterpreterCaption();
-
-      let secondsLeft = 3;
-      if (emergencyInterval) clearInterval(emergencyInterval);
-      if (emergencyQueueTimer) {
-        emergencyQueueTimer.textContent = `Saltando cola general · Conectando intérprete LSP prioritario (${secondsLeft} s de simulación)…`;
-      }
-
-      emergencyInterval = setInterval(() => {
-        secondsLeft -= 1;
-        if (secondsLeft > 0) {
-          if (emergencyQueueTimer) {
-            emergencyQueueTimer.textContent = `Saltando cola general · Conectando intérprete LSP prioritario (${secondsLeft} s)…`;
-          }
-        } else {
-          clearInterval(emergencyInterval);
-          emergencyInterval = null;
-          if (emergencyQueueTimer) {
-            emergencyQueueTimer.textContent = '¡Intérprete LSP conectado en <30 s! Canal HD prioritario listo.';
-          }
-          appendMessage(
-            'Intérprete LSP (Emergencia)',
-            'Conexión prioritaria establecida en menos de 30 segundos. Indica el tipo de emergencia o toca un símbolo rápido.',
-            'staff'
-          );
-        }
-      }, 900);
-    }
-
     function deactivateEmergency() {
       state.emergencyActive = false;
       state.emergencyType = null;
@@ -1779,9 +1372,9 @@
       state.criticalAlertActive = false;
       state.criticalAccepted = false;
       state.criticalFromConsoleSim = false;
-      if (emergencyInterval) {
-        clearInterval(emergencyInterval);
-        emergencyInterval = null;
+      if (timers.emergencyInterval) {
+        clearInterval(timers.emergencyInterval);
+        timers.emergencyInterval = null;
       }
       if (emergencyPanel) emergencyPanel.hidden = true;
       if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'false');
@@ -1802,1073 +1395,1159 @@
       updateInterpreterCaption();
     }
 
-    if (btnEmergency) {
-      btnEmergency.addEventListener('click', () => {
-        if (state.emergencyActive) {
-          deactivateEmergency();
-        } else {
-          activateEmergency();
-        }
-      });
-    }
-
-    if (btnWelcomeEmergency) {
-      btnWelcomeEmergency.addEventListener('click', () => {
-        activateEmergency();
-      });
-    }
-
-    if (btnExitEmergency) {
-      btnExitEmergency.addEventListener('click', deactivateEmergency);
-    }
-
-    function selectEmergencyOption({ type = null, crisis = null }) {
-      emergencyTypeBtns.forEach((b) => {
-        const active = Boolean(type) && b.dataset.emergencyType === type;
-        b.classList.toggle('is-selected', active);
-        b.setAttribute('aria-pressed', String(active));
-      });
-      crisisCards.forEach((c) => {
-        const active = Boolean(crisis) && c.dataset.crisis === crisis;
-        c.classList.toggle('is-selected', active);
-        c.setAttribute('aria-pressed', String(active));
-      });
-
-      state.emergencyType = type || null;
-      state.selectedCrisis = crisis || null;
-      state.criticalAlertActive = true;
+    function activateEmergency() {
+      if (state.connecting) cancelConnecting();
+      if (state.simView === 'consola') switchSimulatorView('ventanilla');
+      enterOperateScreen({ focusTarget: false });
       if (state.channel !== 'lsp') setChannel('lsp');
 
+      state.emergencyActive = true;
+      state.sessionActive = true;
+      state.criticalAlertActive = true;
+      state.criticalAccepted = false;
+
+      if (emergencyPanel) emergencyPanel.hidden = false;
+      if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
+      updateOneTapButton();
+      updateLiveBadge();
+      updateStepsGuide();
       updateConsolePriorityContext();
       updateCriticalBanner();
-      syncChannelContextUI();
-      updateInterpreterCaption();
-    }
-
-    emergencyTypeBtns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const type = btn.dataset.emergencyType;
-        selectEmergencyOption({ type });
-        appendMessage(
-          'Alerta de Emergencia',
-          `Tipo seleccionado: ${type}. Prioridad máxima asignada en Consola del Intérprete (<30 s).`,
-          'user'
-        );
-      });
-    });
-
-    crisisCards.forEach((card) => {
-      card.addEventListener('click', () => {
-        const crisis = card.dataset.crisis;
-        if (typeof navigator.vibrate === 'function') {
-          try {
-            navigator.vibrate(80);
-          } catch (_) {
-            /* vibración no permitida sin gesto o soporte */
-          }
-        }
-        selectEmergencyOption({ crisis });
-        appendMessage(
-          'Alerta de Crisis',
-          `Símbolo rápido activado: ${crisis}. Videollamada HD >30 fps enlazada con prioridad.`,
-          'user'
-        );
-      });
-    });
-
-    // Canal de comunicación: Intérprete LSP | Cámara IA (Gestos) | Texto / Lectura (HU-035)
-    function setChannel(ch) {
-      if (!CHANNEL_INFO[ch]) return;
-      const previous = state.channel;
-      if (ch !== 'lsp' && state.connecting) {
-        cancelConnecting();
-      }
-      state.channel = ch;
-
-      channelChips.forEach((btn) => {
-        const active = btn.dataset.channel === ch;
-        btn.classList.toggle('is-active', active);
-        btn.setAttribute('aria-pressed', String(active));
-      });
-
-      const isLsp = ch === 'lsp';
-      const isCamera = ch === 'camara';
-      const isText = ch === 'texto';
-
-      if (videoStage) videoStage.hidden = !isLsp;
-      if (interpreterCaption) interpreterCaption.hidden = !isLsp;
-      if (videoBadgesRow) videoBadgesRow.hidden = !isLsp;
-      if (callControls) callControls.hidden = !isLsp;
-      if (visionPanel) visionPanel.hidden = !isCamera;
-      if (textModeCard) textModeCard.hidden = !isText;
-
-      // Insignia visible de canal activo (color + ícono + texto)
-      if (channelBadge) channelBadge.setAttribute('data-channel-active', ch);
-      if (channelBadgeText) channelBadgeText.textContent = `Canal activo: ${CHANNEL_INFO[ch].badge}`;
-
+      playEmergencyTone();
       syncChannelContextUI();
       updateInterpreterCaption();
 
-      // Avisa al módulo de visión (detiene la cámara al salir de "Cámara IA (Gestos)")
-      document.dispatchEvent(new CustomEvent('senasegura:channelchange', {
-        detail: { channel: ch, previous }
-      }));
-    }
-
-    channelChips.forEach((chip) => {
-      chip.addEventListener('click', () => setChannel(chip.dataset.channel));
-    });
-
-    textSwitchBtns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const target = btn.dataset.switchChannel;
-        if (target) setChannel(target);
-      });
-    });
-
-    // Sectores del simulador
-    sectorChips.forEach((chip) => {
-      chip.addEventListener('click', () => {
-        sectorChips.forEach((btn) => {
-          const active = btn === chip;
-          btn.classList.toggle('is-active', active);
-          btn.setAttribute('aria-pressed', String(active));
-        });
-        updateSectorContext(chip.dataset.simSector);
-      });
-    });
-
-    if (procedureSelect) {
-      procedureSelect.addEventListener('change', () => {
-        state.procedure = procedureSelect.value;
-        state.consoleProcedureOverride = null;
-        const isOther = state.procedure === OTHER_PROCEDURE_OPTION;
-        if (procedureCustomWrap) procedureCustomWrap.hidden = !isOther;
-        if (isOther && procedureCustomInput) {
-          procedureCustomInput.focus({ preventScroll: true });
-        } else if (procedureCustomInput) {
-          state.customProcedure = '';
-          procedureCustomInput.value = '';
-        }
-        if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
-        updateSessionMeta();
-      });
-    }
-
-    if (procedureCustomInput) {
-      procedureCustomInput.addEventListener('input', () => {
-        state.customProcedure = procedureCustomInput.value;
-        state.consoleProcedureOverride = null;
-        if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
-        updateSessionMeta();
-      });
-    }
-
-    if (consoleProcedureEditForm && consoleProcedureInput) {
-      if (btnEditProcedure) {
-        btnEditProcedure.addEventListener('click', () => {
-          if (!consoleProcedureEditForm.hidden) {
-            closeConsoleProcedureForm(false);
-            return;
-          }
-          consoleProcedureInput.value = getEffectiveProcedure();
-          consoleProcedureEditForm.hidden = false;
-          btnEditProcedure.setAttribute('aria-expanded', 'true');
-          consoleProcedureInput.focus({ preventScroll: true });
-        });
+      let secondsLeft = 3;
+      if (timers.emergencyInterval) clearInterval(timers.emergencyInterval);
+      if (emergencyQueueTimer) {
+        emergencyQueueTimer.textContent = `Saltando cola general · Conectando intérprete LSP prioritario (${secondsLeft} s de simulación)…`;
       }
 
-      consoleProcedureEditForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const fallbackProc = state.channel === 'camara' ? 'Comunicación libre LSP' : 'Consulta general';
-        const val = consoleProcedureInput.value.trim() || fallbackProc;
-        state.consoleProcedureOverride = val;
-        if (consoleProcedureVal) consoleProcedureVal.textContent = val;
-        updateSessionMeta();
-        closeConsoleProcedureForm(true);
-        appendMessage('Intérprete LSP (Consola)', `Motivo / trámite actualizado en vivo: ${val}.`, 'staff');
-      });
-
-      consoleProcedureEditForm.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeConsoleProcedureForm(true);
-        }
-      });
-    }
-
-    if (btnCancelProcedure) {
-      btnCancelProcedure.addEventListener('click', () => closeConsoleProcedureForm(true));
-    }
-
-    // Turnos de interpretación
-    if (btnToggleTurn) {
-      btnToggleTurn.addEventListener('click', () => {
-        state.turnDirection = state.turnDirection === 'lsp' ? 'funcionario' : 'lsp';
-        updateTurnLabels();
-      });
-    }
-
-    if (btnConsoleToLsp) {
-      btnConsoleToLsp.addEventListener('click', () => {
-        state.turnDirection = 'lsp';
-        updateTurnLabels();
-      });
-    }
-
-    if (btnConsoleToEs) {
-      btnConsoleToEs.addEventListener('click', () => {
-        state.turnDirection = 'funcionario';
-        updateTurnLabels();
-      });
-    }
-
-    // Controles de videollamada (Mute, Cámara, Switch, Fullscreen)
-    if (btnMic) {
-      btnMic.addEventListener('click', () => {
-        state.micMuted = !state.micMuted;
-        btnMic.setAttribute('aria-pressed', String(state.micMuted));
-        btnMic.title = state.micMuted ? 'Micrófono silenciado' : 'Micrófono activo';
-      });
-    }
-
-    if (btnCamera) {
-      btnCamera.addEventListener('click', () => {
-        state.cameraOff = !state.cameraOff;
-        btnCamera.setAttribute('aria-pressed', String(state.cameraOff));
-        if (cameraOffOverlay) cameraOffOverlay.hidden = !state.cameraOff;
-      });
-    }
-
-    if (btnSwitch) {
-      btnSwitch.addEventListener('click', () => {
-        state.cameraAngle =
-          state.cameraAngle === 'Frontal · Intérprete LSP'
-            ? 'Ventanilla · Documentos'
-            : 'Frontal · Intérprete LSP';
-        if (cameraAngleLabel) cameraAngleLabel.textContent = `Cámara: ${state.cameraAngle}`;
-      });
-    }
-
-    if (btnFullscreen) {
-      btnFullscreen.addEventListener('click', () => {
-        openDialog('modal-fullscreen', btnFullscreen);
-      });
-    }
-
-    // Simulación de contingencia / microcorte de red
-    if (btnOutage) {
-      btnOutage.addEventListener('click', () => {
-        if (state.outageActive) return;
-        state.outageActive = true;
-        btnOutage.disabled = true;
-
-        if (simNetworkStatus) simNetworkStatus.classList.add('is-offline');
-        if (simNetworkLabel) simNetworkLabel.textContent = 'Reconectando…';
-        if (consoleNetworkLabel) consoleNetworkLabel.textContent = 'Reconectando…';
-        if (headerNetworkPill) {
-          headerNetworkPill.classList.add('is-offline');
-          const span = headerNetworkPill.querySelector('span');
-          if (span) span.textContent = 'Reconectando…';
-        }
-        if (contingencyBanner) contingencyBanner.hidden = false;
-        if (contingencyMsg) {
-          contingencyMsg.textContent = 'Microcorte de red detectado. Reconectando canal seguro sin perder el historial…';
-        }
-
-        setTimeout(() => {
-          state.outageActive = false;
-          btnOutage.disabled = false;
-          if (simNetworkStatus) simNetworkStatus.classList.remove('is-offline');
-          if (simNetworkLabel) simNetworkLabel.textContent = 'Red Operativa';
-          if (consoleNetworkLabel) consoleNetworkLabel.textContent = 'Red Operativa';
-          if (headerNetworkPill) {
-            headerNetworkPill.classList.remove('is-offline');
-            const span = headerNetworkPill.querySelector('span');
-            if (span) span.textContent = 'Red Operativa';
+      timers.emergencyInterval = setInterval(() => {
+        secondsLeft -= 1;
+        if (secondsLeft > 0) {
+          if (emergencyQueueTimer) {
+            emergencyQueueTimer.textContent = `Saltando cola general · Conectando intérprete LSP prioritario (${secondsLeft} s)…`;
           }
-          if (contingencyMsg) {
-            contingencyMsg.textContent = 'Conexión restablecida en modo operativo. Historial intacto.';
+        } else {
+          clearInterval(timers.emergencyInterval);
+          timers.emergencyInterval = null;
+          if (emergencyQueueTimer) {
+            emergencyQueueTimer.textContent = '¡Intérprete LSP conectado en <30 s! Canal HD prioritario listo.';
           }
-          setTimeout(() => {
-            if (contingencyBanner) contingencyBanner.hidden = true;
-          }, 2200);
-        }, 2800);
-      });
-    }
-
-    // Copiar y Editar en vivo DNI / Monto (Figma P4 y P5)
-    if (btnCopyData) {
-      btnCopyData.addEventListener('click', () => {
-        const textToCopy = state.sensitiveFields.map((f) => `${f.label}: ${f.value}`).join(' | ');
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          navigator.clipboard.writeText(textToCopy).catch(() => {});
-        }
-        const original = btnCopyData.textContent;
-        btnCopyData.textContent = '¡Datos copiados!';
-        setTimeout(() => {
-          btnCopyData.textContent = original;
-        }, 1800);
-      });
-    }
-
-    function placeholderForField(field) {
-      if (!field) return '';
-      const name = (field.shortLabel || field.label || '').toLowerCase();
-      if (name.includes('dni')) return 'Ej. 00000000';
-      if (name.includes('monto') || field.isAmount) return 'Ej. 150.00';
-      if (name.includes('referencia')) return 'Ej. Parte N.° 2026-041';
-      if (name.includes('área')) return 'Ej. Triaje · Prioridad II';
-      if (name.includes('expediente')) return 'Ej. 00412-2026';
-      return '';
-    }
-
-    // Edición ciudadana exclusiva del DNI en Ventanilla
-    if (sensitiveEditForm && editField1) {
-      let dniEditOpenedAt = 0;
-
-      if (btnEditDni) {
-        btnEditDni.addEventListener('click', () => {
-          if (!sensitiveEditForm.hidden) {
-            closeCitizenDniForm(false);
-            return;
-          }
-          const field = state.sensitiveFields[0];
-          if (!field) return;
-          if (editLabel1) editLabel1.textContent = field.label;
-          editField1.placeholder = placeholderForField(field);
-          editField1.value = field.value;
-          if (sensitiveEditError) {
-            sensitiveEditError.hidden = true;
-            sensitiveEditError.textContent = '';
-          }
-          dniEditOpenedAt = performance.now();
-          sensitiveEditForm.hidden = false;
-          btnEditDni.setAttribute('aria-expanded', 'true');
-          setTimeout(() => {
-            if (!sensitiveEditForm.hidden) editField1.focus();
-          }, 60);
-        });
-      }
-
-      sensitiveEditForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        if (performance.now() - dniEditOpenedAt < 150) return;
-        const field = state.sensitiveFields[0];
-        if (!field) return;
-
-        const raw = editField1.value.trim();
-        let errorMsg = '';
-        if (raw) {
-          const digits = raw.replace(/\D/g, '').slice(0, 8);
-          if (!digits) {
-            errorMsg = 'Ingresa solo números para el DNI (hasta 8 dígitos).';
-          } else {
-            field.value = digits;
-          }
-        }
-
-        renderSensitiveData();
-
-        if (errorMsg && sensitiveEditError) {
-          sensitiveEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
-          sensitiveEditError.hidden = false;
-          editField1.focus();
-          return;
-        }
-
-        closeCitizenDniForm(true);
-        appendMessage('Sistema SeñaSegura', `DNI del ciudadano actualizado (${field.value}).`, 'staff');
-      });
-
-      sensitiveEditForm.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeCitizenDniForm(true);
-        }
-      });
-    }
-
-    if (btnCancelEditData) {
-      btnCancelEditData.addEventListener('click', () => closeCitizenDniForm(true));
-    }
-
-    // Ajuste exclusivo del personal en Consola (Monto / Referencia / Área / Expediente)
-    if (consoleStaffEditForm && editField2) {
-      let staffEditOpenedAt = 0;
-
-      if (btnEditAmount) {
-        btnEditAmount.addEventListener('click', () => {
-          if (!consoleStaffEditForm.hidden) {
-            closeConsoleStaffForm(false);
-            return;
-          }
-          const field = state.sensitiveFields[1];
-          if (!field) return;
-          if (editLabel2) editLabel2.textContent = field.label;
-          editField2.placeholder = placeholderForField(field);
-          editField2.value = field.value;
-          if (consoleStaffEditError) {
-            consoleStaffEditError.hidden = true;
-            consoleStaffEditError.textContent = '';
-          }
-          staffEditOpenedAt = performance.now();
-          consoleStaffEditForm.hidden = false;
-          btnEditAmount.setAttribute('aria-expanded', 'true');
-          setTimeout(() => {
-            if (!consoleStaffEditForm.hidden) editField2.focus();
-          }, 60);
-        });
-      }
-
-      consoleStaffEditForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        if (performance.now() - staffEditOpenedAt < 150) return;
-        const field = state.sensitiveFields[1];
-        if (!field) return;
-
-        const raw = editField2.value.trim();
-        let errorMsg = '';
-
-        if (field.isAmount) {
-          if (raw) {
-            const cleaned = raw.replace(/^\s*s\s*\/?\s*/i, '').replace(/\s+/g, '').replace(',', '.');
-            const num = Number(cleaned);
-            if (!/^\d+(\.\d+)?$/.test(cleaned) || !Number.isFinite(num) || num < 0) {
-              errorMsg = 'Ingresa un monto numérico válido (ej. 150.00).';
-            } else {
-              field.value = `S/ ${num.toFixed(2)}`;
-            }
-          }
-        } else if (raw) {
-          field.value = raw;
-        }
-
-        renderSensitiveData();
-
-        if (errorMsg && consoleStaffEditError) {
-          consoleStaffEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
-          consoleStaffEditError.hidden = false;
-          editField2.focus();
-          return;
-        }
-
-        closeConsoleStaffForm(true);
-        appendMessage(
-          'Personal de ventanilla (Consola)',
-          `${field.label} actualizado en ventanilla (${field.value}).`,
-          'staff'
-        );
-      });
-
-      consoleStaffEditForm.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          closeConsoleStaffForm(true);
-        }
-      });
-    }
-
-    if (btnCancelStaffData) {
-      btnCancelStaffData.addEventListener('click', () => closeConsoleStaffForm(true));
-    }
-
-    // Consola del Intérprete: estado, alerta crítica, PiP, apoyo y bloc de notas (Figma P8, P9)
-    interpreterStatusChips.forEach((chip) => {
-      chip.addEventListener('click', () => setInterpreterStatus(chip.dataset.interpreterStatus));
-    });
-
-    if (btnConsoleSimAlert) {
-      btnConsoleSimAlert.addEventListener('click', () => {
-        state.criticalAlertActive = true;
-        state.criticalAccepted = false;
-        state.criticalFromConsoleSim = !state.emergencyActive;
-        updateCriticalBanner();
-        playEmergencyTone();
-        if (btnAcceptCritical) btnAcceptCritical.focus();
-      });
-    }
-
-    if (btnAcceptCritical) {
-      btnAcceptCritical.addEventListener('click', () => {
-        state.emergencyActive = true;
-        state.criticalAlertActive = true;
-        state.criticalAccepted = true;
-        state.criticalFromConsoleSim = false;
-        state.sessionActive = true;
-        if (state.channel !== 'lsp') setChannel('lsp');
-        enterOperateScreen({ focusTarget: false });
-        if (emergencyPanel) emergencyPanel.hidden = false;
-        if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
-        if (emergencyQueueTimer) {
-          emergencyQueueTimer.textContent = '¡Intérprete LSP conectado en <30 s! Emergencia aceptada desde Consola.';
-        }
-        setInterpreterStatus('Ocupado');
-        updateConsolePriorityContext();
-        updateCriticalBanner();
-        updateOneTapButton();
-        updateLiveBadge();
-        updateStepsGuide();
-        updateSessionMeta();
-        appendMessage(
-          'Intérprete LSP (Consola)',
-          'Emergencia crítica aceptada en consola (<30 s). Atención prioritaria en curso.',
-          'staff'
-        );
-      });
-    }
-
-    if (btnDismissCriticalSim) {
-      btnDismissCriticalSim.addEventListener('click', () => {
-        state.criticalAlertActive = false;
-        state.criticalAccepted = false;
-        state.criticalFromConsoleSim = false;
-        updateCriticalBanner();
-        if (btnConsoleSimAlert) btnConsoleSimAlert.focus();
-      });
-    }
-
-    if (btnTogglePip && consolePipBox && consolePipPreview) {
-      btnTogglePip.addEventListener('click', () => {
-        const willMinimize = !consolePipBox.classList.contains('is-minimized');
-        consolePipBox.classList.toggle('is-minimized', willMinimize);
-        consolePipPreview.hidden = willMinimize;
-        btnTogglePip.setAttribute('aria-expanded', String(!willMinimize));
-        btnTogglePip.textContent = willMinimize ? 'Mostrar' : 'Minimizar';
-      });
-    }
-
-    if (btnConsoleSupport && consoleSupportNotice) {
-      btnConsoleSupport.addEventListener('click', () => {
-        consoleSupportNotice.textContent =
-          'Respaldo solicitado: supervisor LSP notificado para apoyo o transferencia. La sesión actual continúa sin cortar el video.';
-        consoleSupportNotice.hidden = false;
-      });
-    }
-
-    // Glosario Técnico LSP (Figma P10)
-    function renderGlossary() {
-      if (!glossaryList) return;
-      const query = state.glossaryQuery.trim().toLowerCase();
-      const cat = state.glossaryCategory;
-
-      const filtered = GLOSSARY_TERMS.filter((item) => {
-        const catMatch = cat === 'Todos' || item.category === cat;
-        const textMatch =
-          !query ||
-          item.term.toLowerCase().includes(query) ||
-          item.definition.toLowerCase().includes(query) ||
-          item.category.toLowerCase().includes(query);
-        return catMatch && textMatch;
-      });
-
-      glossaryList.textContent = '';
-      if (glossaryEmpty) glossaryEmpty.hidden = filtered.length > 0;
-
-      filtered.forEach((item) => {
-        const li = document.createElement('li');
-        li.className = 'glossary-item';
-
-        const head = document.createElement('div');
-        head.className = 'glossary-item-head';
-
-        const titleWrap = document.createElement('div');
-        titleWrap.className = 'glossary-item-title-wrap';
-
-        const title = document.createElement('h3');
-        title.className = 'glossary-term';
-        title.textContent = item.term;
-
-        const badge = document.createElement('span');
-        badge.className = 'glossary-category-pill';
-        badge.textContent = item.category;
-
-        titleWrap.append(title, badge);
-
-        const isFav = state.glossaryFavorites.has(item.id);
-        const favBtn = document.createElement('button');
-        favBtn.type = 'button';
-        favBtn.className = `glossary-fav-btn${isFav ? ' is-fav' : ''}`;
-        favBtn.setAttribute('aria-pressed', String(isFav));
-        favBtn.setAttribute('aria-label', `${isFav ? 'Quitar' : 'Marcar'} ${item.term} como favorito`);
-        favBtn.textContent = isFav ? '\u{2605}' : '\u{2606}';
-        favBtn.addEventListener('click', () => {
-          if (state.glossaryFavorites.has(item.id)) state.glossaryFavorites.delete(item.id);
-          else state.glossaryFavorites.add(item.id);
-          renderGlossary();
-        });
-
-        head.append(titleWrap, favBtn);
-
-        const def = document.createElement('p');
-        def.className = 'glossary-definition';
-        def.textContent = item.definition;
-
-        li.append(head, def);
-        glossaryList.appendChild(li);
-      });
-    }
-
-    if (btnOpenGlossary) {
-      btnOpenGlossary.addEventListener('click', () => {
-        renderGlossary();
-        openDialog('modal-glossary', btnOpenGlossary);
-      });
-    }
-
-    if (glossarySearch) {
-      glossarySearch.addEventListener('input', () => {
-        state.glossaryQuery = glossarySearch.value;
-        renderGlossary();
-      });
-    }
-
-    glossaryFilterBtns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        state.glossaryCategory = btn.dataset.glossaryFilter || 'Todos';
-        glossaryFilterBtns.forEach((b) => {
-          const active = b === btn;
-          b.classList.toggle('is-active', active);
-          b.setAttribute('aria-pressed', String(active));
-        });
-        renderGlossary();
-      });
-    });
-
-    // Dictado de voz simulado (o Web Speech API si está disponible)
-    if (btnVoiceDictation && chatInput) {
-      btnVoiceDictation.addEventListener('click', () => {
-        if (state.dictating) return;
-        state.dictating = true;
-        btnVoiceDictation.setAttribute('aria-pressed', 'true');
-        const btnLabel = btnVoiceDictation.querySelector('span');
-        if (btnLabel) btnLabel.textContent = 'Escuchando…';
-
-        const config = SIM_SECTORS[state.sector];
-        let sample = config ? config.dictationSample : 'Atención validada en ventanilla.';
-        if (state.sector === 'Banco' && state.sensitiveFields[1] && state.sensitiveFields[1].value) {
-          sample = `Operación bancaria validada por ${state.sensitiveFields[1].value} en ventanilla.`;
-        }
-        const words = sample.split(' ');
-        let i = 0;
-        chatInput.value = '';
-
-        dictTimer = setInterval(() => {
-          if (i < words.length) {
-            chatInput.value = `${chatInput.value}${i === 0 ? '' : ' '}${words[i]}`;
-            i += 1;
-          } else {
-            stopDictation();
-            chatInput.focus();
-          }
-        }, 130);
-      });
-    }
-
-    // Envío de mensaje en chat
-    if (chatForm && chatInput) {
-      chatForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const text = chatInput.value.trim();
-        if (!text) return;
-        state.sessionActive = true;
-        appendMessage('Ciudadano / Usuario', text, 'user');
-        chatInput.value = '';
-        updateOneTapButton();
-        updateLiveBadge();
-        updateStepsGuide();
-        updateSessionMeta();
-
-        const epoch = chatEpoch;
-        setTimeout(() => {
-          if (epoch !== chatEpoch) return;
           appendMessage(
-            'Personal de ventanilla',
-            `Mensaje confirmado en ${getEffectiveSector()}. Puedes finalizar cuando estés listo para recibir tu código.`,
+            'Intérprete LSP (Emergencia)',
+            'Conexión prioritaria establecida en menos de 30 segundos. Indica el tipo de emergencia o toca un símbolo rápido.',
             'staff'
           );
-        }, 500);
-      });
+        }
+      }, 900);
     }
 
-    // Calificación de experiencia en modal de cierre (Figma P6 / HU-029)
-    function resetClosureRating() {
-      closureRatingBtns.forEach((btn) => {
-        btn.classList.remove('is-selected');
-        btn.setAttribute('aria-pressed', 'false');
-      });
-      if (closureRatingFeedback) {
-        closureRatingFeedback.hidden = true;
-        closureRatingFeedback.textContent = '';
-      }
-    }
-
-    closureRatingBtns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        closureRatingBtns.forEach((b) => {
-          const active = b === btn;
+    function initEmergencyFlow() {
+      function selectEmergencyOption({ type = null, crisis = null }) {
+        emergencyTypeBtns.forEach((b) => {
+          const active = Boolean(type) && b.dataset.emergencyType === type;
           b.classList.toggle('is-selected', active);
           b.setAttribute('aria-pressed', String(active));
         });
-        if (closureRatingFeedback) {
-          closureRatingFeedback.textContent = `¡Gracias por tu calificación! (${btn.dataset.rating})`;
-          closureRatingFeedback.hidden = false;
-        }
+        crisisCards.forEach((c) => {
+          const active = Boolean(crisis) && c.dataset.crisis === crisis;
+          c.classList.toggle('is-selected', active);
+          c.setAttribute('aria-pressed', String(active));
+        });
+
+        state.emergencyType = type || null;
+        state.selectedCrisis = crisis || null;
+        state.criticalAlertActive = true;
+        if (state.channel !== 'lsp') setChannel('lsp');
+
+        updateConsolePriorityContext();
+        updateCriticalBanner();
+        syncChannelContextUI();
+        updateInterpreterCaption();
+      }
+
+      if (btnEmergency) {
+        btnEmergency.addEventListener('click', () => {
+          if (state.emergencyActive) deactivateEmergency();
+          else activateEmergency();
+        });
+      }
+      if (btnWelcomeEmergency) {
+        btnWelcomeEmergency.addEventListener('click', activateEmergency);
+      }
+      if (btnExitEmergency) {
+        btnExitEmergency.addEventListener('click', deactivateEmergency);
+      }
+
+      emergencyTypeBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.emergencyType;
+          selectEmergencyOption({ type });
+          appendMessage(
+            'Alerta de Emergencia',
+            `Tipo seleccionado: ${type}. Prioridad máxima asignada en Consola del Intérprete (<30 s).`,
+            'user'
+          );
+        });
       });
-    });
 
-    // Cierre de atención, código de 8 dígitos, QR dinámico y purga local (HU-025, HU-026, HU-031)
-    function finishAttentionAndPurge(triggerEl) {
-      const code = generate8DigitCode();
-      state.lastReceiptCode = code;
-
-      const channelName = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).receipt;
-      const finishedSector = getEffectiveSector();
-      const finishedProcedure = getEffectiveProcedure();
-      const nowStr = new Date().toLocaleString('es-PE', {
-        dateStyle: 'short',
-        timeStyle: 'short'
+      crisisCards.forEach((card) => {
+        card.addEventListener('click', () => {
+          const crisis = card.dataset.crisis;
+          if (typeof navigator.vibrate === 'function') {
+            try {
+              navigator.vibrate(80);
+            } catch (_) {}
+          }
+          selectEmergencyOption({ crisis });
+          appendMessage(
+            'Alerta de Crisis',
+            `Símbolo rápido activado: ${crisis}. Videollamada HD >30 fps enlazada con prioridad.`,
+            'user'
+          );
+        });
       });
+    }
 
-      receiptRegistry.set(code, {
-        code,
-        sector: finishedSector,
-        procedure: finishedProcedure,
-        channel: channelName,
-        status: state.emergencyActive
-          ? 'Atención prioritaria finalizada (<30 s)'
-          : 'Atención finalizada · Cierre confirmado',
-        timestamp: nowStr,
-        isDemoBase: false
+    function initChannelAndSector() {
+      viewTabs.forEach((tab) => {
+        tab.addEventListener('click', () => switchSimulatorView(tab.dataset.simView));
       });
+      bindTablistArrows(viewTabs, (tab) => switchSimulatorView(tab.dataset.simView));
 
-      // Purga inmediata del chat local, bloc de notas y restablecimiento de datos ficticios
-      chatEpoch += 1;
-      stopDictation();
-      if (state.connecting) cancelConnecting();
-      state.chatMessages = [];
-      state.sessionActive = false;
-      state.micMuted = false;
-      state.cameraOff = false;
-      state.cameraAngle = 'Frontal · Intérprete LSP';
-      state.turnDirection = 'lsp';
-      if (cameraOffOverlay) cameraOffOverlay.hidden = true;
-      if (btnMic) {
-        btnMic.setAttribute('aria-pressed', 'false');
-        btnMic.title = 'Micrófono activo';
+      if (btnAppConsole) {
+        btnAppConsole.addEventListener('click', () => {
+          switchSimulatorView(state.simView === 'consola' ? 'ventanilla' : 'consola');
+        });
       }
-      if (btnCamera) btnCamera.setAttribute('aria-pressed', 'false');
-      if (cameraAngleLabel) cameraAngleLabel.textContent = `Cámara: ${state.cameraAngle}`;
-      updateTurnLabels();
-      if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
-      if (chatInput) chatInput.value = '';
-      if (consolePrivateNotes) consolePrivateNotes.value = '';
-      if (consoleSupportNotice) {
-        consoleSupportNotice.hidden = true;
-        consoleSupportNotice.textContent = '';
+      if (btnConsoleBack) {
+        btnConsoleBack.addEventListener('click', () => switchSimulatorView('ventanilla'));
       }
-      setInterpreterStatus('Disponible');
-      updateSectorContext(state.sector);
-      updateOneTapButton();
-      enterWelcomeScreen();
-      switchSimulatorView('ventanilla');
-      // Purga local: el módulo de Cámara IA libera la cámara y limpia su salida
-      document.dispatchEvent(new CustomEvent('senasegura:purge'));
 
-      // Actualizar UI del modal de cierre y vista previa PDF
-      const codeEl = document.getElementById('closure-code-display');
-      const procedureMetaEl = document.getElementById('closure-procedure-meta');
-      const qrBox = document.getElementById('closure-qr-container');
-      const qrCaption = document.getElementById('closure-qr-caption');
-      const pdfCode = document.getElementById('pdf-preview-code');
-      const pdfSector = document.getElementById('pdf-preview-sector');
-      const pdfChannel = document.getElementById('pdf-preview-channel');
-      const pdfQr = document.getElementById('pdf-preview-qr');
-
-      const verifyUrl = buildReceiptVerifyUrl(code, finishedSector, finishedProcedure);
-      const qrSvgNode = buildDynamicQrSvg(verifyUrl, code);
-      if (codeEl) codeEl.textContent = code;
-      if (procedureMetaEl) procedureMetaEl.textContent = `Sede: ${finishedSector} · Trámite: ${finishedProcedure}`;
-      if (qrBox) qrBox.replaceChildren(qrSvgNode);
-      if (qrCaption) {
-        qrCaption.textContent = '';
-        qrCaption.append(code, document.createElement('br'), 'QR verificable');
+      if (btnChangeSector) {
+        btnChangeSector.addEventListener('click', () => {
+          chatEpoch += 1;
+          clearAllSessionTimers();
+          if (state.connecting) cancelConnecting();
+          state.sessionActive = false;
+          if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
+          closeSensitiveEditForm(false);
+          switchSimulatorView('ventanilla');
+          document.dispatchEvent(new CustomEvent('senasegura:purge'));
+          updateOneTapButton();
+          updateLiveBadge();
+          updateStepsGuide();
+          updateSessionMeta();
+          enterWelcomeScreen();
+          const activeSectorBtn = appWelcome
+            ? appWelcome.querySelector('.pref-chip[data-sim-sector].is-active') || btnOneTap
+            : btnOneTap;
+          if (activeSectorBtn) activeSectorBtn.focus();
+        });
       }
-      if (pdfCode) pdfCode.textContent = code;
-      if (pdfSector) pdfSector.textContent = `Atención finalizada · Sede: ${finishedSector} (${finishedProcedure})`;
-      if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
-      if (pdfQr) pdfQr.replaceChildren(qrSvgNode.cloneNode(true));
 
-      // Precargar el código generado en el verificador web para prueba inmediata
-      const verifierInput = document.getElementById('verifier-code-input');
-      if (verifierInput) verifierInput.value = code;
+      if (btnOneTap) {
+        btnOneTap.addEventListener('click', () => {
+          if (state.connecting) return;
+          enterOperateScreen({ focusTarget: false });
 
-      resetClosureRating();
-      openDialog('modal-closure', triggerEl);
-    }
-
-    if (btnHangup) {
-      btnHangup.addEventListener('click', () => finishAttentionAndPurge(btnHangup));
-    }
-    if (btnFinishSession) {
-      btnFinishSession.addEventListener('click', () => finishAttentionAndPurge(btnFinishSession));
-    }
-
-    // Descargar constancia + Imprimir ticket + Copiar código + Vista previa PDF
-    const btnDownloadReceipt = document.getElementById('btn-download-receipt');
-    const btnPrintTicket = document.getElementById('btn-print-ticket');
-    const btnCopyClosureCode = document.getElementById('btn-copy-closure-code');
-    const btnPreviewPdf = document.getElementById('btn-preview-pdf');
-    const btnPdfDownload = document.getElementById('btn-pdf-download');
-    const btnPdfPrint = document.getElementById('btn-pdf-print');
-    const btnClosePdfPreview = document.getElementById('btn-close-pdf-preview');
-    let copyCodeTimer = null;
-
-    const JSPDF_CDN_URL = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js';
-    let jspdfLoadPromise = null;
-    let downloadingReceipt = false;
-
-    function ensureJsPdf() {
-      if (window.jspdf && typeof window.jspdf.jsPDF === 'function') {
-        return Promise.resolve(true);
-      }
-      if (navigator.onLine === false) {
-        return Promise.resolve(false);
-      }
-      if (jspdfLoadPromise) return jspdfLoadPromise;
-
-      jspdfLoadPromise = new Promise((resolve) => {
-        const script = document.createElement('script');
-        script.src = JSPDF_CDN_URL;
-        script.async = true;
-        script.crossOrigin = 'anonymous';
-        script.addEventListener('load', () => {
-          resolve(Boolean(window.jspdf && typeof window.jspdf.jsPDF === 'function'));
-        }, { once: true });
-        script.addEventListener('error', () => {
-          jspdfLoadPromise = null;
-          resolve(false);
-        }, { once: true });
-        document.head.appendChild(script);
-      });
-      return jspdfLoadPromise;
-    }
-
-    function downloadReceiptTxt(code, record) {
-      const content = [
-        'SEÑASEGURA · CONSTANCIA DE ATENCIÓN ACCESIBLE',
-        '==============================================',
-        `Código único   : ${code}`,
-        `Sector / Sede  : ${record ? record.sector : state.sector}`,
-        `Trámite        : ${record ? record.procedure : state.procedure}`,
-        `Canal          : ${record ? record.channel : 'Lengua de Señas Peruana'}`,
-        'ID Intérprete  : INT-LSP-042',
-        `Estado         : ${record ? record.status : 'Cierre confirmado'}`,
-        `Fecha/Hora     : ${record ? record.timestamp : new Date().toLocaleString('es-PE')}`,
-        '----------------------------------------------',
-        'Privacidad     : Sin grabación de video.',
-        'Purga local    : Chat eliminado del dispositivo (Ley N.° 29733).',
-        'Marco legal    : Ley N.° 29535 (Lengua de Señas Peruana).'
-      ].join('\n');
-
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `constancia-${code}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    }
-
-    async function downloadReceiptFile() {
-      if (downloadingReceipt) return;
-      downloadingReceipt = true;
-      const code = state.lastReceiptCode || 'SEG-84920418';
-      const record = receiptRegistry.get(code);
-
-      try {
-        const pdfReady = await ensureJsPdf();
-        if (pdfReady && window.jspdf && typeof window.jspdf.jsPDF === 'function') {
-          const { jsPDF } = window.jspdf;
-          const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-
-          doc.setFillColor(10, 37, 64);
-          doc.rect(0, 0, 210, 34, 'F');
-          doc.setTextColor(255, 255, 255);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(18);
-          doc.text('SeñaSegura · Constancia de Atención', 16, 17);
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(10);
-          doc.text('Plataforma accesible en Lengua de Señas Peruana (Ley N.° 29535)', 16, 25);
-
-          doc.setTextColor(15, 23, 42);
-          doc.setFillColor(248, 250, 252);
-          doc.setDrawColor(203, 213, 225);
-          doc.roundedRect(16, 44, 178, 22, 3, 3, 'FD');
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(10);
-          doc.text('CÓDIGO ÚNICO DE VERIFICACIÓN', 22, 52);
-          doc.setTextColor(15, 76, 129);
-          doc.setFontSize(18);
-          doc.text(code, 22, 61);
-
-          const sectorVal = record ? record.sector : state.sector;
-          const procVal = record ? record.procedure : state.procedure;
-          const chanVal = record ? record.channel : 'Lengua de Señas Peruana';
-          const statusVal = record ? record.status : 'Cierre confirmado';
-          const timeVal = record ? record.timestamp : new Date().toLocaleString('es-PE');
-
-          doc.setTextColor(15, 23, 42);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(11);
-          const rows = [
-            ['Fecha y hora:', timeVal],
-            ['Sede / Sector:', sectorVal],
-            ['Trámite:', procVal],
-            ['Canal de atención:', chanVal],
-            ['ID de intérprete:', 'INT-LSP-042'],
-            ['Estado de cierre:', statusVal]
-          ];
-          let y = 78;
-          rows.forEach(([k, v]) => {
-            doc.setFont('helvetica', 'bold');
-            doc.text(k, 16, y);
-            doc.setFont('helvetica', 'normal');
-            doc.text(doc.splitTextToSize(String(v), 78), 60, y);
-            y += 10;
-          });
-
-          const verifyUrl = buildReceiptVerifyUrl(code, sectorVal, procVal);
-          const qrMatrix = encodeIsoQrMatrix(verifyUrl);
-          if (qrMatrix) {
-            const qSize = qrMatrix.length;
-            const qrOriginX = 148;
-            const qrOriginY = 74;
-            const boxMm = 46;
-            const padMm = 3;
-            const modMm = (boxMm - padMm * 2) / qSize;
-            doc.setFillColor(255, 255, 255);
-            doc.setDrawColor(203, 213, 225);
-            doc.rect(qrOriginX, qrOriginY, boxMm, boxMm, 'FD');
-            doc.setFillColor(10, 37, 64);
-            for (let r = 0; r < qSize; r += 1) {
-              for (let c = 0; c < qSize; c += 1) {
-                if (qrMatrix[r][c]) {
-                  doc.rect(qrOriginX + padMm + c * modMm, qrOriginY + padMm + r * modMm, modMm, modMm, 'F');
-                }
-              }
-            }
-            doc.setTextColor(71, 85, 105);
-            doc.setFontSize(8.5);
-            doc.text('Escanea para verificar (ISO 18004)', qrOriginX, qrOriginY + boxMm + 5);
+          if (state.sessionActive) {
+            scrollToActiveChannel(true);
+            return;
           }
 
-          doc.setDrawColor(21, 128, 61);
-          doc.setFillColor(240, 253, 244);
-          doc.roundedRect(16, 146, 178, 28, 3, 3, 'FD');
-          doc.setTextColor(21, 128, 61);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(10);
-          doc.text('PRIVACIDAD Y PROTECCIÓN DE DATOS', 22, 154);
-          doc.setTextColor(15, 23, 42);
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(9.5);
-          doc.text(
-            'Sin grabación de video ni almacenamiento de chat en el navegador. Purga local aplicada al cierre conforme a la Ley N.° 29733 y la Ley N.° 29535.',
-            22,
-            161,
-            { maxWidth: 166 }
-          );
+          if (state.channel !== 'lsp') {
+            state.sessionActive = true;
+            updateOneTapButton();
+            updateLiveBadge();
+            updateSessionMeta();
+            appendMessage(
+              'Sistema SeñaSegura',
+              `Atención iniciada de forma inmediata (${getEffectiveSector()} · ${getEffectiveProcedure()}). Canal: ${(CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).oneTap}.`,
+              'staff'
+            );
+            updateStepsGuide();
+            scrollToActiveChannel(true);
+            return;
+          }
 
-          doc.save(`constancia-${code}.pdf`);
-          return;
-        }
-      } catch (err) {
-        console.warn('[Constancia PDF]', err);
-      } finally {
-        downloadingReceipt = false;
+          state.connecting = true;
+          if (connectingCountdown) connectingCountdown.textContent = 'Conectando en 2 s…';
+          if (connectingOverlay) connectingOverlay.hidden = false;
+          updateOneTapButton();
+          updateLiveBadge();
+          updateStepsGuide();
+          updateSessionMeta();
+          updateInterpreterCaption();
+          scrollToActiveChannel(false);
+
+          timers.connectingStepTimer = setTimeout(() => {
+            timers.connectingStepTimer = null;
+            if (state.connecting && connectingCountdown) {
+              connectingCountdown.textContent = 'Conectando en 1 s…';
+            }
+          }, 900);
+
+          timers.connectingTimer = setTimeout(() => {
+            timers.connectingTimer = null;
+            timers.connectingStepTimer = null;
+            state.connecting = false;
+            state.sessionActive = true;
+            if (connectingOverlay) connectingOverlay.hidden = true;
+            updateOneTapButton();
+            updateLiveBadge();
+            updateSessionMeta();
+            appendMessage(
+              'Sistema SeñaSegura',
+              `Intérprete LSP en línea (${getEffectiveSector()} · ${getEffectiveProcedure()}). Atención iniciada en 1 toque.`,
+              'staff'
+            );
+            updateStepsGuide();
+          }, 1800);
+        });
       }
 
-      downloadReceiptTxt(code, record);
-    }
+      if (btnCancelConnect) {
+        btnCancelConnect.addEventListener('click', () => {
+          cancelConnecting();
+          if (appWelcome && !state.sessionActive && !state.emergencyActive) enterWelcomeScreen();
+          if (btnOneTap) btnOneTap.focus();
+        });
+      }
+      if (btnEscalateConnect) {
+        btnEscalateConnect.addEventListener('click', () => {
+          cancelConnecting();
+          activateEmergency();
+        });
+      }
 
-    if (btnDownloadReceipt) {
-      btnDownloadReceipt.addEventListener('click', downloadReceiptFile);
-    }
-
-    if (btnPdfDownload) {
-      btnPdfDownload.addEventListener('click', downloadReceiptFile);
-    }
-
-    if (btnPrintTicket) {
-      btnPrintTicket.addEventListener('click', () => {
-        window.print();
+      channelChips.forEach((chip) => {
+        chip.addEventListener('click', () => setChannel(chip.dataset.channel));
       });
-    }
-
-    if (btnPdfPrint) {
-      btnPdfPrint.addEventListener('click', () => {
-        window.print();
+      textSwitchBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const target = btn.dataset.switchChannel;
+          if (target) setChannel(target);
+        });
       });
+
+      sectorChips.forEach((chip) => {
+        chip.addEventListener('click', () => {
+          sectorChips.forEach((btn) => {
+            const active = btn === chip;
+            btn.classList.toggle('is-active', active);
+            btn.setAttribute('aria-pressed', String(active));
+          });
+          updateSectorContext(chip.dataset.simSector);
+        });
+      });
+
+      if (procedureSelect) {
+        procedureSelect.addEventListener('change', () => {
+          state.procedure = procedureSelect.value;
+          state.consoleProcedureOverride = null;
+          const isOther = state.procedure === OTHER_PROCEDURE_OPTION;
+          if (procedureCustomWrap) procedureCustomWrap.hidden = !isOther;
+          if (isOther && procedureCustomInput) {
+            procedureCustomInput.focus({ preventScroll: true });
+          } else if (procedureCustomInput) {
+            state.customProcedure = '';
+            procedureCustomInput.value = '';
+          }
+          if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
+          updateSessionMeta();
+        });
+      }
+
+      if (procedureCustomInput) {
+        procedureCustomInput.addEventListener('input', () => {
+          state.customProcedure = procedureCustomInput.value;
+          state.consoleProcedureOverride = null;
+          if (consoleProcedureVal) consoleProcedureVal.textContent = getEffectiveProcedure();
+          updateSessionMeta();
+        });
+      }
+
+      if (btnToggleTurn) {
+        btnToggleTurn.addEventListener('click', () => {
+          state.turnDirection = state.turnDirection === 'lsp' ? 'funcionario' : 'lsp';
+          updateTurnLabels();
+        });
+      }
+      if (btnMic) {
+        btnMic.addEventListener('click', () => {
+          state.micMuted = !state.micMuted;
+          syncMicControlsUI();
+        });
+      }
+      if (btnCamera) {
+        btnCamera.addEventListener('click', () => {
+          state.cameraOff = !state.cameraOff;
+          btnCamera.setAttribute('aria-pressed', String(state.cameraOff));
+          if (cameraOffOverlay) cameraOffOverlay.hidden = !state.cameraOff;
+        });
+      }
+      if (btnSwitch) {
+        btnSwitch.addEventListener('click', () => {
+          state.cameraAngle =
+            state.cameraAngle === 'Frontal · Intérprete LSP'
+              ? 'Ventanilla · Documentos'
+              : 'Frontal · Intérprete LSP';
+          if (cameraAngleLabel) cameraAngleLabel.textContent = `Cámara: ${state.cameraAngle}`;
+        });
+      }
+      if (btnFullscreen) {
+        btnFullscreen.addEventListener('click', () => openDialog('modal-fullscreen', btnFullscreen));
+      }
+
+      if (btnOutage) {
+        btnOutage.addEventListener('click', () => {
+          if (state.outageActive) return;
+          state.outageActive = true;
+          btnOutage.disabled = true;
+
+          if (simNetworkStatus) simNetworkStatus.classList.add('is-offline');
+          if (simNetworkLabel) simNetworkLabel.textContent = 'Reconectando…';
+          if (consoleNetworkLabel) consoleNetworkLabel.textContent = 'Reconectando…';
+          if (headerNetworkPill) {
+            headerNetworkPill.classList.add('is-offline');
+            const span = headerNetworkPill.querySelector('span');
+            if (span) span.textContent = 'Reconectando…';
+          }
+          if (contingencyBanner) contingencyBanner.hidden = false;
+          if (contingencyMsg) {
+            contingencyMsg.textContent = 'Microcorte de red detectado. Reconectando canal seguro sin perder el historial…';
+          }
+
+          timers.outageTimer1 = setTimeout(() => {
+            timers.outageTimer1 = null;
+            state.outageActive = false;
+            btnOutage.disabled = false;
+            if (simNetworkStatus) simNetworkStatus.classList.remove('is-offline');
+            if (simNetworkLabel) simNetworkLabel.textContent = 'Red Operativa';
+            if (consoleNetworkLabel) consoleNetworkLabel.textContent = 'Red Operativa';
+            if (headerNetworkPill) {
+              headerNetworkPill.classList.remove('is-offline');
+              const span = headerNetworkPill.querySelector('span');
+              if (span) span.textContent = 'Red Operativa';
+            }
+            if (contingencyMsg) {
+              contingencyMsg.textContent = 'Conexión restablecida en modo operativo. Historial intacto.';
+            }
+            timers.outageTimer2 = setTimeout(() => {
+              timers.outageTimer2 = null;
+              if (contingencyBanner) contingencyBanner.hidden = true;
+            }, 2200);
+          }, 2800);
+        });
+      }
     }
 
-    if (btnCopyClosureCode) {
-      btnCopyClosureCode.addEventListener('click', () => {
-        const codeText = state.lastReceiptCode || '';
-        const confirmCopied = () => {
-          btnCopyClosureCode.textContent = '¡Código copiado!';
-          if (copyCodeTimer) clearTimeout(copyCodeTimer);
-          copyCodeTimer = setTimeout(() => {
-            btnCopyClosureCode.textContent = 'Copiar código';
-            copyCodeTimer = null;
+    function initChatAndSensitiveData() {
+      if (quickTemplatesBox) {
+        quickTemplatesBox.addEventListener('click', (e) => {
+          const chip = e.target.closest('.template-chip');
+          if (!chip) return;
+          const config = SIM_SECTORS[state.sector];
+          const idx = Number(chip.dataset.templateIndex);
+          const tpl = config && Number.isInteger(idx) ? config.templates[idx] : null;
+          if (!tpl) return;
+          const text = typeof tpl.getText === 'function' ? tpl.getText(state.sensitiveFields) : tpl.text;
+          if (!text) return;
+
+          state.sessionActive = true;
+          updateOneTapButton();
+          updateLiveBadge();
+          updateSessionMeta();
+          appendMessage('Ciudadano (Plantilla)', text, 'user');
+          updateStepsGuide();
+          const epoch = chatEpoch;
+          if (timers.chatReplyTimer) clearTimeout(timers.chatReplyTimer);
+          timers.chatReplyTimer = setTimeout(() => {
+            timers.chatReplyTimer = null;
+            if (epoch !== chatEpoch) return;
+            appendMessage('Intérprete LSP / Ventanilla', `Recibido para ${getEffectiveProcedure()}. Continuamos con tu atención.`, 'staff');
+          }, 450);
+        });
+      }
+
+      if (btnCopyData) {
+        btnCopyData.addEventListener('click', () => {
+          const textToCopy = state.sensitiveFields.map((f) => `${f.label}: ${f.value}`).join(' | ');
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(textToCopy).catch(() => {});
+          }
+          btnCopyData.textContent = '¡Datos copiados!';
+          if (timers.copyDataTimer) clearTimeout(timers.copyDataTimer);
+          timers.copyDataTimer = setTimeout(() => {
+            timers.copyDataTimer = null;
+            btnCopyData.textContent = 'Copiar datos';
           }, 1800);
-        };
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          navigator.clipboard.writeText(codeText).then(confirmCopied).catch(confirmCopied);
-        } else {
-          confirmCopied();
+        });
+      }
+
+      if (sensitiveEditForm && editField1) {
+        let dniEditOpenedAt = 0;
+
+        if (btnEditDni) {
+          btnEditDni.addEventListener('click', () => {
+            if (!sensitiveEditForm.hidden) {
+              closeCitizenDniForm(false);
+              return;
+            }
+            const field = state.sensitiveFields[0];
+            if (!field) return;
+            if (editLabel1) editLabel1.textContent = field.label;
+            editField1.placeholder = placeholderForField(field);
+            editField1.value = field.value;
+            if (sensitiveEditError) {
+              sensitiveEditError.hidden = true;
+              sensitiveEditError.textContent = '';
+            }
+            dniEditOpenedAt = performance.now();
+            sensitiveEditForm.hidden = false;
+            btnEditDni.setAttribute('aria-expanded', 'true');
+            if (timers.dniFocusTimer) clearTimeout(timers.dniFocusTimer);
+            timers.dniFocusTimer = setTimeout(() => {
+              timers.dniFocusTimer = null;
+              if (!sensitiveEditForm.hidden) editField1.focus();
+            }, 60);
+          });
         }
+
+        sensitiveEditForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          if (performance.now() - dniEditOpenedAt < 150) return;
+          const field = state.sensitiveFields[0];
+          if (!field) return;
+
+          const raw = editField1.value.trim();
+          let errorMsg = '';
+          if (raw) {
+            const digits = raw.replace(/\D/g, '').slice(0, 8);
+            if (!digits) errorMsg = 'Ingresa solo números para el DNI (hasta 8 dígitos).';
+            else field.value = digits;
+          }
+
+          renderSensitiveData();
+
+          if (errorMsg && sensitiveEditError) {
+            sensitiveEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
+            sensitiveEditError.hidden = false;
+            editField1.focus();
+            return;
+          }
+
+          closeCitizenDniForm(true);
+          appendMessage('Sistema SeñaSegura', `DNI del ciudadano actualizado (${field.value}).`, 'staff');
+        });
+
+        sensitiveEditForm.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            closeCitizenDniForm(true);
+          }
+        });
+      }
+
+      if (btnCancelEditData) {
+        btnCancelEditData.addEventListener('click', () => closeCitizenDniForm(true));
+      }
+
+      if (btnVoiceDictation && chatInput) {
+        btnVoiceDictation.addEventListener('click', () => {
+          if (state.dictating) return;
+          state.dictating = true;
+          btnVoiceDictation.setAttribute('aria-pressed', 'true');
+          const btnLabel = btnVoiceDictation.querySelector('span');
+          if (btnLabel) btnLabel.textContent = 'Escuchando…';
+
+          const config = SIM_SECTORS[state.sector];
+          let sample = config ? config.dictationSample : 'Atención validada en ventanilla.';
+          if (state.sector === 'Banco' && state.sensitiveFields[1] && state.sensitiveFields[1].value) {
+            sample = `Operación bancaria validada por ${state.sensitiveFields[1].value} en ventanilla.`;
+          }
+          const words = sample.split(' ');
+          let i = 0;
+          chatInput.value = '';
+
+          timers.dictTimer = setInterval(() => {
+            if (i < words.length) {
+              chatInput.value = `${chatInput.value}${i === 0 ? '' : ' '}${words[i]}`;
+              i += 1;
+            } else {
+              stopDictation();
+              chatInput.focus();
+            }
+          }, 130);
+        });
+      }
+
+      if (chatForm && chatInput) {
+        chatForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const text = chatInput.value.trim();
+          if (!text) return;
+          state.sessionActive = true;
+          appendMessage('Ciudadano / Usuario', text, 'user');
+          chatInput.value = '';
+          updateOneTapButton();
+          updateLiveBadge();
+          updateStepsGuide();
+          updateSessionMeta();
+
+          const epoch = chatEpoch;
+          if (timers.chatReplyTimer) clearTimeout(timers.chatReplyTimer);
+          timers.chatReplyTimer = setTimeout(() => {
+            timers.chatReplyTimer = null;
+            if (epoch !== chatEpoch) return;
+            appendMessage(
+              'Personal de ventanilla',
+              `Mensaje confirmado en ${getEffectiveSector()}. Puedes finalizar cuando estés listo para recibir tu código.`,
+              'staff'
+            );
+          }, 500);
+        });
+      }
+    }
+
+    function initInterpreterConsole() {
+      if (btnConsoleToLsp) {
+        btnConsoleToLsp.addEventListener('click', () => {
+          state.turnDirection = 'lsp';
+          updateTurnLabels();
+        });
+      }
+      if (btnConsoleToEs) {
+        btnConsoleToEs.addEventListener('click', () => {
+          state.turnDirection = 'funcionario';
+          updateTurnLabels();
+        });
+      }
+
+      if (consoleProcedureEditForm && consoleProcedureInput) {
+        if (btnEditProcedure) {
+          btnEditProcedure.addEventListener('click', () => {
+            if (!consoleProcedureEditForm.hidden) {
+              closeConsoleProcedureForm(false);
+              return;
+            }
+            consoleProcedureInput.value = getEffectiveProcedure();
+            consoleProcedureEditForm.hidden = false;
+            btnEditProcedure.setAttribute('aria-expanded', 'true');
+            consoleProcedureInput.focus({ preventScroll: true });
+          });
+        }
+
+        consoleProcedureEditForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const fallbackProc = state.channel === 'camara' ? 'Comunicación libre LSP' : 'Consulta general';
+          const val = consoleProcedureInput.value.trim() || fallbackProc;
+          state.consoleProcedureOverride = val;
+          if (consoleProcedureVal) consoleProcedureVal.textContent = val;
+          updateSessionMeta();
+          closeConsoleProcedureForm(true);
+          appendMessage('Intérprete LSP (Consola)', `Motivo / trámite actualizado en vivo: ${val}.`, 'staff');
+        });
+
+        consoleProcedureEditForm.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            closeConsoleProcedureForm(true);
+          }
+        });
+      }
+
+      if (btnCancelProcedure) {
+        btnCancelProcedure.addEventListener('click', () => closeConsoleProcedureForm(true));
+      }
+
+      if (consoleStaffEditForm && editField2) {
+        let staffEditOpenedAt = 0;
+
+        if (btnEditAmount) {
+          btnEditAmount.addEventListener('click', () => {
+            if (!consoleStaffEditForm.hidden) {
+              closeConsoleStaffForm(false);
+              return;
+            }
+            const field = state.sensitiveFields[1];
+            if (!field) return;
+            if (editLabel2) editLabel2.textContent = field.label;
+            editField2.placeholder = placeholderForField(field);
+            editField2.value = field.value;
+            if (consoleStaffEditError) {
+              consoleStaffEditError.hidden = true;
+              consoleStaffEditError.textContent = '';
+            }
+            staffEditOpenedAt = performance.now();
+            consoleStaffEditForm.hidden = false;
+            btnEditAmount.setAttribute('aria-expanded', 'true');
+            if (timers.staffFocusTimer) clearTimeout(timers.staffFocusTimer);
+            timers.staffFocusTimer = setTimeout(() => {
+              timers.staffFocusTimer = null;
+              if (!consoleStaffEditForm.hidden) editField2.focus();
+            }, 60);
+          });
+        }
+
+        consoleStaffEditForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          if (performance.now() - staffEditOpenedAt < 150) return;
+          const field = state.sensitiveFields[1];
+          if (!field) return;
+
+          const raw = editField2.value.trim();
+          let errorMsg = '';
+          if (field.isAmount) {
+            if (raw) {
+              const cleaned = raw.replace(/^\s*s\s*\/?\s*/i, '').replace(/\s+/g, '').replace(',', '.');
+              const num = Number(cleaned);
+              if (!/^\d+(\.\d+)?$/.test(cleaned) || !Number.isFinite(num) || num < 0) {
+                errorMsg = 'Ingresa un monto numérico válido (ej. 150.00).';
+              } else {
+                field.value = `S/ ${num.toFixed(2)}`;
+              }
+            }
+          } else if (raw) {
+            field.value = raw;
+          }
+
+          renderSensitiveData();
+
+          if (errorMsg && consoleStaffEditError) {
+            consoleStaffEditError.textContent = `${errorMsg} Se conservó el formato válido.`;
+            consoleStaffEditError.hidden = false;
+            editField2.focus();
+            return;
+          }
+
+          closeConsoleStaffForm(true);
+          appendMessage(
+            'Personal de ventanilla (Consola)',
+            `${field.label} actualizado en ventanilla (${field.value}).`,
+            'staff'
+          );
+        });
+
+        consoleStaffEditForm.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            closeConsoleStaffForm(true);
+          }
+        });
+      }
+
+      if (btnCancelStaffData) {
+        btnCancelStaffData.addEventListener('click', () => closeConsoleStaffForm(true));
+      }
+
+      interpreterStatusChips.forEach((chip) => {
+        chip.addEventListener('click', () => setInterpreterStatus(chip.dataset.interpreterStatus));
+      });
+
+      if (btnConsoleSimAlert) {
+        btnConsoleSimAlert.addEventListener('click', () => {
+          state.criticalAlertActive = true;
+          state.criticalAccepted = false;
+          state.criticalFromConsoleSim = !state.emergencyActive;
+          updateCriticalBanner();
+          playEmergencyTone();
+          if (btnAcceptCritical) btnAcceptCritical.focus();
+        });
+      }
+
+      if (btnAcceptCritical) {
+        btnAcceptCritical.addEventListener('click', () => {
+          state.emergencyActive = true;
+          state.criticalAlertActive = true;
+          state.criticalAccepted = true;
+          state.criticalFromConsoleSim = false;
+          state.sessionActive = true;
+          if (state.channel !== 'lsp') setChannel('lsp');
+          enterOperateScreen({ focusTarget: false });
+          if (emergencyPanel) emergencyPanel.hidden = false;
+          if (btnEmergency) btnEmergency.setAttribute('aria-pressed', 'true');
+          if (emergencyQueueTimer) {
+            emergencyQueueTimer.textContent = '¡Intérprete LSP conectado en <30 s! Emergencia aceptada desde Consola.';
+          }
+          setInterpreterStatus('Ocupado');
+          updateConsolePriorityContext();
+          updateCriticalBanner();
+          updateOneTapButton();
+          updateLiveBadge();
+          updateStepsGuide();
+          updateSessionMeta();
+          appendMessage(
+            'Intérprete LSP (Consola)',
+            'Emergencia crítica aceptada en consola (<30 s). Atención prioritaria en curso.',
+            'staff'
+          );
+        });
+      }
+
+      if (btnDismissCriticalSim) {
+        btnDismissCriticalSim.addEventListener('click', () => {
+          state.criticalAlertActive = false;
+          state.criticalAccepted = false;
+          state.criticalFromConsoleSim = false;
+          updateCriticalBanner();
+          if (btnConsoleSimAlert) btnConsoleSimAlert.focus();
+        });
+      }
+
+      if (btnTogglePip && consolePipBox && consolePipPreview) {
+        btnTogglePip.addEventListener('click', () => {
+          const willMinimize = !consolePipBox.classList.contains('is-minimized');
+          consolePipBox.classList.toggle('is-minimized', willMinimize);
+          consolePipPreview.hidden = willMinimize;
+          btnTogglePip.setAttribute('aria-expanded', String(!willMinimize));
+          btnTogglePip.textContent = willMinimize ? 'Mostrar' : 'Minimizar';
+        });
+      }
+
+      if (btnConsoleSupport && consoleSupportNotice) {
+        btnConsoleSupport.addEventListener('click', () => {
+          consoleSupportNotice.textContent =
+            'Respaldo solicitado: supervisor LSP notificado para apoyo o transferencia. La sesión actual continúa sin cortar el video.';
+          consoleSupportNotice.hidden = false;
+        });
+      }
+
+      function renderGlossary() {
+        if (!glossaryList) return;
+        const query = state.glossaryQuery.trim().toLowerCase();
+        const cat = state.glossaryCategory;
+
+        const filtered = GLOSSARY_TERMS.filter((item) => {
+          const catMatch = cat === 'Todos' || item.category === cat;
+          const textMatch =
+            !query ||
+            item.term.toLowerCase().includes(query) ||
+            item.definition.toLowerCase().includes(query) ||
+            item.category.toLowerCase().includes(query);
+          return catMatch && textMatch;
+        });
+
+        glossaryList.textContent = '';
+        if (glossaryEmpty) glossaryEmpty.hidden = filtered.length > 0;
+
+        filtered.forEach((item) => {
+          const li = document.createElement('li');
+          li.className = 'glossary-item';
+
+          const head = document.createElement('div');
+          head.className = 'glossary-item-head';
+
+          const titleWrap = document.createElement('div');
+          titleWrap.className = 'glossary-item-title-wrap';
+
+          const title = document.createElement('h3');
+          title.className = 'glossary-term';
+          title.textContent = item.term;
+
+          const badge = document.createElement('span');
+          badge.className = 'glossary-category-pill';
+          badge.textContent = item.category;
+
+          titleWrap.append(title, badge);
+
+          const isFav = state.glossaryFavorites.has(item.id);
+          const favBtn = document.createElement('button');
+          favBtn.type = 'button';
+          favBtn.className = `glossary-fav-btn${isFav ? ' is-fav' : ''}`;
+          favBtn.setAttribute('aria-pressed', String(isFav));
+          favBtn.setAttribute('aria-label', `${isFav ? 'Quitar' : 'Marcar'} ${item.term} como favorito`);
+          favBtn.textContent = isFav ? '\u{2605}' : '\u{2606}';
+          favBtn.addEventListener('click', () => {
+            if (state.glossaryFavorites.has(item.id)) state.glossaryFavorites.delete(item.id);
+            else state.glossaryFavorites.add(item.id);
+            renderGlossary();
+          });
+
+          head.append(titleWrap, favBtn);
+
+          const def = document.createElement('p');
+          def.className = 'glossary-definition';
+          def.textContent = item.definition;
+
+          li.append(head, def);
+          glossaryList.appendChild(li);
+        });
+      }
+
+      if (btnOpenGlossary) {
+        btnOpenGlossary.addEventListener('click', () => {
+          renderGlossary();
+          openDialog('modal-glossary', btnOpenGlossary);
+        });
+      }
+      if (glossarySearch) {
+        glossarySearch.addEventListener('input', () => {
+          state.glossaryQuery = glossarySearch.value;
+          renderGlossary();
+        });
+      }
+      glossaryFilterBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          state.glossaryCategory = btn.dataset.glossaryFilter || 'Todos';
+          glossaryFilterBtns.forEach((b) => {
+            const active = b === btn;
+            b.classList.toggle('is-active', active);
+            b.setAttribute('aria-pressed', String(active));
+          });
+          renderGlossary();
+        });
       });
     }
 
-    if (btnPreviewPdf) {
-      btnPreviewPdf.addEventListener('click', () => {
-        closeDialog('modal-closure', { restoreFocus: false });
-        openDialog('modal-pdf-preview', btnPreviewPdf);
+    function initClosureAndReceipt() {
+      const qrApi = window.SenaSeguraQR || {};
+      const buildReceiptVerifyUrl = qrApi.buildReceiptVerifyUrl || ((code) => code);
+      const encodeIsoQrMatrix = qrApi.encodeIsoQrMatrix || (() => null);
+      const buildDynamicQrSvg = qrApi.buildDynamicQrSvg || (() => document.createElementNS('http://www.w3.org/2000/svg', 'svg'));
+
+      const JSPDF_CDN_URL = 'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js';
+      let jspdfLoadPromise = null;
+      let downloadingReceipt = false;
+
+      function resetClosureRating() {
+        closureRatingBtns.forEach((btn) => {
+          btn.classList.remove('is-selected');
+          btn.setAttribute('aria-pressed', 'false');
+        });
+        if (closureRatingFeedback) {
+          closureRatingFeedback.hidden = true;
+          closureRatingFeedback.textContent = '';
+        }
+      }
+
+      closureRatingBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          closureRatingBtns.forEach((b) => {
+            const active = b === btn;
+            b.classList.toggle('is-selected', active);
+            b.setAttribute('aria-pressed', String(active));
+          });
+          if (closureRatingFeedback) {
+            closureRatingFeedback.textContent = `¡Gracias por tu calificación! (${btn.dataset.rating})`;
+            closureRatingFeedback.hidden = false;
+          }
+        });
       });
+
+      function finishAttentionAndPurge(triggerEl) {
+        const code = generate8DigitCode();
+        state.lastReceiptCode = code;
+
+        const channelName = (CHANNEL_INFO[state.channel] || CHANNEL_INFO.lsp).receipt;
+        const finishedSector = getEffectiveSector();
+        const finishedProcedure = getEffectiveProcedure();
+        const nowStr = new Date().toLocaleString('es-PE', {
+          dateStyle: 'short',
+          timeStyle: 'short'
+        });
+
+        receiptRegistry.set(code, {
+          code,
+          sector: finishedSector,
+          procedure: finishedProcedure,
+          channel: channelName,
+          status: state.emergencyActive
+            ? 'Atención prioritaria finalizada (<30 s)'
+            : 'Atención finalizada · Cierre confirmado',
+          timestamp: nowStr,
+          isDemoBase: false
+        });
+
+        chatEpoch += 1;
+        clearAllSessionTimers();
+        if (state.connecting) cancelConnecting();
+        state.chatMessages = [];
+        state.sessionActive = false;
+        state.micMuted = false;
+        state.cameraOff = false;
+        state.cameraAngle = 'Frontal · Intérprete LSP';
+        state.turnDirection = 'lsp';
+        if (cameraOffOverlay) cameraOffOverlay.hidden = true;
+        syncMicControlsUI();
+        if (btnCamera) btnCamera.setAttribute('aria-pressed', 'false');
+        if (cameraAngleLabel) cameraAngleLabel.textContent = `Cámara: ${state.cameraAngle}`;
+        updateTurnLabels();
+        if (state.emergencyActive || state.criticalAlertActive) deactivateEmergency();
+        purgeTransientInputs();
+        if (consoleSupportNotice) {
+          consoleSupportNotice.hidden = true;
+          consoleSupportNotice.textContent = '';
+        }
+        setInterpreterStatus('Disponible');
+        updateSectorContext(state.sector);
+        updateOneTapButton();
+        enterWelcomeScreen();
+        switchSimulatorView('ventanilla');
+        document.dispatchEvent(new CustomEvent('senasegura:purge'));
+
+        const codeEl = $('closure-code-display');
+        const procedureMetaEl = $('closure-procedure-meta');
+        const qrBox = $('closure-qr-container');
+        const qrCaption = $('closure-qr-caption');
+        const pdfCode = $('pdf-preview-code');
+        const pdfSector = $('pdf-preview-sector');
+        const pdfChannel = $('pdf-preview-channel');
+        const pdfQr = $('pdf-preview-qr');
+
+        const verifyUrl = buildReceiptVerifyUrl(code, finishedSector, finishedProcedure);
+        const qrSvgNode = buildDynamicQrSvg(verifyUrl, code);
+        if (codeEl) codeEl.textContent = code;
+        if (procedureMetaEl) procedureMetaEl.textContent = `Sede: ${finishedSector} · Trámite: ${finishedProcedure}`;
+        if (qrBox) qrBox.replaceChildren(qrSvgNode);
+        if (qrCaption) {
+          qrCaption.textContent = '';
+          qrCaption.append(code, document.createElement('br'), 'QR verificable');
+        }
+        if (pdfCode) pdfCode.textContent = code;
+        if (pdfSector) pdfSector.textContent = `Atención finalizada · Sede: ${finishedSector} (${finishedProcedure})`;
+        if (pdfChannel) pdfChannel.textContent = `Canal: ${channelName}`;
+        if (pdfQr) pdfQr.replaceChildren(qrSvgNode.cloneNode(true));
+
+        const verifierInput = $('verifier-code-input');
+        if (verifierInput) verifierInput.value = code;
+
+        resetClosureRating();
+        openDialog('modal-closure', triggerEl);
+      }
+
+      if (btnHangup) btnHangup.addEventListener('click', () => finishAttentionAndPurge(btnHangup));
+      if (btnFinishSession) btnFinishSession.addEventListener('click', () => finishAttentionAndPurge(btnFinishSession));
+
+      function ensureJsPdf() {
+        if (window.jspdf && typeof window.jspdf.jsPDF === 'function') return Promise.resolve(true);
+        if (navigator.onLine === false) return Promise.resolve(false);
+        if (jspdfLoadPromise) return jspdfLoadPromise;
+
+        jspdfLoadPromise = new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = JSPDF_CDN_URL;
+          script.async = true;
+          script.crossOrigin = 'anonymous';
+          script.addEventListener('load', () => {
+            resolve(Boolean(window.jspdf && typeof window.jspdf.jsPDF === 'function'));
+          }, { once: true });
+          script.addEventListener('error', () => {
+            jspdfLoadPromise = null;
+            resolve(false);
+          }, { once: true });
+          document.head.appendChild(script);
+        });
+        return jspdfLoadPromise;
+      }
+
+      function downloadReceiptTxt(code, record) {
+        const content = [
+          'SEÑASEGURA · CONSTANCIA DE ATENCIÓN ACCESIBLE',
+          '==============================================',
+          `Código único   : ${code}`,
+          `Sector / Sede  : ${record ? record.sector : state.sector}`,
+          `Trámite        : ${record ? record.procedure : state.procedure}`,
+          `Canal          : ${record ? record.channel : 'Lengua de Señas Peruana'}`,
+          'ID Intérprete  : INT-LSP-042',
+          `Estado         : ${record ? record.status : 'Cierre confirmado'}`,
+          `Fecha/Hora     : ${record ? record.timestamp : new Date().toLocaleString('es-PE')}`,
+          '----------------------------------------------',
+          'Privacidad     : Sin grabación de video.',
+          'Purga local    : Chat eliminado del dispositivo (Ley N.° 29733).',
+          'Marco legal    : Ley N.° 29535 (Lengua de Señas Peruana).'
+        ].join('\n');
+
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `constancia-${code}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      async function downloadReceiptFile() {
+        if (downloadingReceipt) return;
+        downloadingReceipt = true;
+        const code = state.lastReceiptCode || 'SEG-84920418';
+        const record = receiptRegistry.get(code);
+
+        try {
+          const pdfReady = await ensureJsPdf();
+          if (pdfReady && window.jspdf && typeof window.jspdf.jsPDF === 'function') {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+            doc.setFillColor(10, 37, 64);
+            doc.rect(0, 0, 210, 34, 'F');
+            doc.setTextColor(255, 255, 255);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(18);
+            doc.text('SeñaSegura · Constancia de Atención', 16, 17);
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(10);
+            doc.text('Plataforma accesible en Lengua de Señas Peruana (Ley N.° 29535)', 16, 25);
+
+            doc.setTextColor(15, 23, 42);
+            doc.setFillColor(248, 250, 252);
+            doc.setDrawColor(203, 213, 225);
+            doc.roundedRect(16, 44, 178, 22, 3, 3, 'FD');
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(10);
+            doc.text('CÓDIGO ÚNICO DE VERIFICACIÓN', 22, 52);
+            doc.setTextColor(15, 76, 129);
+            doc.setFontSize(18);
+            doc.text(code, 22, 61);
+
+            const sectorVal = record ? record.sector : state.sector;
+            const procVal = record ? record.procedure : state.procedure;
+            const chanVal = record ? record.channel : 'Lengua de Señas Peruana';
+            const statusVal = record ? record.status : 'Cierre confirmado';
+            const timeVal = record ? record.timestamp : new Date().toLocaleString('es-PE');
+
+            doc.setTextColor(15, 23, 42);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(11);
+            const rows = [
+              ['Fecha y hora:', timeVal],
+              ['Sede / Sector:', sectorVal],
+              ['Trámite:', procVal],
+              ['Canal de atención:', chanVal],
+              ['ID de intérprete:', 'INT-LSP-042'],
+              ['Estado de cierre:', statusVal]
+            ];
+            let y = 78;
+            rows.forEach(([k, v]) => {
+              doc.setFont('helvetica', 'bold');
+              doc.text(k, 16, y);
+              doc.setFont('helvetica', 'normal');
+              doc.text(doc.splitTextToSize(String(v), 78), 60, y);
+              y += 10;
+            });
+
+            const verifyUrl = buildReceiptVerifyUrl(code, sectorVal, procVal);
+            const qrMatrix = encodeIsoQrMatrix(verifyUrl);
+            if (qrMatrix) {
+              const qSize = qrMatrix.length;
+              const qrOriginX = 148;
+              const qrOriginY = 74;
+              const boxMm = 46;
+              const padMm = 3;
+              const modMm = (boxMm - padMm * 2) / qSize;
+              doc.setFillColor(255, 255, 255);
+              doc.setDrawColor(203, 213, 225);
+              doc.rect(qrOriginX, qrOriginY, boxMm, boxMm, 'FD');
+              doc.setFillColor(10, 37, 64);
+              for (let r = 0; r < qSize; r += 1) {
+                for (let c = 0; c < qSize; c += 1) {
+                  if (qrMatrix[r][c]) {
+                    doc.rect(qrOriginX + padMm + c * modMm, qrOriginY + padMm + r * modMm, modMm, modMm, 'F');
+                  }
+                }
+              }
+              doc.setTextColor(71, 85, 105);
+              doc.setFontSize(8.5);
+              doc.text('Escanea para verificar (ISO 18004)', qrOriginX, qrOriginY + boxMm + 5);
+            }
+
+            doc.setDrawColor(21, 128, 61);
+            doc.setFillColor(240, 253, 244);
+            doc.roundedRect(16, 146, 178, 28, 3, 3, 'FD');
+            doc.setTextColor(21, 128, 61);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(10);
+            doc.text('PRIVACIDAD Y PROTECCIÓN DE DATOS', 22, 154);
+            doc.setTextColor(15, 23, 42);
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(9.5);
+            doc.text(
+              'Sin grabación de video ni almacenamiento de chat en el navegador. Purga local aplicada al cierre conforme a la Ley N.° 29733 y la Ley N.° 29535.',
+              22,
+              161,
+              { maxWidth: 166 }
+            );
+
+            doc.save(`constancia-${code}.pdf`);
+            return;
+          }
+        } catch (err) {
+          console.warn('[Constancia PDF]', err);
+        } finally {
+          downloadingReceipt = false;
+        }
+
+        downloadReceiptTxt(code, record);
+      }
+
+      if (btnDownloadReceipt) btnDownloadReceipt.addEventListener('click', downloadReceiptFile);
+      if (btnPdfDownload) btnPdfDownload.addEventListener('click', downloadReceiptFile);
+      if (btnPrintTicket) btnPrintTicket.addEventListener('click', () => window.print());
+      if (btnPdfPrint) btnPdfPrint.addEventListener('click', () => window.print());
+
+      if (btnCopyClosureCode) {
+        btnCopyClosureCode.addEventListener('click', () => {
+          const codeText = state.lastReceiptCode || '';
+          const confirmCopied = () => {
+            btnCopyClosureCode.textContent = '¡Código copiado!';
+            if (timers.copyCodeTimer) clearTimeout(timers.copyCodeTimer);
+            timers.copyCodeTimer = setTimeout(() => {
+              btnCopyClosureCode.textContent = 'Copiar código';
+              timers.copyCodeTimer = null;
+            }, 1800);
+          };
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(codeText).then(confirmCopied).catch(confirmCopied);
+          } else {
+            confirmCopied();
+          }
+        });
+      }
+
+      if (btnPreviewPdf) {
+        btnPreviewPdf.addEventListener('click', () => {
+          closeDialog('modal-closure', { restoreFocus: false });
+          openDialog('modal-pdf-preview', btnPreviewPdf);
+        });
+      }
+
+      if (btnClosePdfPreview) {
+        btnClosePdfPreview.addEventListener('click', () => {
+          closeDialog('modal-pdf-preview', { restoreFocus: false });
+          openDialog('modal-closure', btnFinishSession);
+          if (btnPreviewPdf) btnPreviewPdf.focus();
+        });
+      }
     }
 
-    if (btnClosePdfPreview) {
-      btnClosePdfPreview.addEventListener('click', () => {
-        closeDialog('modal-pdf-preview', { restoreFocus: false });
-        openDialog('modal-closure', btnFinishSession);
-        if (btnPreviewPdf) btnPreviewPdf.focus();
-      });
-    }
+    initEmergencyFlow();
+    initChannelAndSector();
+    initChatAndSensitiveData();
+    initInterpreterConsole();
+    initClosureAndReceipt();
 
-    // Purga externa (por si algún evento dispara senasegura:purge)
     document.addEventListener('senasegura:purge', () => {
-      if (consolePrivateNotes) consolePrivateNotes.value = '';
+      clearAllSessionTimers();
+      purgeTransientInputs();
     });
+    window.addEventListener('pagehide', clearAllSessionTimers);
 
-    // Inicializar estado por defecto
     updateSectorContext('Banco');
     updateTurnLabels();
+    syncMicControlsUI();
     setInterpreterStatus('Disponible');
     setChannel(state.channel);
     updateLiveBadge();
     updateStepsGuide();
 
-    /**
-     * Puente público hacia el módulo opcional de Cámara IA (js/vision-ai.js).
-     * Expone solo lo necesario; no revela el estado interno del simulador.
-     */
     window.SenaSegura = Object.freeze({
       getChannel: () => state.channel,
-      getContext: () => ({ sector: state.sector, procedure: state.procedure }),
+      getContext: () => ({ sector: getEffectiveSector(), procedure: getEffectiveProcedure() }),
       setChannel,
       appendChatMessage(sender, text, type = 'user') {
         state.sessionActive = true;
@@ -2931,9 +2610,7 @@
 
     function verifyReceiptCode(rawInput, urlParams = null) {
       let raw = String(rawInput || '').trim().toUpperCase();
-      if (/^\d{8}$/.test(raw) || raw === '84920') {
-        raw = `SEG-${raw}`;
-      }
+      if (/^\d{8}$/.test(raw) || raw === '84920') raw = `SEG-${raw}`;
 
       const stored = receiptRegistry.get(raw);
       const isEightDigitPattern = /^SEG-\d{8}$/.test(raw);
@@ -3162,9 +2839,7 @@
       el.addEventListener('blur', () => validateField(key));
     });
 
-    if (consentEl) {
-      consentEl.addEventListener('change', validateConsent);
-    }
+    if (consentEl) consentEl.addEventListener('change', validateConsent);
 
     form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -3202,29 +2877,17 @@
     const openSupportFloating = document.getElementById('btn-floating-support');
     const openSupportFooter = document.getElementById('btn-footer-support');
 
-    if (openConformity) {
-      openConformity.addEventListener('click', () => openDialog('modal-conformity', openConformity));
-    }
-    if (openPrivacy) {
-      openPrivacy.addEventListener('click', () => openDialog('modal-privacy', openPrivacy));
-    }
+    if (openConformity) openConformity.addEventListener('click', () => openDialog('modal-conformity', openConformity));
+    if (openPrivacy) openPrivacy.addEventListener('click', () => openDialog('modal-privacy', openPrivacy));
     if (openDemoPrivacy) {
       openDemoPrivacy.addEventListener('click', (e) => {
         e.preventDefault();
         openDialog('modal-privacy', openDemoPrivacy);
       });
     }
-    if (btnPrintPrivacy) {
-      btnPrintPrivacy.addEventListener('click', () => {
-        window.print();
-      });
-    }
-    if (openSupportFloating) {
-      openSupportFloating.addEventListener('click', () => openDialog('modal-support', openSupportFloating));
-    }
-    if (openSupportFooter) {
-      openSupportFooter.addEventListener('click', () => openDialog('modal-support', openSupportFooter));
-    }
+    if (btnPrintPrivacy) btnPrintPrivacy.addEventListener('click', () => window.print());
+    if (openSupportFloating) openSupportFloating.addEventListener('click', () => openDialog('modal-support', openSupportFloating));
+    if (openSupportFooter) openSupportFooter.addEventListener('click', () => openDialog('modal-support', openSupportFooter));
 
     document.querySelectorAll('[data-close-modal]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
@@ -3258,9 +2921,6 @@
 
   /* =========================================================
      11. BOTÓN FLOTANTE DE SOPORTE: NUNCA TAPA CTAs NI FORMULARIOS (HU-046)
-     Se oculta temporalmente solo mientras su área en pantalla coincide con
-     un elemento marcado con [data-support-avoid] (CTAs del Hero, formulario
-     demo y panel de Cámara IA). Siempre queda disponible "Soporte Técnico" en el footer.
      ========================================================= */
   function initFloatingSupport() {
     const btn = document.getElementById('btn-floating-support');
@@ -3268,18 +2928,19 @@
     if (!btn || !targets.length || !('IntersectionObserver' in window)) return;
 
     const overlapping = new Set();
-    let observer = null;
+    let intersectionObserver = null;
+    let resizeTimer = 0;
+    let mutationTimer = 0;
 
     function refresh() {
       btn.classList.toggle('is-avoiding', overlapping.size > 0);
     }
 
     function observe() {
-      if (observer) observer.disconnect();
+      if (intersectionObserver) intersectionObserver.disconnect();
       overlapping.clear();
       refresh();
 
-      // El área raíz de observación es exactamente el rectángulo del botón (+8px de margen)
       const rect = btn.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
       const vh = document.documentElement.clientHeight;
@@ -3288,7 +2949,7 @@
       const right = Math.max(0, Math.round(vw - rect.right - 8));
       const bottom = Math.max(0, Math.round(vh - rect.bottom - 8));
 
-      observer = new IntersectionObserver(
+      intersectionObserver = new IntersectionObserver(
         (entries) => {
           entries.forEach((entry) => {
             if (entry.isIntersecting) overlapping.add(entry.target);
@@ -3298,30 +2959,47 @@
         },
         { rootMargin: `-${top}px -${right}px -${bottom}px -${left}px`, threshold: 0 }
       );
-      targets.forEach((el) => observer.observe(el));
+      targets.forEach((el) => intersectionObserver.observe(el));
     }
 
-    let resizeTimer = null;
-    window.addEventListener('resize', () => {
+    const scheduleResizeObserve = () => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(observe, 150);
-    });
-    // El escalado tipográfico y el contraste pueden ajustar dimensiones del botón
-    new MutationObserver(() => setTimeout(observe, 50)).observe(htmlEl, {
+    };
+
+    const scheduleMutationObserve = () => {
+      clearTimeout(mutationTimer);
+      mutationTimer = setTimeout(observe, 80);
+    };
+
+    window.addEventListener('resize', scheduleResizeObserve);
+    const mutationObserver = new MutationObserver(scheduleMutationObserve);
+    mutationObserver.observe(htmlEl, {
       attributes: true,
       attributeFilter: ['data-font-scale', 'data-contrast']
     });
+
+    window.addEventListener('pagehide', () => {
+      clearTimeout(resizeTimer);
+      clearTimeout(mutationTimer);
+      if (intersectionObserver) {
+        intersectionObserver.disconnect();
+        intersectionObserver = null;
+      }
+      mutationObserver.disconnect();
+    });
+
     observe();
-    // La tipografía web puede cambiar el tamaño del botón tras cargar
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(observe).catch(() => {});
     }
   }
 
   /* =========================================================
-     INICIALIZACIÓN
+     INICIALIZACIÓN Y PROTECCIÓN BFCACHE
      ========================================================= */
   document.addEventListener('DOMContentLoaded', () => {
+    purgeTransientInputs();
     initAccessibilityControls();
     initMobileDrawer();
     initImpactSection();
@@ -3331,5 +3009,12 @@
     initDemoForm();
     initModals();
     initFloatingSupport();
+  });
+
+  window.addEventListener('pageshow', (e) => {
+    purgeTransientInputs();
+    if (e.persisted) {
+      document.dispatchEvent(new CustomEvent('senasegura:purge'));
+    }
   });
 })();

@@ -143,7 +143,7 @@
     { id: 'letra_r', kind: 'letter', letter: 'R', emoji: 'R', label: 'Letra R', hands: '1 mano', hint: 'dedo medio cruzado sobre el índice' },
     { id: 'letra_s', kind: 'letter', letter: 'S', emoji: 'S', label: 'Letra S', hands: '1 mano', hint: 'palma al frente con pulgar cruzado sobre los dedos' },
     { id: 'letra_t', kind: 'letter', letter: 'T', emoji: 'T', label: 'Letra T', hands: '1 mano', hint: 'pulgar entre índice y medio cerrados en puño' },
-    { id: 'letra_u', kind: 'letter', letter: 'U', emoji: 'U', label: 'Letra U', hands: '1 mano', hint: 'índice y medio extendidos juntos en paralelo' },
+    { id: 'letra_u', kind: 'letter', letter: 'U', emoji: 'U', label: 'Letra U', hands: '1 mano', hint: 'índice y meñique extendidos hacia arriba formando una U (LSP)' },
     { id: 'letra_v', kind: 'letter', letter: 'V', emoji: 'V', label: 'Letra V', hands: '1 mano', hint: 'índice y medio extendidos separados en V' },
     { id: 'letra_w', kind: 'letter', letter: 'W', emoji: 'W', label: 'Letra W', hands: '1 mano', hint: 'índice, medio y anular extendidos en abanico' },
     { id: 'letra_x', kind: 'letter', letter: 'X', emoji: 'X', label: 'Letra X', hands: '1 mano', hint: 'índice flexionado en gancho' },
@@ -645,6 +645,8 @@
       else id = 'letra_v';
     } else if (I && M && R && !K) {
       id = 'letra_w';
+    } else if (I && !M && !R && K) {
+      id = 'letra_u';
     } else if (I && !M && !R && !K) {
       const lAngle = angleDeg(W[4], W[2], W[5]);
       if (thumbSpread && lAngle >= 45 && thumbToIndexMcp > 0.70) id = 'letra_l';
@@ -1175,6 +1177,7 @@
         pointingDownTwoFingers: false,
         pointingDownIndexThumb: false,
         enieFoldedPosture: false,
+        lspUHornsPosture: false,
         middleToRingDist: 0,
         middleBelowRingY: 0,
         twoFingerSpan: 0,
@@ -1237,6 +1240,21 @@
 
     const enieFoldedPosture = ringCurled && pinkyCurled && !indexExtendedStraight && !middleExtendedStraight;
 
+    const lspUHornsPosture = (
+      idxAng >= 130 &&
+      dist3(pts[8], pts[0]) > dist3(pts[6], pts[0]) * 1.10 &&
+      pts[8].y < pts[5].y - 0.10 &&
+      pinkyAng >= 125 &&
+      dist3(pts[20], pts[0]) > dist3(pts[18], pts[0]) * 1.08 &&
+      pts[20].y < pts[17].y - 0.08 &&
+      midAng <= 130 &&
+      ringAng <= 130 &&
+      !middleExtendedStraight &&
+      !ringExt &&
+      pts[12].y > pts[8].y + 0.16 &&
+      pts[16].y > pts[20].y + 0.12
+    );
+
     return {
       indexExt,
       middleExt,
@@ -1250,6 +1268,7 @@
       pointingDownTwoFingers,
       pointingDownIndexThumb,
       enieFoldedPosture,
+      lspUHornsPosture,
       middleToRingDist,
       middleBelowRingY,
       twoFingerSpan,
@@ -1274,6 +1293,14 @@
     });
     const geom = postures || detectCanonicalHandPostures(pts);
     const best = topCandidates[0];
+
+    if (geom.lspUHornsPosture) {
+      return {
+        label: 'U',
+        score: Math.min(0.99, Math.max(0.88, best.score)),
+        refined: best.label !== 'U'
+      };
+    }
 
     const pU = probMap.U || 0;
     const pV = probMap.V || 0;

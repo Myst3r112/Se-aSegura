@@ -144,38 +144,6 @@
     [11, 23], [12, 24], [23, 24]
   ];
 
-  const NEURAL_GUIDE_ITEMS = [
-    {
-      emoji: '\u{1F590}\u{FE0F}',
-      title: 'Vocabulario dinámico LSP (118 señas):',
-      detail: ' realiza señas fluidas con 1 o 2 manos (hola, ayudar, enferma, dinero, comprar, preguntar, qué pasó, cómo, dónde, cuánto, sí, no, esperar).'
-    },
-    {
-      emoji: '\u{1F524}',
-      title: 'Deletreo estático (A–Y, 1 mano):',
-      detail: ' forma una letra con una sola mano y detén la muñeca ~0.35 s para confirmarla (incluye C, M, N, P, Q, T, X).'
-    },
-    {
-      emoji: '\u{270D}\u{FE0F}',
-      title: 'Letras con trazo (J, Ñ, Z):',
-      detail: ' J (meñique en I bajando en gancho), Ñ (N agitando la muñeca horizontalmente) y Z (D trazando zig-zag con el índice).'
-    },
-    {
-      emoji: '\u{2423}',
-      title: 'Espacio y envío sin apuros:',
-      detail: ' pulsa “Espacio” o sostén postura neutra para separar palabras. Al deletrear no se envía a los 2 s: pulsa “Enviar y leer al funcionario” al terminar.'
-    }
-  ];
-
-  const LETTER_CONFUSION_GUIDE = [
-    { letter: 'D', tip: 'Índice vertical arriba; pulgar y dedo medio forman un círculo al frente.' },
-    { letter: 'M', tip: 'Tres dedos (índice, medio y anular) doblados cubriendo el pulgar.' },
-    { letter: 'N', tip: 'Solo dos dedos (índice y medio) doblados sobre el pulgar.' },
-    { letter: 'Ñ', tip: 'Forma la N y agita o gira suavemente la muñeca de lado a lado.' },
-    { letter: 'J', tip: 'Meñique extendido (como I) trazando una curva hacia abajo y adentro.' },
-    { letter: 'Z', tip: 'Índice extendido (como D) dibujando un zig-zag: lado, diagonal y lado.' }
-  ];
-
   /* =========================================================
      2. ESTADO COMPARTIDO Y PRECARGA DE MODELOS TF.JS + MEDIAPIPE
      ========================================================= */
@@ -416,52 +384,6 @@
   /* =========================================================
      3. MÓDULO DE INTERFAZ Y CÁMARA
      ========================================================= */
-  function renderVisionGuides(guideList, letterRefBox) {
-    if (guideList) {
-      NEURAL_GUIDE_ITEMS.forEach((item) => {
-        const li = document.createElement('li');
-        const guideEmoji = document.createElement('span');
-        guideEmoji.className = 'vision-guide-emoji';
-        guideEmoji.setAttribute('aria-hidden', 'true');
-        guideEmoji.textContent = item.emoji;
-
-        const descWrap = document.createElement('span');
-        const strong = document.createElement('strong');
-        strong.textContent = item.title;
-        descWrap.append(strong, item.detail);
-
-        li.append(guideEmoji, descWrap);
-        guideList.appendChild(li);
-      });
-    }
-
-    if (letterRefBox) {
-      const refTitle = document.createElement('p');
-      refTitle.className = 'vision-letter-ref-title';
-      refTitle.textContent = 'Posición rápida para letras que suelen confundirse (D, M, N, Ñ, J, Z)';
-
-      const refGrid = document.createElement('div');
-      refGrid.className = 'vision-letter-ref-grid';
-
-      LETTER_CONFUSION_GUIDE.forEach((item) => {
-        const card = document.createElement('div');
-        card.className = 'vision-letter-ref-card';
-
-        const badge = document.createElement('span');
-        badge.className = 'vision-letter-ref-badge';
-        badge.textContent = item.letter;
-
-        const txt = document.createElement('span');
-        txt.textContent = item.tip;
-
-        card.append(badge, txt);
-        refGrid.appendChild(card);
-      });
-
-      letterRefBox.replaceChildren(refTitle, refGrid);
-    }
-  }
-
   function init() {
     const $ = (id) => document.getElementById(id);
     const panel = $('vision-panel');
@@ -488,8 +410,6 @@
     const btnSpace = $('btn-vision-space');
     const btnUndo = $('btn-vision-undo');
     const btnClear = $('btn-vision-clear');
-    const guideList = $('vision-guide-list');
-    const letterRefBox = $('vision-letter-ref');
     const sentenceEl = $('vision-sentence');
     const lastDetectEl = $('vision-last-detect');
     const sentNote = $('vision-sent-note');
@@ -3058,7 +2978,6 @@
       }
     }
 
-    renderVisionGuides(guideList, letterRefBox);
     bindVisionEvents();
 
     if ('speechSynthesis' in window && typeof window.speechSynthesis.getVoices === 'function') {

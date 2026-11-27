@@ -49,8 +49,18 @@
   const TRAJ_NUM_FEATURES = 12; // v_muñeca(3) + v_índice(3) + v_meñique(3) + normal de palma(3)
   const TRAJ_DYNAMIC_LABELS = new Set(['J', 'Ñ', 'Z']);
   const TRAJ_STATIC_LABEL = 'ESTATICA';
-  const TRAJ_STATE_MAX_AGE_MS = 300; // vigencia de la última predicción de la Micro-GRU
+  const TRAJ_HISTORY_MAX_MS = 1600; // ventana temporal para remuestreo activo y geometría Z/J/Ñ
+  const TRAJ_HISTORY_MAX_FRAMES = 50;
+  const TRAJ_RESAMPLE_MIN_MS = 450;
+  const TRAJ_RESAMPLE_MAX_MS = 1400;
+  const STATIC_HISTORY_MAX_MS = 900;
   const DYNAMIC_EMIT_LOCK_MS = 900; // evita re-disparar la letra dinámica o confirmar la postura base tras emitirla
+  const DYNAMIC_REPLACE_WINDOW_MS = 1200; // reemplazo limpio D→Z e I→J
+  const ENIE_GRU_MIN_CONF = 0.84;
+  const ENIE_STREAK_REQUIRED = 2;
+  const ZJ_GRU_MIN_CONF = 0.72;
+  const ENIE_COMPATIBLE_LABELS = new Set(['N', 'M', 'H', 'T']);
+  const ENIE_INCOMPATIBLE_LABELS = new Set(['A', 'B', 'C', 'D', 'F', 'I', 'L', 'O', 'P', 'U', 'V', 'W', 'Y']);
   const STATIC_SPACE_LABEL = 'ESPACIO';
   const SPELL_SESSION_HOLD_MS = 2800; // protege sesión de deletreo activa frente al motor de 118 señas
   const MAX_TRAIL_POINTS = 14; // estela visual de trazos J, Ñ, Z y señas dinámicas
@@ -1336,23 +1346,34 @@
    * x invertido en manos izquierdas) más los 3 valores de la normal unitaria de la palma.
    * Con `prevLandmarks` nulo devuelve velocidades 0 (primer frame de la mano).
    */
-  function extractTrajectoryFrame(prevLandmarks, curLandmarks, handedness = 'Right', aspect = 1, palmNormal = null) {
+  function extractTrajectoryFrame(prevLandmarks, curLandmarks, handedness = 'Right', aspect = 1, palmNormal = null, options = null) {
     if (!Array.isArray(curLandmarks) || curLandmarks.length < 21) return null;
     const prev = Array.isArray(prevLandmarks) && prevLandmarks.length >= 21 ? prevLandmarks : curLandmarks;
     const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
     const flip = normalizeHandedness(handedness) === 'Left' ? -1 : 1;
+    const mirrorSign = options && options.mirrorX ? -1 : 1;
+    const prevWorld = options && Array.isArray(options.prevWorld) && options.prevWorld.length >= 21 ? options.prevWorld : null;
+    const curWorld = options && Array.isArray(options.curWorld) && options.curWorld.length >= 21 ? options.curWorld : null;
+    const dzDamping = options && Number.isFinite(options.dzDamping) ? options.dzDamping : 0.35;
     const palm = Math.hypot(
       (curLandmarks[9].x - curLandmarks[0].x) * safeAspect,
       curLandmarks[9].y - curLandmarks[0].y,
       ((curLandmarks[9].z || 0) - (curLandmarks[0].z || 0)) * safeAspect
     );
+    const worldPalm = curWorld
+      ? Math.max(1e-4, dist3(curWorld[9], curWorld[0]))
+      : palm;
     if (!(palm > 1e-6)) return null;
 
     const out = new Float32Array(TRAJ_NUM_FEATURES);
     [0, 8, 20].forEach((lm, k) => {
-      out[k * 3] = (flip * (curLandmarks[lm].x - prev[lm].x) * safeAspect) / palm;
+      out[k * 3] = (flip * mirrorSign * (curLandmarks[lm].x - prev[lm].x) * safeAspect) / palm;
       out[k * 3 + 1] = (curLandmarks[lm].y - prev[lm].y) / palm;
-      out[k * 3 + 2] = (((curLandmarks[lm].z || 0) - (prev[lm].z || 0)) * safeAspect) / palm;
+      let rawDz = curWorld && prevWorld
+        ? ((curWorld[lm].z || 0) - (prevWorld[lm].z || 0)) / worldPalm
+        : (((curLandmarks[lm].z || 0) - (prev[lm].z || 0)) * safeAspect) / palm;
+      if (Math.abs(rawDz) < 0.015) rawDz = 0;
+      out[k * 3 + 2] = rawDz * dzDamping;
     });
     if (palmNormal && palmNormal.length >= 3) {
       out[9] = palmNormal[0];
@@ -1373,6 +1394,360 @@
       out.set(std, t * TRAJ_NUM_FEATURES);
     }
     return out;
+  }
+
+  /**
+   * Remuestrea uniformemente `targetLen` frames de trayectoria sobre la ventana activa de movimiento
+   * dentro de `[TRAJ_RESAMPLE_MIN_MS, TRAJ_RESAMPLE_MAX_MS]` y recomputa velocidades diferenciales paso a paso.
+   */
+  function resampleTrajectorySequence(history, targetLen = TRAJ_SEQ_LEN, nowMs = null, options = null) {
+    if (!Array.isArray(history) || history.length < 2) return null;
+    const newest = history[history.length - 1];
+    const refNow = Number.isFinite(nowMs) ? nowMs : newest.at;
+    const minWindow = (options && Number.isFinite(options.minMs)) ? options.minMs : TRAJ_RESAMPLE_MIN_MS;
+    const maxWindow = (options && Number.isFinite(options.maxMs)) ? options.maxMs : TRAJ_RESAMPLE_MAX_MS;
+
+    // Filtrar a la ventana temporal máxima reciente
+    const recent = history.filter((item) => item && (refNow - item.at) <= maxWindow);
+    if (recent.length < 2) return null;
+
+    const totalSpan = recent[recent.length - 1].at - recent[0].at;
+    if (totalSpan < minWindow) return null;
+
+    // Detectar inicio del tramo de movimiento activo (umbral sobre desplazamiento normalizado respecto a la palma)
+    let startIdx = 0;
+    for (let i = 1; i < recent.length; i += 1) {
+      const prev = recent[i - 1];
+      const cur = recent[i];
+      const palm = Math.max(1e-4, cur.palm || 0.08);
+      const stepMag = (
+        Math.hypot(cur.index[0] - prev.index[0], cur.index[1] - prev.index[1]) +
+        Math.hypot(cur.pinky[0] - prev.pinky[0], cur.pinky[1] - prev.pinky[1]) +
+        Math.hypot(cur.wrist[0] - prev.wrist[0], cur.wrist[1] - prev.wrist[1]) * 0.5
+      ) / palm;
+      if (stepMag >= 0.025) {
+        startIdx = Math.max(0, i - 1);
+        break;
+      }
+    }
+
+    let active = recent.slice(startIdx);
+    if (active.length < 2 || (active[active.length - 1].at - active[0].at) < minWindow) {
+      active = recent;
+    }
+
+    const t0 = active[0].at;
+    const t1 = active[active.length - 1].at;
+    if ((t1 - t0) < minWindow) return null;
+
+    // Interpolar muestras en instantes uniformes [t0, t1]
+    const sampled = [];
+    for (let s = 0; s < targetLen; s += 1) {
+      const targetT = t0 + ((t1 - t0) * s) / Math.max(1, targetLen - 1);
+      let hi = active.length - 1;
+      for (let i = 1; i < active.length; i += 1) {
+        if (active[i].at >= targetT) {
+          hi = i;
+          break;
+        }
+      }
+      const lo = Math.max(0, hi - 1);
+      const a = active[lo];
+      const b = active[hi];
+      const dt = Math.max(1e-6, b.at - a.at);
+      const alpha = a === b ? 0 : clamp((targetT - a.at) / dt, 0, 1);
+      const lerp3 = (p, q) => [
+        p[0] + (q[0] - p[0]) * alpha,
+        p[1] + (q[1] - p[1]) * alpha,
+        (p[2] || 0) + ((q[2] || 0) - (p[2] || 0)) * alpha
+      ];
+      sampled.push({
+        wrist: lerp3(a.wrist, b.wrist),
+        index: lerp3(a.index, b.index),
+        pinky: lerp3(a.pinky, b.pinky),
+        worldWrist: a.worldWrist && b.worldWrist ? lerp3(a.worldWrist, b.worldWrist) : null,
+        worldIndex: a.worldIndex && b.worldIndex ? lerp3(a.worldIndex, b.worldIndex) : null,
+        worldPinky: a.worldPinky && b.worldPinky ? lerp3(a.worldPinky, b.worldPinky) : null,
+        palm: a.palm + (b.palm - a.palm) * alpha,
+        worldPalm: (a.worldPalm || a.palm) + ((b.worldPalm || b.palm) - (a.worldPalm || a.palm)) * alpha,
+        normal: lerp3(a.normal || [0, 0, 1], b.normal || [0, 0, 1]),
+        flip: b.flip || 1,
+        mirrorSign: b.mirrorSign || 1,
+        aspect: a.aspect + (b.aspect - a.aspect) * alpha
+      });
+    }
+
+    const frames = [];
+    const dzDamping = options && Number.isFinite(options.dzDamping) ? options.dzDamping : 0.35;
+    for (let s = 0; s < targetLen; s += 1) {
+      const cur = sampled[s];
+      const prev = s > 0 ? sampled[s - 1] : sampled[0];
+      const palm = Math.max(1e-4, cur.palm);
+      const worldPalm = Math.max(1e-4, cur.worldPalm || palm);
+      const out = new Float32Array(TRAJ_NUM_FEATURES);
+      const keys = ['wrist', 'index', 'pinky'];
+      const wKeys = ['worldWrist', 'worldIndex', 'worldPinky'];
+      for (let k = 0; k < 3; k += 1) {
+        const pPrev = prev[keys[k]];
+        const pCur = cur[keys[k]];
+        out[k * 3] = (cur.flip * cur.mirrorSign * (pCur[0] - pPrev[0]) * cur.aspect) / palm;
+        out[k * 3 + 1] = (pCur[1] - pPrev[1]) / palm;
+        let rawDz = cur[wKeys[k]] && prev[wKeys[k]]
+          ? ((cur[wKeys[k]][2] || 0) - (prev[wKeys[k]][2] || 0)) / worldPalm
+          : (((pCur[2] || 0) - (pPrev[2] || 0)) * cur.aspect) / palm;
+        if (Math.abs(rawDz) < 0.015) rawDz = 0;
+        out[k * 3 + 2] = rawDz * dzDamping;
+      }
+      out[9] = cur.normal[0];
+      out[10] = cur.normal[1];
+      out[11] = cur.normal[2];
+      for (let i = 0; i < out.length; i += 1) {
+        if (!Number.isFinite(out[i])) out[i] = 0;
+      }
+      frames.push(out);
+    }
+    return frames;
+  }
+
+  /** Detecta posturas canónicas 3D a partir de `pts` canonicalizados (`canonicalizeHand3D`). */
+  function detectCanonicalHandPostures(pts) {
+    if (!Array.isArray(pts) || pts.length < 21) {
+      return {
+        indexExt: false,
+        middleExt: false,
+        ringExt: false,
+        pinkyExt: false,
+        indexOnlyExtended: false,
+        pinkyOnlyExtended: false,
+        ringPinkyCurled: false,
+        pointingDownTwoFingers: false,
+        twoFingerSpan: 0,
+        knuckleSpan: 0,
+        latDot: 0
+      };
+    }
+    const idxAng = angleDeg(pts[5], pts[6], pts[8]);
+    const midAng = angleDeg(pts[9], pts[10], pts[12]);
+    const ringAng = angleDeg(pts[13], pts[14], pts[16]);
+    const pinkyAng = angleDeg(pts[17], pts[18], pts[20]);
+
+    const indexExt = idxAng >= 132 || dist3(pts[8], pts[0]) > dist3(pts[6], pts[0]) * 1.12;
+    const middleExt = midAng >= 130 || dist3(pts[12], pts[0]) > dist3(pts[10], pts[0]) * 1.12;
+    const ringExt = ringAng >= 130 || dist3(pts[16], pts[0]) > dist3(pts[14], pts[0]) * 1.15;
+    const pinkyExt = pinkyAng >= 130 || dist3(pts[20], pts[0]) > dist3(pts[18], pts[0]) * 1.15;
+
+    const ringCurled = ringAng <= 125 && dist3(pts[16], pts[0]) <= dist3(pts[14], pts[0]) * 1.08;
+    const pinkyCurled = pinkyAng <= 125 && dist3(pts[20], pts[0]) <= dist3(pts[18], pts[0]) * 1.08;
+    const middleCurled = midAng <= 125 && dist3(pts[12], pts[0]) <= dist3(pts[10], pts[0]) * 1.08;
+    const indexCurled = idxAng <= 125 && dist3(pts[8], pts[0]) <= dist3(pts[6], pts[0]) * 1.08;
+
+    const knuckleSpan = Math.max(1e-4, dist3(pts[5], pts[9]));
+    const twoFingerSpan = dist3(pts[8], pts[12]);
+    const latDot = (pts[12].x - pts[8].x) * (pts[9].x - pts[5].x) + (pts[12].y - pts[8].y) * (pts[9].y - pts[5].y);
+
+    const pointingDownTwoFingers = (
+      idxAng >= 125 && midAng >= 125 &&
+      ringAng <= 125 && pinkyAng <= 125 &&
+      pts[8].y > pts[5].y + 0.10 &&
+      pts[12].y > pts[9].y + 0.10
+    );
+
+    return {
+      indexExt,
+      middleExt,
+      ringExt,
+      pinkyExt,
+      indexOnlyExtended: indexExt && middleCurled && ringCurled && pinkyCurled,
+      pinkyOnlyExtended: pinkyExt && indexCurled && middleCurled && ringCurled,
+      ringPinkyCurled: ringCurled && pinkyCurled,
+      pointingDownTwoFingers,
+      twoFingerSpan,
+      knuckleSpan,
+      latDot
+    };
+  }
+
+  /**
+   * Desambigua pares estáticos 3D cercanos (`U`/`V`/`R` y `P` frente a `{K, Q, H, G}`)
+   * usando la geometría canónica `pts` sin alterar los pesos del modelo entrenado.
+   */
+  function refineStatic3DLabel(topCandidates, pts, postures = null) {
+    if (!Array.isArray(topCandidates) || !topCandidates.length || !Array.isArray(pts) || pts.length < 21) {
+      return topCandidates && topCandidates[0] ? { label: topCandidates[0].label, score: topCandidates[0].score, refined: false } : null;
+    }
+    const probMap = Object.create(null);
+    topCandidates.forEach((item) => {
+      if (item && item.label) probMap[item.label] = item.score;
+    });
+    const geom = postures || detectCanonicalHandPostures(pts);
+    const best = topCandidates[0];
+
+    // 1. Desambiguación U vs V vs R (índice + medio extendidos, anular + meñique cerrados)
+    const pU = probMap.U || 0;
+    const pV = probMap.V || 0;
+    const pR = probMap.R || 0;
+    const sumUVR = pU + pV + pR;
+    if (sumUVR >= 0.65 && (best.label === 'U' || best.label === 'V' || best.label === 'R')) {
+      const tipDist = geom.twoFingerSpan;
+      const uLimit = Math.max(0.34, geom.knuckleSpan * 1.40);
+      if (geom.latDot <= 0.02 && geom.indexExt && geom.middleExt) {
+        return { label: 'R', score: Math.max(best.score, pR + 0.15, sumUVR * 0.85), refined: best.label !== 'R' };
+      }
+      if (geom.latDot > 0.02 && tipDist <= uLimit && geom.indexExt && geom.middleExt) {
+        return { label: 'U', score: Math.max(best.score, pU + 0.18, sumUVR * 0.85), refined: best.label !== 'U' };
+      }
+      if (tipDist > 0.38 && geom.indexExt && geom.middleExt) {
+        return { label: 'V', score: Math.max(best.score, pV + 0.12, sumUVR * 0.82), refined: best.label !== 'V' };
+      }
+    }
+
+    // 2. Desambiguación de P (dedos índice y medio apuntando hacia abajo, anular y meñique cerrados)
+    const pCluster = ['P', 'K', 'Q', 'H', 'G'];
+    const pInTop3 = topCandidates.slice(0, 3).some((c) => c && c.label === 'P');
+    const sumPKQHG = pCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
+    if ((pInTop3 || sumPKQHG >= 0.58) && geom.pointingDownTwoFingers && (probMap.P || 0) >= 0.06) {
+      return {
+        label: 'P',
+        score: Math.max(best.score, (probMap.P || 0) + 0.22, sumPKQHG * 0.85),
+        refined: best.label !== 'P'
+      };
+    }
+
+    return { label: best.label, score: best.score, refined: false };
+  }
+
+  /** Evalúa firmas geométricas 3D/2D de movimiento para `Ñ`, `Z` y `J` sobre `trajHistory`. */
+  function analyzeTrajectoryMotion(history, nowMs = null) {
+    const empty = {
+      enieMotionOk: false,
+      zMotionOk: false,
+      jMotionOk: false,
+      spanX: 0,
+      spanY: 0,
+      reversals: 0,
+      dropY: 0,
+      hookDx: 0
+    };
+    if (!Array.isArray(history) || history.length < 4) return empty;
+    const newest = history[history.length - 1];
+    const refNow = Number.isFinite(nowMs) ? nowMs : newest.at;
+    const recent = history.filter((item) => item && (refNow - item.at) >= 0 && (refNow - item.at) <= 1350);
+    if (recent.length < 4) return empty;
+    const spanMs = recent[recent.length - 1].at - recent[0].at;
+    if (spanMs < 350) return empty;
+
+    let palmSum = 0;
+    for (let i = 0; i < recent.length; i += 1) {
+      palmSum += Math.max(1e-4, recent[i].palm || 0.08);
+    }
+    const avgPalm = palmSum / recent.length;
+
+    // 1. Oscilación horizontal para Ñ (nudillos/muñeca/índice horizontalmente sin desplazamiento vertical grande)
+    const enieWindow = recent.filter((item) => (refNow - item.at) >= 0 && (refNow - item.at) <= 1300);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    const dirSequence = [];
+    for (let i = 0; i < enieWindow.length; i += 1) {
+      const p = enieWindow[i];
+      const cx = (p.index[0] + p.wrist[0]) * 0.5;
+      const cy = (p.index[1] + p.wrist[1]) * 0.5;
+      if (cx < minX) minX = cx;
+      if (cx > maxX) maxX = cx;
+      if (cy < minY) minY = cy;
+      if (cy > maxY) maxY = cy;
+      if (i > 0) {
+        const prev = enieWindow[i - 1];
+        const prevCx = (prev.index[0] + prev.wrist[0]) * 0.5;
+        const dx = cx - prevCx;
+        if (Math.abs(dx) >= avgPalm * 0.025) {
+          const s = dx > 0 ? 1 : -1;
+          if (!dirSequence.length || dirSequence[dirSequence.length - 1] !== s) {
+            dirSequence.push(s);
+          }
+        }
+      }
+    }
+    const reversals = Math.max(0, dirSequence.length - 1);
+    const spanX = Number.isFinite(maxX - minX) ? (maxX - minX) : 0;
+    const spanY = Number.isFinite(maxY - minY) ? (maxY - minY) : 0;
+    const enieDuration = enieWindow.length >= 2 ? (enieWindow[enieWindow.length - 1].at - enieWindow[0].at) : 0;
+    const enieMotionOk = (
+      enieDuration >= 450 &&
+      spanX >= 0.24 * avgPalm &&
+      spanX > spanY * 1.25 &&
+      reversals >= 2
+    );
+
+    // 2. Zig-zag Z sobre punta del índice [8] (agnóstico al signo espejo horizontal)
+    let zMinX = Infinity;
+    let zMaxX = -Infinity;
+    let zMinY = Infinity;
+    let zMaxY = -Infinity;
+    const zHorizDirs = [];
+    for (let i = 0; i < recent.length; i += 1) {
+      const p = recent[i].index;
+      if (p[0] < zMinX) zMinX = p[0];
+      if (p[0] > zMaxX) zMaxX = p[0];
+      if (p[1] < zMinY) zMinY = p[1];
+      if (p[1] > zMaxY) zMaxY = p[1];
+      if (i > 0) {
+        const dx = p[0] - recent[i - 1].index[0];
+        if (Math.abs(dx) >= avgPalm * 0.04) {
+          const s = dx > 0 ? 1 : -1;
+          if (!zHorizDirs.length || zHorizDirs[zHorizDirs.length - 1] !== s) {
+            zHorizDirs.push(s);
+          }
+        }
+      }
+    }
+    const zSpanX = Number.isFinite(zMaxX - zMinX) ? (zMaxX - zMinX) : 0;
+    const zSpanY = Number.isFinite(zMaxY - zMinY) ? (zMaxY - zMinY) : 0;
+    const zMotionOk = (
+      zSpanX >= 0.36 * avgPalm &&
+      zSpanY >= 0.26 * avgPalm &&
+      zHorizDirs.length >= 3
+    );
+
+    // 3. Trazo descendente + gancho para J sobre punta del meñique [20]
+    let lowestY = -Infinity;
+    let maxDropY = 0;
+    let hookDx = 0;
+    const pFirst = recent[0].pinky;
+    let minPinkyYIdx = 0;
+    for (let i = 0; i < recent.length; i += 1) {
+      if (recent[i].pinky[1] < recent[minPinkyYIdx].pinky[1]) minPinkyYIdx = i;
+      if (recent[i].pinky[1] > lowestY) lowestY = recent[i].pinky[1];
+    }
+    const peakStart = recent[minPinkyYIdx].pinky;
+    let bottomIdx = minPinkyYIdx;
+    for (let i = minPinkyYIdx; i < recent.length; i += 1) {
+      if (recent[i].pinky[1] > recent[bottomIdx].pinky[1]) bottomIdx = i;
+    }
+    maxDropY = Math.max(lowestY - pFirst[1], recent[bottomIdx].pinky[1] - peakStart[1]);
+    if (bottomIdx < recent.length - 1) {
+      const bottomX = recent[bottomIdx].pinky[0];
+      for (let i = bottomIdx + 1; i < recent.length; i += 1) {
+        const dx = recent[i].pinky[0] - bottomX;
+        if (Math.abs(dx) > Math.abs(hookDx)) hookDx = dx;
+      }
+    } else if (recent.length >= 4) {
+      const split = Math.floor(recent.length * 0.65);
+      hookDx = recent[recent.length - 1].pinky[0] - recent[split].pinky[0];
+    }
+    const jMotionOk = maxDropY >= 0.28 * avgPalm && Math.abs(hookDx) >= 0.16 * avgPalm;
+
+    return {
+      enieMotionOk,
+      zMotionOk,
+      jMotionOk,
+      spanX,
+      spanY,
+      reversals,
+      dropY: maxDropY,
+      hookDx
+    };
   }
 
   /**
@@ -1452,11 +1827,16 @@
       let restCount = 0;
       let elevSum = 0;
       for (let i = 0; i < handCount; i += 1) {
-        const w = hands[i] && hands[i][0];
+        const hand = hands[i];
+        const w = hand && hand[0];
         if (!w) continue;
         const elev = (hipLineY - w.y) / torsoHeight;
         elevSum += elev;
-        if (w.y >= 0.89 || elev < 0.12) restCount += 1;
+        const tipMid = hand[12];
+        const pointingDown = tipMid && tipMid.y > w.y + 0.04;
+        if (pointingDown ? (w.y >= 0.92 || elev < 0.05) : (w.y >= 0.89 || elev < 0.12)) {
+          restCount += 1;
+        }
       }
       avgWristElevation = Number((elevSum / handCount).toFixed(2));
       inRestZone = restCount === handCount;
@@ -1645,6 +2025,10 @@
     standardizeFeatures,
     extractTrajectoryFrame,
     standardizeTrajectorySequence,
+    resampleTrajectorySequence,
+    detectCanonicalHandPostures,
+    refineStatic3DLabel,
+    analyzeTrajectoryMotion,
     smoothLandmarksEMA,
     analyzeBiomechanics,
     detectWideArmMotion,
@@ -1950,6 +2334,7 @@
     let isAlphabetInferring = false;
     let isTrajectoryInferring = false;
     let prevTrajLandmarks = null;
+    let prevTrajWorld = null;
     let trajEpoch = 0;
     let lastDynamicEmitAt = 0;
     let lastHudTop2At = 0;
@@ -1958,7 +2343,11 @@
     const smoothedHandSlots = { Left: null, Right: null };
     const smoothedWorldSlots = { Left: null, Right: null };
     const trajectoryBuffer = [];
+    const trajHistory = [];
+    const recentStaticHistory = [];
     const trajectoryState = { label: null, prob: 0, at: 0 };
+    const trajStreak = { label: null, count: 0 };
+    const lastStaticConfirmed = { label: null, at: 0 };
     const trailPoints = [];
     const wristMacroBuffer = [];
     const MAX_WRIST_MACRO = 10;
@@ -2029,14 +2418,18 @@
       spellCandidate.scoreN = 0;
     }
 
-    /** Reinicia el buffer de la Micro-GRU (se re-cebará con velocidades 0 al reaparecer la mano). */
+    /** Reinicia el buffer y la historia temporal de la Micro-GRU. */
     function resetTrajectory() {
       trajEpoch += 1;
       trajectoryBuffer.length = 0;
+      trajHistory.length = 0;
       prevTrajLandmarks = null;
+      prevTrajWorld = null;
       trajectoryState.label = null;
       trajectoryState.prob = 0;
       trajectoryState.at = 0;
+      trajStreak.label = null;
+      trajStreak.count = 0;
     }
 
     function resetDynamicCandidate() {
@@ -2116,6 +2509,8 @@
       sentenceTokens = [];
       activeSentenceExpression = 'neutro';
       latestDescriptorSnapshot = null;
+      lastStaticConfirmed.label = null;
+      lastStaticConfirmed.at = 0;
       Object.keys(lastAddedAt).forEach((key) => delete lastAddedAt[key]);
       lastDetectEl.textContent = DEFAULT_LAST_DETECT;
       sentNote.hidden = true;
@@ -2144,6 +2539,9 @@
       resetTrajectory();
       missingHandFrames = 0;
       lastLetterConfirmedAt = 0;
+      recentStaticHistory.length = 0;
+      lastStaticConfirmed.label = null;
+      lastStaticConfirmed.at = 0;
       smoothedHandSlots.Left = null;
       smoothedHandSlots.Right = null;
       smoothedWorldSlots.Left = null;
@@ -3093,6 +3491,13 @@
         if (canSpace && (typeof last !== 'number' || now - last >= SPELL_COOLDOWN_MS)) {
           lastAddedAt[tokenId] = now;
           lastLetterConfirmedAt = now;
+          if (isSpace) {
+            lastStaticConfirmed.label = null;
+            lastStaticConfirmed.at = 0;
+          } else {
+            lastStaticConfirmed.label = spellCandidate.label;
+            lastStaticConfirmed.at = now;
+          }
           const token = {
             id: tokenId,
             kind: isSpace ? 'space' : 'letter',
@@ -3116,26 +3521,66 @@
     }
 
     /**
-     * Cebado del buffer de la Micro-GRU y avance de un frame: mantiene 16 frames [dx, dy, dz de muñeca,
-     * índice y meñique + normal de palma]. Al aparecer la mano se rellena con velocidades 0.
+     * Registra la trayectoria timestamped para remuestreo activo [450–1400 ms] y mantiene
+     * el buffer base [16, 12] de respaldo con espejo y amortiguamiento dz en mundo 3D.
      */
-    function pushTrajectoryFrame(rawHand, side, aspect, palmNormal) {
+    function pushTrajectoryFrame(rawHand, side, aspect, palmNormal, now = performance.now(), worldHand = null) {
       const cur = rawHand.map((p) => ({ x: p.x, y: p.y, z: p.z || 0 }));
+      const curW = Array.isArray(worldHand) && worldHand.length >= 21
+        ? worldHand.map((p) => ({ x: p.x, y: p.y, z: p.z || 0 }))
+        : null;
+      const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+      const palm = Math.hypot(
+        (cur[9].x - cur[0].x) * safeAspect,
+        cur[9].y - cur[0].y,
+        ((cur[9].z || 0) - (cur[0].z || 0)) * safeAspect
+      );
+      if (palm > 1e-6) {
+        const worldPalm = curW ? Math.max(1e-4, dist3(curW[9], curW[0])) : palm;
+        trajHistory.push({
+          at: now,
+          wrist: [cur[0].x, cur[0].y, cur[0].z || 0],
+          index: [cur[8].x, cur[8].y, cur[8].z || 0],
+          pinky: [cur[20].x, cur[20].y, cur[20].z || 0],
+          worldWrist: curW ? [curW[0].x, curW[0].y, curW[0].z || 0] : null,
+          worldIndex: curW ? [curW[8].x, curW[8].y, curW[8].z || 0] : null,
+          worldPinky: curW ? [curW[20].x, curW[20].y, curW[20].z || 0] : null,
+          palm,
+          worldPalm,
+          normal: palmNormal && palmNormal.length >= 3 ? [palmNormal[0], palmNormal[1], palmNormal[2]] : [0, 0, 1],
+          flip: normalizeHandedness(side) === 'Left' ? -1 : 1,
+          mirrorSign: mirrorEnabled ? -1 : 1,
+          aspect: safeAspect
+        });
+        while (
+          trajHistory.length > TRAJ_HISTORY_MAX_FRAMES ||
+          (trajHistory.length > 0 && now - trajHistory[0].at > TRAJ_HISTORY_MAX_MS)
+        ) {
+          trajHistory.shift();
+        }
+      }
+
+      const frameOpts = { prevWorld: prevTrajWorld, curWorld: curW, mirrorX: mirrorEnabled, dzDamping: 0.35 };
       if (!prevTrajLandmarks) {
-        const zeroFrame = extractTrajectoryFrame(null, cur, side, aspect, palmNormal);
+        const zeroFrame = extractTrajectoryFrame(null, cur, side, aspect, palmNormal, frameOpts);
         if (!zeroFrame) return;
         trajectoryBuffer.length = 0;
         for (let i = 0; i < TRAJ_SEQ_LEN - 1; i += 1) trajectoryBuffer.push(zeroFrame);
         prevTrajLandmarks = cur;
+        prevTrajWorld = curW;
       }
-      const frame = extractTrajectoryFrame(prevTrajLandmarks, cur, side, aspect, palmNormal);
+      const frame = extractTrajectoryFrame(prevTrajLandmarks, cur, side, aspect, palmNormal, frameOpts);
       prevTrajLandmarks = cur;
+      prevTrajWorld = curW;
       if (!frame) return;
       if (trajectoryBuffer.length >= TRAJ_SEQ_LEN) trajectoryBuffer.shift();
       trajectoryBuffer.push(frame);
     }
 
-    /** Emite al instante una letra dinámica (J, Ñ, Z) predicha por la Micro-GRU y reinicia el buffer de deletreo. */
+    /**
+     * Emite una letra dinámica (J, Ñ, Z). Si la postura base previa (I o D) se confirmó
+     * hace < DYNAMIC_REPLACE_WINDOW_MS (1200 ms), la reemplaza limpiamente para evitar duplicados (IJ/DZ).
+     */
     function emitDynamicLetter(label, score, now) {
       const pct = Math.round(score * 100);
       const tokenId = `spell:${label}`;
@@ -3143,11 +3588,30 @@
       lastLetterConfirmedAt = now;
       lastAddedAt[tokenId] = now;
 
+      const lastTok = sentenceTokens.length > 0 ? sentenceTokens[sentenceTokens.length - 1] : null;
+      const replaceBase =
+        lastTok &&
+        lastTok.kind === 'letter' &&
+        lastStaticConfirmed.at > 0 &&
+        now - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS &&
+        ((label === 'Z' && lastStaticConfirmed.label === 'D' && lastTok.text === 'D') ||
+         (label === 'J' && lastStaticConfirmed.label === 'I' && lastTok.text === 'I'));
+
+      if (replaceBase) {
+        delete lastAddedAt[`spell:${lastStaticConfirmed.label}`];
+        sentenceTokens[sentenceTokens.length - 1] = { id: tokenId, kind: 'letter', text: label };
+      } else {
+        sentenceTokens.push({ id: tokenId, kind: 'letter', text: label });
+      }
+      lastStaticConfirmed.label = null;
+      lastStaticConfirmed.at = 0;
+
       lastConfirmed = { id: tokenId, kind: 'letter', text: label, label: `Letra ${label}` };
-      sentenceTokens.push({ id: tokenId, kind: 'letter', text: label });
       renderSentence();
       lastDetectEl.textContent = `Última letra: Letra ${label} · Confianza: ${pct}%`;
-      sentNote.textContent = 'Letra con trazo confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
+      sentNote.textContent = replaceBase
+        ? `Letra ${label} confirmada (reemplazó postura base previa). Sigue deletreando.`
+        : 'Letra con trazo confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
       sentNote.hidden = false;
       updateHud({ top2Text: formatTop2Text(label, score) }, now);
 
@@ -3168,22 +3632,102 @@
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
 
+    /** Verifica postura previa/activa y gating multimodal para Ñ, Z y J antes de confirmar emisión. */
+    function resolveDynamicPostureEmission(probs, labels, motion, postures, evalNow) {
+      const probMap = Object.create(null);
+      let bestIdx = 0;
+      let bestProb = -1;
+      for (let i = 0; i < probs.length; i += 1) {
+        const lbl = i < labels.length ? labels[i] : TRAJ_STATIC_LABEL;
+        probMap[lbl] = probs[i];
+        if (probs[i] > bestProb) {
+          bestProb = probs[i];
+          bestIdx = i;
+        }
+      }
+      const label = bestIdx < labels.length ? labels[bestIdx] : TRAJ_STATIC_LABEL;
+      const pJ = probMap.J || 0;
+      const pZ = probMap.Z || 0;
+      const pEnie = probMap['Ñ'] || 0;
+
+      const freshStatic = recentStaticHistory.filter((item) => item && evalNow - item.at <= STATIC_HISTORY_MAX_MS);
+      const latestStatic = freshStatic.length > 0 ? freshStatic[freshStatic.length - 1] : null;
+      const hasStaticCandidate = (targetSet, minTopScore = 0.20) => freshStatic.some((entry) => {
+        if (entry.top1 && targetSet.has(entry.top1) && entry.top1Prob >= 0.45) return true;
+        return Array.isArray(entry.top3) && entry.top3.some((c) => c && targetSet.has(c.label) && c.score >= minTopScore);
+      });
+
+      // 1. Control estricto de Ñ: postura (N/M/H/T + anular/meñique cerrados) + no incompatible + vaivén X + racha GRU >= 2
+      const activeIncompatible =
+        latestStatic &&
+        evalNow - latestStatic.at <= 450 &&
+        ENIE_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
+        latestStatic.top1Prob >= 0.68;
+      const ringPinkyFolded = Boolean(postures && postures.ringPinkyCurled);
+      const compatibleEnieHistory =
+        hasStaticCandidate(new Set(['N']), 0.18) ||
+        (ringPinkyFolded && hasStaticCandidate(ENIE_COMPATIBLE_LABELS, 0.22)) ||
+        (lastStaticConfirmed.label === 'N' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS);
+      const eniePostureOk = compatibleEnieHistory && !activeIncompatible;
+
+      if (label === 'Ñ' && bestProb >= ENIE_GRU_MIN_CONF && eniePostureOk && motion.enieMotionOk) {
+        if (trajStreak.label === 'Ñ') {
+          trajStreak.count += 1;
+        } else {
+          trajStreak.label = 'Ñ';
+          trajStreak.count = 1;
+        }
+        if (trajStreak.count >= ENIE_STREAK_REQUIRED) {
+          return { emit: true, label: 'Ñ', score: Math.max(bestProb, pEnie), rawLabel: label, rawProb: bestProb };
+        }
+      } else {
+        trajStreak.label = null;
+        trajStreak.count = 0;
+      }
+
+      // 2. Z híbrida: postura de índice extendido ('D' reciente o indexOnlyExtended) + Micro-GRU remuestreada >= 0.72 o zig-zag 3D
+      const zPostureOk = Boolean(
+        !postures.pinkyExt &&
+        ((postures && postures.indexOnlyExtended) ||
+         hasStaticCandidate(new Set(['D']), 0.24) ||
+         (lastStaticConfirmed.label === 'D' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
+      );
+      if (zPostureOk && ((pZ >= ZJ_GRU_MIN_CONF && motion.zMotionOk) || (pZ >= ZJ_GRU_MIN_CONF && motion.spanX >= 0.18 * (trajHistory[trajHistory.length - 1]?.palm || 0.08)) || motion.zMotionOk)) {
+        const zScore = pZ >= ZJ_GRU_MIN_CONF ? pZ : Math.max(0.76, pZ);
+        return { emit: true, label: 'Z', score: zScore, rawLabel: 'Z', rawProb: Math.max(bestProb, zScore) };
+      }
+
+      // 3. J híbrida: postura de meñique extendido ('I' reciente o pinkyOnlyExtended) + Micro-GRU remuestreada >= 0.72 o gancho 3D
+      const jPostureOk = Boolean(
+        !postures.indexExt &&
+        ((postures && postures.pinkyOnlyExtended) ||
+         hasStaticCandidate(new Set(['I']), 0.24) ||
+         (lastStaticConfirmed.label === 'I' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
+      );
+      if (jPostureOk && ((pJ >= ZJ_GRU_MIN_CONF && motion.dropY >= 0.14 * (trajHistory[trajHistory.length - 1]?.palm || 0.08)) || motion.jMotionOk)) {
+        const jScore = pJ >= ZJ_GRU_MIN_CONF ? pJ : Math.max(0.76, pJ);
+        return { emit: true, label: 'J', score: jScore, rawLabel: 'J', rawProb: Math.max(bestProb, jScore) };
+      }
+
+      return { emit: false, label, score: bestProb, rawLabel: label, rawProb: bestProb };
+    }
+
     /**
-     * Micro-GRU dinámica (./models/alfabeto_dinamico_3d/): secuencia estandarizada [1, 16, 12].
-     * Si predice J, Ñ o Z con confianza >= umbral (0.78) emite esa letra; si predice ESTATICA,
-     * el modelo estático 90D puede confirmar la letra sostenida.
+     * Micro-GRU dinámica (./models/alfabeto_dinamico_3d/): secuencia remuestreada [1, 16, 12]
+     * sobre ventana activa [450–1400 ms] con gating de postura para evitar falsos disparos de Ñ y mejorar Z/J.
      */
-    function evaluateTrajectoryGru() {
+    function evaluateTrajectoryGru(side, aspect, postures, now = performance.now()) {
       const entry = tfModels && tfModels.trajectory;
       if (!entry || !entry.model || !window.tf || isTrajectoryInferring) return;
-      if (trajectoryBuffer.length < TRAJ_SEQ_LEN) return;
+      const resampled = resampleTrajectorySequence(trajHistory, TRAJ_SEQ_LEN, now, { dzDamping: 0.35 });
+      if (!resampled || resampled.length < TRAJ_SEQ_LEN) return;
 
       const meta = entry.metadata || {};
       const labels = Array.isArray(meta.labels) ? meta.labels : [];
-      const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.78;
-      const flat = standardizeTrajectorySequence(trajectoryBuffer, meta.scalerMean, meta.scalerStd);
+      const flat = standardizeTrajectorySequence(resampled, meta.scalerMean, meta.scalerStd);
       const tokenAtCall = sessionToken;
       const epochAtCall = trajEpoch;
+      const postureSnapshot = postures ? { ...postures } : null;
       isTrajectoryInferring = true;
 
       let outTensor = null;
@@ -3203,26 +3747,16 @@
         .data()
         .then((probs) => {
           if (tokenAtCall !== sessionToken || epochAtCall !== trajEpoch || !running) return;
-          let bestIdx = 0;
-          let bestProb = -1;
-          for (let i = 0; i < probs.length; i += 1) {
-            if (probs[i] > bestProb) {
-              bestProb = probs[i];
-              bestIdx = i;
-            }
-          }
-          const label = bestIdx < labels.length ? labels[bestIdx] : TRAJ_STATIC_LABEL;
           const evalNow = performance.now();
-          trajectoryState.label = label;
-          trajectoryState.prob = bestProb;
+          const motion = analyzeTrajectoryMotion(trajHistory, evalNow);
+          const decision = resolveDynamicPostureEmission(probs, labels, motion, postureSnapshot || {}, evalNow);
+
+          trajectoryState.label = decision.rawLabel;
+          trajectoryState.prob = decision.rawProb;
           trajectoryState.at = evalNow;
 
-          if (
-            TRAJ_DYNAMIC_LABELS.has(label) &&
-            bestProb >= threshold &&
-            evalNow - lastDynamicEmitAt >= DYNAMIC_EMIT_LOCK_MS
-          ) {
-            emitDynamicLetter(label, bestProb, evalNow);
+          if (decision.emit && evalNow - lastDynamicEmitAt >= DYNAMIC_EMIT_LOCK_MS) {
+            emitDynamicLetter(decision.label, decision.score, evalNow);
           }
         })
         .catch((err) => {
@@ -3238,9 +3772,10 @@
 
     /**
      * Prioridad 3 · Alfabeto estático 3D (./models/alfabeto_lsp_3d/): MLP sobre el vector 90D canónico
-     * estandarizado [1, 90]. Solo confirma la letra sostenida cuando la Micro-GRU reporta ESTATICA.
+     * desambiguado en 3D (`refineStatic3DLabel`). Se desvincula de `trajectoryState` para no quedar
+     * bloqueado por falsos avisos de la Micro-GRU: solo exige muñeca estable y lock post-emisión.
      */
-    function evaluateAlphabetTf(raw90, now) {
+    function evaluateAlphabetTf(raw90, pts, quickSteady, now) {
       const alphaEntry = tfModels && tfModels.alphabet;
       if (!alphaEntry || !alphaEntry.model || !window.tf || isAlphabetInferring) return;
 
@@ -3250,6 +3785,9 @@
       const features = standardizeFeatures(raw90, meta.scalerMean, meta.scalerStd);
       const tokenAtCall = sessionToken;
       const epochAtCall = trajEpoch;
+      const ptsSnapshot = Array.isArray(pts) ? pts.map((p) => ({ x: p.x, y: p.y, z: p.z })) : null;
+      const posturesSnapshot = detectCanonicalHandPostures(ptsSnapshot);
+      const steadyAtCall = Boolean(quickSteady);
       isAlphabetInferring = true;
 
       let outTensor = null;
@@ -3271,33 +3809,35 @@
           if (tokenAtCall !== sessionToken || epochAtCall !== trajEpoch || !running || dynCandidate.streak > 0) return;
           const evalNow = performance.now();
 
-          let bestIdx = 0;
-          let bestProb = -1;
-          let secondIdx = -1;
-          let secondProb = -1;
+          const ranked = [];
           for (let i = 0; i < probs.length; i += 1) {
-            const p = probs[i];
-            if (p > bestProb) {
-              secondProb = bestProb;
-              secondIdx = bestIdx;
-              bestProb = p;
-              bestIdx = i;
-            } else if (p > secondProb) {
-              secondProb = p;
-              secondIdx = i;
-            }
+            ranked.push({ label: i < labels.length ? labels[i] : '', score: probs[i] });
+          }
+          ranked.sort((a, b) => b.score - a.score);
+          const top3 = ranked.slice(0, 3);
+          const refined = refineStatic3DLabel(top3, ptsSnapshot, posturesSnapshot);
+
+          const rawLabel = refined ? refined.label : (top3[0] ? top3[0].label : '');
+          const bestProb = refined ? refined.score : (top3[0] ? top3[0].score : 0);
+          const secondCandidate = top3.find((c) => c && c.label !== rawLabel) || top3[1];
+          const secondLabelRaw = secondCandidate ? secondCandidate.label : '';
+          const secondProb = secondCandidate ? secondCandidate.score : 0;
+
+          recentStaticHistory.push({
+            at: evalNow,
+            top1: rawLabel,
+            top1Prob: bestProb,
+            top3,
+            postures: posturesSnapshot
+          });
+          while (
+            recentStaticHistory.length > 0 &&
+            (evalNow - recentStaticHistory[0].at > STATIC_HISTORY_MAX_MS || recentStaticHistory.length > 24)
+          ) {
+            recentStaticHistory.shift();
           }
 
-          const rawLabel = bestIdx < labels.length ? labels[bestIdx] : '';
-          const secondLabelRaw = secondIdx >= 0 && secondIdx < labels.length ? labels[secondIdx] : '';
-
-          const gruModelLoaded = Boolean(tfModels && tfModels.trajectory);
-          const gruFresh = trajectoryState.at > 0 && evalNow - trajectoryState.at <= TRAJ_STATE_MAX_AGE_MS;
-          const staticAllowed =
-            !gruModelLoaded ||
-            (gruFresh &&
-              trajectoryState.label === TRAJ_STATIC_LABEL &&
-              evalNow - lastDynamicEmitAt >= DYNAMIC_EMIT_LOCK_MS);
+          const staticAllowed = steadyAtCall && evalNow - lastDynamicEmitAt >= DYNAMIC_EMIT_LOCK_MS;
 
           let resolvedLabel = null;
           let resolvedScore = 0;
@@ -3533,9 +4073,11 @@
         }
 
         let spellingSessionActive = false;
+        let singleHandCtx = null;
         if (handsForFrame.length >= 2) {
           lastLetterConfirmedAt = 0;
           wristMacroBuffer.length = 0;
+          recentStaticHistory.length = 0;
           resetTrajectory();
           if (spellCandidate.label || spellTrackBuffer.length > 0) {
             resetSpellCandidate();
@@ -3543,6 +4085,14 @@
           }
         } else {
           const h0 = handsForFrame[0];
+          const primarySide = smoothedHandSlots.Right ? 'Right' : 'Left';
+          const worldFor90 =
+            smoothedWorldSlots[primarySide] ||
+            h0.map((p) => ({ x: p.x * aspect, y: p.y, z: (p.z || 0) * aspect }));
+          const pts3d = canonicalizeHand3D(worldFor90, primarySide);
+          const curPostures = detectCanonicalHandPostures(pts3d);
+          singleHandCtx = { primarySide, worldFor90, pts3d, curPostures };
+
           const palmSize0 =
             Math.hypot((h0[9].x - h0[0].x) * aspect, h0[9].y - h0[0].y) || 0.1;
           if (wristMacroBuffer.length >= MAX_WRIST_MACRO) wristMacroBuffer.shift();
@@ -3553,10 +4103,18 @@
             elbowDeg: bio.rightElbowDeg !== null ? bio.rightElbowDeg : bio.leftElbowDeg
           });
           const wideArmMotion = detectWideArmMotion(wristMacroBuffer);
-          if (wideArmMotion) lastLetterConfirmedAt = 0;
+          const tracingDynamicLetter = Boolean(
+            curPostures.pinkyOnlyExtended ||
+            curPostures.indexOnlyExtended ||
+            (lastStaticConfirmed.at > 0 &&
+              now - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS &&
+              (lastStaticConfirmed.label === 'I' || lastStaticConfirmed.label === 'D')) ||
+            recentStaticHistory.some((h) => h && now - h.at <= 700 && (h.top1 === 'I' || h.top1 === 'D'))
+          );
+          if (wideArmMotion && !tracingDynamicLetter) lastLetterConfirmedAt = 0;
           const recentSpell = lastLetterConfirmedAt > 0 && now - lastLetterConfirmedAt <= SPELL_SESSION_HOLD_MS;
-          const steadySingleHand = bio.activity === 'estatico' || quickSteady || Boolean(spellCandidate.label);
-          spellingSessionActive = !wideArmMotion && (recentSpell || steadySingleHand);
+          const steadySingleHand = bio.activity === 'estatico' || quickSteady || Boolean(spellCandidate.label) || tracingDynamicLetter;
+          spellingSessionActive = (!wideArmMotion || tracingDynamicLetter) && (recentSpell || steadySingleHand);
           if (spellingSessionActive && dynCandidate.streak > 0) {
             resetDynamicCandidate();
           }
@@ -3577,19 +4135,16 @@
         evaluateDynamicWordsTf(smoothedResults, now, handsForFrame.length, bio, {
           pauseWordDispatch: spellingSessionActive
         });
-        if (handsForFrame.length === 1 && dynCandidate.streak === 0 && (activeTf.alphabet || activeTf.trajectory)) {
-          const primarySide = smoothedHandSlots.Right ? 'Right' : 'Left';
-          const worldFor90 =
-            smoothedWorldSlots[primarySide] ||
-            handsForFrame[0].map((p) => ({ x: p.x * aspect, y: p.y, z: (p.z || 0) * aspect }));
+        if (handsForFrame.length === 1 && singleHandCtx && dynCandidate.streak === 0 && (activeTf.alphabet || activeTf.trajectory)) {
+          const { primarySide, worldFor90, pts3d, curPostures } = singleHandCtx;
           const raw90 = extractHand90Features(worldFor90, primarySide);
           const palmNormal3d = [raw90[78], raw90[79], raw90[80]];
           if (activeTf.trajectory) {
-            pushTrajectoryFrame(handsForFrame[0], primarySide, aspect, palmNormal3d);
-            evaluateTrajectoryGru();
+            pushTrajectoryFrame(handsForFrame[0], primarySide, aspect, palmNormal3d, now, worldFor90);
+            evaluateTrajectoryGru(primarySide, aspect, curPostures, now);
           }
           if (activeTf.alphabet) {
-            evaluateAlphabetTf(raw90, now);
+            evaluateAlphabetTf(raw90, pts3d, quickSteady, now);
           }
         }
         return;
@@ -3858,6 +4413,7 @@
       resetOutput();
       dynamicSeqBuffer.length = 0;
       spellTrackBuffer.length = 0;
+      recentStaticHistory.length = 0;
       resetDynamicCandidate();
       resetSpellCandidate();
       resetTrajectory();

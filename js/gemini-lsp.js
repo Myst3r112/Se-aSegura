@@ -13,6 +13,7 @@
   'use strict';
 
   const DEFAULT_MODEL = 'gemini-3.8-flash';
+  const DEFAULT_PROXY_URL = 'https://senasegura-gemini-lsp.jhostynvilchez2606.workers.dev';
   const PROXY_STORAGE_KEY = 'senasegura_gemini_proxy';
   const SESSION_KEY_STORAGE_KEY = 'senasegura_gemini_key';
   const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -67,10 +68,14 @@
     }
   }
 
+  function isConfiguredProxyUrl(value) {
+    return isValidHttpUrl(value) && !/REEMPLAZA-CON-TU-WORKER/i.test(value);
+  }
+
   function getConfig() {
     const windowProxy =
       typeof window.SENASEGURA_GEMINI_PROXY_URL === 'string' ? window.SENASEGURA_GEMINI_PROXY_URL.trim() : '';
-    if (isValidHttpUrl(windowProxy)) {
+    if (isConfiguredProxyUrl(windowProxy)) {
       return Object.freeze({
         active: true,
         mode: 'proxy',
@@ -81,8 +86,20 @@
       });
     }
 
+    const defaultProxy = typeof DEFAULT_PROXY_URL === 'string' ? DEFAULT_PROXY_URL.trim() : '';
+    if (isConfiguredProxyUrl(defaultProxy)) {
+      return Object.freeze({
+        active: true,
+        mode: 'proxy',
+        source: 'default',
+        proxyUrl: defaultProxy,
+        hasSessionKey: false,
+        model: DEFAULT_MODEL
+      });
+    }
+
     const storedProxy = safeStorageGet(window.localStorage, PROXY_STORAGE_KEY).trim();
-    if (isValidHttpUrl(storedProxy)) {
+    if (isConfiguredProxyUrl(storedProxy)) {
       return Object.freeze({
         active: true,
         mode: 'proxy',
@@ -305,6 +322,7 @@
 
   window.SenaSeguraGemini = Object.freeze({
     DEFAULT_MODEL,
+    DEFAULT_PROXY_URL,
     getConfig,
     isConfigured,
     saveConfig,

@@ -24,20 +24,44 @@ const LSP_SYSTEM_INSTRUCTION = [
   '5. Devuelve SOLO la oración final lista para leer al funcionario, sin comillas, sin listas y sin explicaciones.'
 ].join('\n');
 
+function isLocalDevOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') &&
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:');
+  } catch (_) {
+    return false;
+  }
+}
+
+function matchesConfiguredOrigin(reqOrigin, entry) {
+  if (!reqOrigin || !entry) return false;
+  if (entry === '*') return true;
+  if (reqOrigin === entry) return true;
+  if ((entry === 'http://localhost' || entry === 'http://127.0.0.1') && isLocalDevOrigin(reqOrigin)) {
+    return true;
+  }
+  return false;
+}
+
 function resolveAllowedOrigin(request, env) {
   const reqOrigin = request.headers.get('Origin') || '';
   const configured = String(env.ALLOWED_ORIGIN || '').trim();
-  if (!configured) return '';
-  if (configured === '*') return '*';
+  if (!configured) {
+    return isLocalDevOrigin(reqOrigin) ? reqOrigin : '';
+  }
   const list = configured.split(',').map((s) => s.trim()).filter(Boolean);
-  if (reqOrigin && list.includes(reqOrigin)) return reqOrigin;
-  return list[0] || '';
+  if (list.includes('*')) return '*';
+  if (!reqOrigin) return list[0] || '';
+  const matched = list.find((entry) => matchesConfiguredOrigin(reqOrigin, entry));
+  return matched ? reqOrigin : '';
 }
 
 function buildCorsHeaders(allowedOrigin) {
   const headers = {
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept',
     'Access-Control-Max-Age': '86400',
     'Cache-Control': 'no-store',
     Vary: 'Origin'
@@ -110,7 +134,7 @@ export default {
     }
 
     const reqOrigin = request.headers.get('Origin');
-    if (allowedOrigin && allowedOrigin !== '*' && reqOrigin && reqOrigin !== allowedOrigin) {
+    if (reqOrigin && !allowedOrigin) {
       return jsonResponse({ error: 'Origin not allowed' }, 403, corsHeaders);
     }
 

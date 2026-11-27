@@ -54,15 +54,22 @@
   const TRAJ_RESAMPLE_MIN_MS = 450;
   const TRAJ_RESAMPLE_MAX_MS = 1400;
   const STATIC_HISTORY_MAX_MS = 900;
-  const DYNAMIC_EMIT_LOCK_MS = 900; // evita re-disparar la letra dinámica o confirmar la postura base tras emitirla
+  const DYNAMIC_EMIT_LOCK_MS = 1200; // evita re-disparar la letra dinámica o confirmar la postura base tras emitirla
   const DYNAMIC_REPLACE_WINDOW_MS = 1200; // reemplazo limpio D→Z e I→J
   const ENIE_GRU_MIN_CONF = 0.88;
   const ENIE_STREAK_REQUIRED = 3;
   const ZJ_GRU_MIN_CONF = 0.72;
+  const ZJ_STREAK_REQUIRED = 2;
   const ENIE_COMPATIBLE_LABELS = new Set(['N', 'M']);
   const ENIE_INCOMPATIBLE_LABELS = new Set([
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
     'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'Y', 'X'
+  ]);
+  const Z_INCOMPATIBLE_LABELS = new Set([
+    'X', 'Y', 'W', 'V', 'U', 'L', 'B', 'C', 'O', 'A', 'S', 'E', 'M', 'N', 'P', 'Q'
+  ]);
+  const J_INCOMPATIBLE_LABELS = new Set([
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Z'
   ]);
   const STATIC_SPACE_LABEL = 'ESPACIO';
   const SPELL_SESSION_HOLD_MS = 2800; // protege sesión de deletreo activa frente al motor de 118 señas
@@ -1536,6 +1543,7 @@
       };
     }
     const idxAng = angleDeg(pts[5], pts[6], pts[8]);
+    const idxDistalAng = angleDeg(pts[6], pts[7], pts[8]);
     const midAng = angleDeg(pts[9], pts[10], pts[12]);
     const ringAng = angleDeg(pts[13], pts[14], pts[16]);
     const pinkyAng = angleDeg(pts[17], pts[18], pts[20]);
@@ -1552,6 +1560,14 @@
     const pinkyCurled = pinkyAng <= 125 && dist3(pts[20], pts[0]) <= dist3(pts[18], pts[0]) * 1.08;
     const middleCurled = midAng <= 125 && dist3(pts[12], pts[0]) <= dist3(pts[10], pts[0]) * 1.08;
     const indexCurled = idxAng <= 125 && dist3(pts[8], pts[0]) <= dist3(pts[6], pts[0]) * 1.08;
+    const indexOnlyExtended = (
+      idxAng >= 145 &&
+      idxDistalAng >= 140 &&
+      dist3(pts[4], pts[5]) < 0.72 &&
+      midAng <= 120 &&
+      ringAng <= 120 &&
+      pinkyAng <= 120
+    );
 
     const knuckleSpan = Math.max(1e-4, dist3(pts[5], pts[9]));
     const twoFingerSpan = dist3(pts[8], pts[12]);
@@ -1580,7 +1596,7 @@
       middleExt,
       ringExt,
       pinkyExt,
-      indexOnlyExtended: indexExt && middleCurled && ringCurled && pinkyCurled,
+      indexOnlyExtended,
       pinkyOnlyExtended: pinkyExt && indexCurled && middleCurled && ringCurled,
       ringPinkyCurled: ringCurled && pinkyCurled,
       pointingDownTwoFingers,
@@ -1722,12 +1738,12 @@
       reversals >= 2
     );
 
-    // 2. Zig-zag Z sobre punta del índice [8] (X escalada por aspect)
+    // 2. Zig-zag Z por anclas de desplazamiento significativo sobre punta del índice [8] (X escalada por aspect)
+    const zPts = [];
     let zMinX = Infinity;
     let zMaxX = -Infinity;
     let zMinY = Infinity;
     let zMaxY = -Infinity;
-    const zHorizDirs = [];
     for (let i = 0; i < recent.length; i += 1) {
       const item = recent[i];
       const ax = item.aspect || 1;
@@ -1737,25 +1753,87 @@
       if (px > zMaxX) zMaxX = px;
       if (py < zMinY) zMinY = py;
       if (py > zMaxY) zMaxY = py;
-      if (i > 0) {
-        const prevItem = recent[i - 1];
-        const prevAx = prevItem.aspect || ax;
-        const dx = px - prevItem.index[0] * prevAx;
-        if (Math.abs(dx) >= avgPalm * 0.03) {
-          const s = dx > 0 ? 1 : -1;
-          if (!zHorizDirs.length || zHorizDirs[zHorizDirs.length - 1] !== s) {
-            zHorizDirs.push(s);
+      zPts.push({ x: px, y: py, at: item.at });
+    }
+    const zSpanX = Number.isFinite(zMaxX - zMinX) ? (zMaxX - zMinX) : 0;
+    const zSpanY = Number.isFinite(zMaxY - zMinY) ? (zMaxY - zMinY) : 0;
+
+    const stepThr = 0.14 * avgPalm;
+    const anchors = [];
+    let anchorDir = 0;
+    let minAnchorPt = zPts[0];
+    let maxAnchorPt = zPts[0];
+    let extremeAnchorPt = zPts[0];
+    for (let i = 1; i < zPts.length; i += 1) {
+      const pt = zPts[i];
+      if (anchorDir === 0) {
+        if (pt.x < minAnchorPt.x) minAnchorPt = pt;
+        if (pt.x > maxAnchorPt.x) maxAnchorPt = pt;
+        if (pt.x - minAnchorPt.x >= stepThr) {
+          anchors.push(minAnchorPt);
+          anchorDir = 1;
+          extremeAnchorPt = pt;
+        } else if (maxAnchorPt.x - pt.x >= stepThr) {
+          anchors.push(maxAnchorPt);
+          anchorDir = -1;
+          extremeAnchorPt = pt;
+        }
+      } else if (anchorDir === 1) {
+        if (pt.x >= extremeAnchorPt.x) {
+          extremeAnchorPt = pt;
+        } else if (extremeAnchorPt.x - pt.x >= stepThr) {
+          anchors.push(extremeAnchorPt);
+          anchorDir = -1;
+          extremeAnchorPt = pt;
+        }
+      } else {
+        if (pt.x <= extremeAnchorPt.x) {
+          extremeAnchorPt = pt;
+        } else if (pt.x - extremeAnchorPt.x >= stepThr) {
+          anchors.push(extremeAnchorPt);
+          anchorDir = 1;
+          extremeAnchorPt = pt;
+        }
+      }
+    }
+    if (anchors.length >= 1) {
+      const prevAnchor = anchors[anchors.length - 1];
+      if (extremeAnchorPt !== prevAnchor) {
+        anchors.push(extremeAnchorPt);
+      }
+    }
+
+    let zMotionOk = false;
+    if (anchors.length >= 4 && zSpanX >= 0.36 * avgPalm && zSpanY >= 0.28 * avgPalm) {
+      for (let i = 0; i <= anchors.length - 4; i += 1) {
+        const a0 = anchors[i];
+        const a1 = anchors[i + 1];
+        const a2 = anchors[i + 2];
+        const a3 = anchors[i + 3];
+        if ((a3.at - a0.at) < 420) continue;
+
+        const dx1 = a1.x - a0.x;
+        const dy1 = a1.y - a0.y;
+        const leg1Ok = Math.abs(dx1) >= 0.22 * avgPalm && Math.abs(dy1) <= Math.abs(dx1) * 0.65;
+
+        const dx2 = a2.x - a1.x;
+        const dy2 = a2.y - a1.y;
+        const leg2Ok = (dx1 * dx2) < 0 && Math.abs(dx2) >= 0.20 * avgPalm && dy2 >= 0.18 * avgPalm;
+
+        const dx3 = a3.x - a2.x;
+        const dy3 = a3.y - a2.y;
+        const leg3Ok = (dx1 * dx3) > 0 && Math.abs(dx3) >= 0.20 * avgPalm && Math.abs(dy3) <= Math.abs(dx3) * 0.65;
+
+        if (leg1Ok && leg2Ok && leg3Ok) {
+          const segSpanX = Math.max(a0.x, a1.x, a2.x, a3.x) - Math.min(a0.x, a1.x, a2.x, a3.x);
+          const segSpanY = Math.max(a0.y, a1.y, a2.y, a3.y) - Math.min(a0.y, a1.y, a2.y, a3.y);
+          if (segSpanX >= 0.36 * avgPalm && segSpanY >= 0.28 * avgPalm) {
+            zMotionOk = true;
+            break;
           }
         }
       }
     }
-    const zSpanX = Number.isFinite(zMaxX - zMinX) ? (zMaxX - zMinX) : 0;
-    const zSpanY = Number.isFinite(zMaxY - zMinY) ? (zMaxY - zMinY) : 0;
-    const zMotionOk = (
-      zSpanX >= 0.30 * avgPalm &&
-      zSpanY >= 0.22 * avgPalm &&
-      zHorizDirs.length >= 3
-    );
 
     // 3. Trazo descendente + gancho para J sobre punta del meñique [20] (X escalada por aspect)
     let lowestY = -Infinity;
@@ -2322,15 +2400,7 @@
     const btnClear = $('btn-vision-clear');
     const btnPolish = $('btn-vision-polish');
     const btnEscalate = $('btn-vision-escalate');
-    const btnGeminiConfig = $('btn-vision-gemini-config');
-    const geminiStateEl = $('vision-gemini-state');
-    const geminiPopover = $('vision-gemini-popover');
-    const geminiProxyInput = $('vision-gemini-proxy');
-    const geminiKeyInput = $('vision-gemini-key');
-    const btnGeminiSave = $('btn-vision-gemini-save');
-    const btnGeminiDisconnect = $('btn-vision-gemini-disconnect');
-    const btnGeminiClose = $('btn-vision-gemini-close');
-    const geminiFeedback = $('vision-gemini-feedback');
+    const geminiBadgeEl = $('vision-gemini-badge');
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
     const lettersBar = $('vision-letters-bar');
@@ -2559,38 +2629,15 @@
       urgentHint.hidden = !isUrgent;
     }
 
-    function syncGeminiUi({ populateInputs = false } = {}) {
+    function syncGeminiUi() {
       const geminiApi = window.SenaSeguraGemini;
-      const cfg = geminiApi && typeof geminiApi.getConfig === 'function'
-        ? geminiApi.getConfig()
-        : { active: false, mode: 'none', proxyUrl: '', hasSessionKey: false };
-      const active = Boolean(cfg.active);
-
-      if (geminiStateEl) geminiStateEl.textContent = active ? 'Activa' : 'Inactiva';
-      if (btnGeminiConfig) {
-        btnGeminiConfig.classList.toggle('is-active', active);
-      }
-      if (btnGeminiDisconnect) btnGeminiDisconnect.disabled = !active;
-      if (populateInputs) {
-        if (geminiProxyInput) geminiProxyInput.value = cfg.proxyUrl || '';
-        if (geminiKeyInput && !cfg.hasSessionKey) geminiKeyInput.value = '';
-      }
+      const active = Boolean(geminiApi && typeof geminiApi.isConfigured === 'function' && geminiApi.isConfigured());
+      if (geminiBadgeEl) geminiBadgeEl.hidden = !active;
 
       const hasTokens = sentenceTokens.length > 0;
       if (btnPolish) {
         btnPolish.hidden = !active;
         btnPolish.disabled = !active || !hasTokens || isRefiningLsp;
-      }
-    }
-
-    function setGeminiPopoverOpen(open) {
-      if (!geminiPopover || !btnGeminiConfig) return;
-      geminiPopover.hidden = !open;
-      btnGeminiConfig.setAttribute('aria-expanded', String(open));
-      if (open) {
-        syncGeminiUi({ populateInputs: true });
-        if (geminiFeedback) geminiFeedback.textContent = '';
-        if (geminiProxyInput) geminiProxyInput.focus();
       }
     }
 
@@ -3756,12 +3803,13 @@
       resetSpellCandidate();
       spellTrackBuffer.length = 0;
       dynamicSeqBuffer.length = 0;
+      recentStaticHistory.length = 0;
       resetTrajectory();
       setProgress(0);
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
     }
 
-    /** Verifica postura previa/activa y gating multimodal para Ñ, Z y J antes de confirmar emisión. */
+    /** Verifica postura previa/activa, consenso neuronal Micro-GRU y racha de confirmación para Ñ, Z y J. */
     function resolveDynamicPostureEmission(probs, labels, motion, postures, evalNow) {
       const probMap = Object.create(null);
       let bestIdx = 0;
@@ -3778,6 +3826,7 @@
       const pJ = probMap.J || 0;
       const pZ = probMap.Z || 0;
       const pEnie = probMap['Ñ'] || 0;
+      const pStatic = probMap[TRAJ_STATIC_LABEL] || 0;
 
       const freshStatic = recentStaticHistory.filter((item) => item && evalNow - item.at <= STATIC_HISTORY_MAX_MS);
       const latestStatic = freshStatic.length > 0 ? freshStatic[freshStatic.length - 1] : null;
@@ -3785,6 +3834,8 @@
         if (entry.top1 && targetSet.has(entry.top1) && entry.top1Prob >= 0.45) return true;
         return Array.isArray(entry.top3) && entry.top3.some((c) => c && targetSet.has(c.label) && c.score >= minTopScore);
       });
+
+      let matchedDyn = null;
 
       // 1. Blindaje estricto de Ñ: postura N/M real con dedos doblados + no incompatible + vaivén X (>=0.28) + racha GRU >= 3
       const activeIncompatible =
@@ -3799,45 +3850,92 @@
       const eniePostureOk = foldedNMPosture && compatibleEnieHistory && !activeIncompatible;
 
       if (label === 'Ñ' && bestProb >= ENIE_GRU_MIN_CONF && eniePostureOk && motion.enieMotionOk) {
-        if (trajStreak.label === 'Ñ') {
+        matchedDyn = {
+          label: 'Ñ',
+          score: Math.max(bestProb, pEnie),
+          rawProb: bestProb,
+          streakReq: ENIE_STREAK_REQUIRED
+        };
+      }
+
+      // 2. Z con postura estricta (indexOnlyExtended actual, sin incompatibles) + consenso GRU + zig-zag por anclas
+      const lastPalmNow = trajHistory.length ? (trajHistory[trajHistory.length - 1].palm || 0.08) : 0.08;
+      if (!matchedDyn && postures) {
+        const zActiveIncompatible = Boolean(
+          latestStatic &&
+          evalNow - latestStatic.at <= 500 &&
+          Z_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
+          latestStatic.top1Prob >= 0.45
+        );
+        const zPostureOk = Boolean(postures.indexOnlyExtended && !postures.pinkyExt && !zActiveIncompatible);
+        const zGruStrong = pZ >= 0.80 && motion.zSpanX >= 0.30 * lastPalmNow && motion.zSpanY >= 0.22 * lastPalmNow;
+        const zHybridConsensus = motion.zMotionOk && pZ >= 0.35 && pStatic < 0.70;
+        if (zPostureOk && (zGruStrong || zHybridConsensus)) {
+          const zScore = Math.max(pZ, zGruStrong ? 0.80 : 0.72);
+          matchedDyn = {
+            label: 'Z',
+            score: zScore,
+            rawProb: Math.max(bestProb, pZ),
+            streakReq: ZJ_STREAK_REQUIRED
+          };
+        }
+      }
+
+      // 3. J con postura meñique extendido + bloqueo ESTATICA >= 0.70 + consenso GRU
+      if (!matchedDyn && postures) {
+        const jActiveIncompatible = Boolean(
+          latestStatic &&
+          evalNow - latestStatic.at <= 500 &&
+          J_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
+          latestStatic.top1Prob >= 0.48
+        );
+        const jPostureOk = Boolean(
+          !postures.indexExt &&
+          !jActiveIncompatible &&
+          (postures.pinkyOnlyExtended ||
+            (hasStaticCandidate(new Set(['I']), 0.30) && !postures.middleExt && !postures.ringExt) ||
+            (lastStaticConfirmed.label === 'I' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
+        );
+        const jGruStrong = pJ >= ZJ_GRU_MIN_CONF && motion.dropY >= 0.18 * lastPalmNow;
+        const jHybridConsensus = motion.jMotionOk && pJ >= 0.30;
+        if (jPostureOk && pStatic < 0.70 && (jGruStrong || jHybridConsensus)) {
+          const jScore = Math.max(pJ, jGruStrong ? ZJ_GRU_MIN_CONF : 0.72);
+          matchedDyn = {
+            label: 'J',
+            score: jScore,
+            rawProb: Math.max(bestProb, pJ),
+            streakReq: ZJ_STREAK_REQUIRED
+          };
+        }
+      }
+
+      if (matchedDyn) {
+        if (trajStreak.label === matchedDyn.label) {
           trajStreak.count += 1;
         } else {
-          trajStreak.label = 'Ñ';
+          trajStreak.label = matchedDyn.label;
           trajStreak.count = 1;
         }
-        if (trajStreak.count >= ENIE_STREAK_REQUIRED) {
-          return { emit: true, label: 'Ñ', score: Math.max(bestProb, pEnie), rawLabel: label, rawProb: bestProb };
+        if (trajStreak.count >= matchedDyn.streakReq) {
+          return {
+            emit: true,
+            label: matchedDyn.label,
+            score: matchedDyn.score,
+            rawLabel: matchedDyn.label,
+            rawProb: matchedDyn.rawProb
+          };
         }
-      } else {
-        trajStreak.label = null;
-        trajStreak.count = 0;
+        return {
+          emit: false,
+          label: matchedDyn.label,
+          score: matchedDyn.rawProb,
+          rawLabel: label,
+          rawProb: bestProb
+        };
       }
 
-      // 2. Z híbrida: postura de índice extendido ('D' reciente o indexOnlyExtended) + Micro-GRU remuestreada >= 0.72 o zig-zag 3D
-      const lastPalmNow = trajHistory.length ? (trajHistory[trajHistory.length - 1].palm || 0.08) : 0.08;
-      const zPostureOk = Boolean(
-        !postures.pinkyExt &&
-        ((postures && postures.indexOnlyExtended) ||
-         hasStaticCandidate(new Set(['D']), 0.20) ||
-         (lastStaticConfirmed.label === 'D' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
-      );
-      if (zPostureOk && ((pZ >= ZJ_GRU_MIN_CONF && motion.zSpanX >= 0.18 * lastPalmNow) || motion.zMotionOk)) {
-        const zScore = pZ >= ZJ_GRU_MIN_CONF ? pZ : Math.max(0.76, pZ);
-        return { emit: true, label: 'Z', score: zScore, rawLabel: 'Z', rawProb: Math.max(bestProb, zScore) };
-      }
-
-      // 3. J híbrida: postura de meñique extendido ('I' reciente o pinkyOnlyExtended) + Micro-GRU remuestreada >= 0.72 o gancho 3D
-      const jPostureOk = Boolean(
-        !postures.indexExt &&
-        ((postures && postures.pinkyOnlyExtended) ||
-         hasStaticCandidate(new Set(['I']), 0.24) ||
-         (lastStaticConfirmed.label === 'I' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
-      );
-      if (jPostureOk && ((pJ >= ZJ_GRU_MIN_CONF && motion.dropY >= 0.14 * lastPalmNow) || motion.jMotionOk)) {
-        const jScore = pJ >= ZJ_GRU_MIN_CONF ? pJ : Math.max(0.76, pJ);
-        return { emit: true, label: 'J', score: jScore, rawLabel: 'J', rawProb: Math.max(bestProb, jScore) };
-      }
-
+      trajStreak.label = null;
+      trajStreak.count = 0;
       return { emit: false, label, score: bestProb, rawLabel: label, rawProb: bestProb };
     }
 
@@ -4609,7 +4707,7 @@
           rawText: textBeforeSend,
           sector: ctxInfo.sector || '',
           procedure: ctxInfo.procedure || '',
-          timeoutMs: 1900
+          timeoutMs: 2200
         });
         if (tokenAtSend !== sessionToken) return;
         const finalText = result && result.text ? result.text : textBeforeSend;
@@ -4827,60 +4925,6 @@
     if (btnClear) btnClear.addEventListener('click', clearAllOutput);
     btnEscalate.addEventListener('click', escalate);
 
-    if (btnGeminiConfig && geminiPopover) {
-      btnGeminiConfig.addEventListener('click', () => {
-        setGeminiPopoverOpen(geminiPopover.hidden);
-      });
-      if (btnGeminiClose) {
-        btnGeminiClose.addEventListener('click', () => {
-          setGeminiPopoverOpen(false);
-          btnGeminiConfig.focus();
-        });
-      }
-      if (btnGeminiSave) {
-        btnGeminiSave.addEventListener('click', () => {
-          const geminiApi = window.SenaSeguraGemini;
-          if (!geminiApi) return;
-          try {
-            const cfg = geminiApi.saveConfig({
-              proxyUrl: geminiProxyInput ? geminiProxyInput.value : '',
-              apiKey: geminiKeyInput ? geminiKeyInput.value : ''
-            });
-            syncGeminiUi({ populateInputs: true });
-            if (geminiFeedback) {
-              geminiFeedback.textContent = cfg.active
-                ? (cfg.mode === 'proxy'
-                  ? 'Proxy Worker guardado. Gemini LSP activo sin exponer claves.'
-                  : 'Clave temporal guardada solo en esta pestaña (se borra al salir o purgar).')
-                : 'Sin URL ni clave activa: el sistema opera 100 % offline.';
-            }
-          } catch (err) {
-            if (geminiFeedback) {
-              geminiFeedback.textContent = err && err.message ? err.message : 'Revisa la URL ingresada.';
-            }
-          }
-        });
-      }
-      if (btnGeminiDisconnect) {
-        btnGeminiDisconnect.addEventListener('click', () => {
-          const geminiApi = window.SenaSeguraGemini;
-          if (geminiApi) geminiApi.disconnect();
-          if (geminiProxyInput) geminiProxyInput.value = '';
-          if (geminiKeyInput) geminiKeyInput.value = '';
-          syncGeminiUi();
-          if (geminiFeedback) geminiFeedback.textContent = 'Gemini LSP desconectado. Modo local 100 % activo.';
-        });
-      }
-      geminiPopover.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          e.stopPropagation();
-          setGeminiPopoverOpen(false);
-          btnGeminiConfig.focus();
-        }
-      });
-    }
-
     document.addEventListener('senasegura:geminichange', () => {
       syncGeminiUi();
     });
@@ -4920,17 +4964,12 @@
 
     document.addEventListener('senasegura:channelchange', (e) => {
       if (!e.detail || e.detail.channel !== 'camara') {
-        setGeminiPopoverOpen(false);
         setVisionExpanded(false);
         resetToIdle();
       }
     });
 
     document.addEventListener('senasegura:purge', () => {
-      setGeminiPopoverOpen(false);
-      if (geminiProxyInput) geminiProxyInput.value = '';
-      if (geminiKeyInput) geminiKeyInput.value = '';
-      if (geminiFeedback) geminiFeedback.textContent = '';
       setVisionExpanded(false);
       resetToIdle();
       cancelSpeech();

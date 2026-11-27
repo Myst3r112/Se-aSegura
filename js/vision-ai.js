@@ -39,9 +39,11 @@
   const CONFIRM_INDEX_MS = 520; // espera breve para distinguir quieto vs trayectoria
   const CONFIRM_SPELL_MS = 330; // estabilización ágil de letra estática (~0.35 s)
   const COOLDOWN_MS = 900; // pausa antes de aceptar nuevamente la misma seña (~0.9 s)
-  const SPELL_COOLDOWN_MS = 500; // pausa breve tras confirmar una letra (~0.5 s)
+  const SPELL_COOLDOWN_MS = 450; // pausa breve al cambiar a una letra distinta (~0.45 s)
+  const SAME_LETTER_COOLDOWN_MS = 1350; // freno antirráfaga antes de repetir la misma letra
   const GRACE_MS = 180; // tolerancia a micro-parpadeos
-  const HAND_DROPOUT_GRACE_FRAMES = 5; // tolerancia ~160 ms sin vaciar ventana deslizante
+  const HAND_DROPOUT_GRACE_FRAMES = 8; // tolerancia ~260 ms sin vaciar ventana ni ocultar manos
+  const POSE_DROPOUT_GRACE_FRAMES = 8; // tolerancia ~260 ms conservando torso ante micro-cortes
   const HAND_EMA_ALPHA = 0.65; // suavizado ligero EMA (baja inercia al cambiar entre letras)
   const POSE_EMA_ALPHA = 0.45; // suavizado ligero EMA de landmarks de torso
   const HAND_FEATURES_90 = 90; // Modelo Estático 3D: 63 coords + 15 ángulos + 3 normal + 9 desambiguación
@@ -55,9 +57,9 @@
   const TRAJ_RESAMPLE_MAX_MS = 1400;
   const STATIC_HISTORY_MAX_MS = 900;
   const DYNAMIC_EMIT_LOCK_MS = 1200; // evita re-disparar la letra dinámica o confirmar la postura base tras emitirla
-  const DYNAMIC_REPLACE_WINDOW_MS = 1200; // reemplazo limpio D→Z e I→J
-  const ENIE_GRU_MIN_CONF = 0.88;
-  const ENIE_STREAK_REQUIRED = 3;
+  const DYNAMIC_REPLACE_WINDOW_MS = 1200; // reemplazo limpio D→Z, I→J y N→Ñ
+  const ENIE_GRU_MIN_CONF = 0.72;
+  const ENIE_STREAK_REQUIRED = 2;
   const ZJ_GRU_MIN_CONF = 0.72;
   const ZJ_STREAK_REQUIRED = 2;
   const ENIE_COMPATIBLE_LABELS = new Set(['N', 'M']);
@@ -1467,9 +1469,12 @@
         pinkyOnlyExtended: false,
         ringPinkyCurled: false,
         middleStrictCurled: false,
+        middleFoldedWithRing: false,
         pointingDownTwoFingers: false,
         pointingDownIndexThumb: false,
         enieFoldedPosture: false,
+        middleToRingDist: 0,
+        middleBelowRingY: 0,
         twoFingerSpan: 0,
         knuckleSpan: 0,
         latDot: 0
@@ -1506,27 +1511,29 @@
     const knuckleSpan = Math.max(1e-4, dist3(pts[5], pts[9]));
     const twoFingerSpan = dist3(pts[8], pts[12]);
     const latDot = (pts[12].x - pts[8].x) * (pts[9].x - pts[5].x) + (pts[12].y - pts[8].y) * (pts[9].y - pts[5].y);
+    const middleToRingDist = dist3(pts[12], pts[16]);
+    const middleBelowRingY = pts[12].y - pts[16].y;
 
-    // P: en cámara web/LSP el índice puede ir horizontal o diagonal mientras el medio apunta hacia abajo y supera claramente a anular/meñique cerrados
+    // P: flexibiliza ángulos por perspectiva frontal y exige medio claramente separado o más bajo que el anular recogido
     const pointingDownTwoFingers = (
-      idxAng >= 118 &&
-      midAng >= 115 &&
-      dist3(pts[12], pts[0]) > dist3(pts[10], pts[0]) * 1.08 &&
-      pts[12].y > pts[9].y + 0.08 &&
-      pts[8].y >= pts[5].y - 0.12 &&
-      ringAng <= 128 &&
-      pinkyAng <= 128 &&
-      dist3(pts[12], pts[0]) > Math.max(dist3(pts[16], pts[0]), dist3(pts[20], pts[0]))
+      idxAng >= 112 &&
+      midAng >= 102 &&
+      pts[12].y > pts[9].y + 0.05 &&
+      ringAng <= 130 &&
+      pinkyAng <= 130 &&
+      (middleToRingDist >= 0.24 || middleBelowRingY >= 0.12)
     );
 
-    // Q: exige dedo medio estrictamente doblado contra la palma (no extendido como en P)
+    // Q: exige índice y pulgar hacia abajo y dedo medio recogido junto al anular (no extendido como en P)
+    const middleFoldedWithRing =
+      middleStrictCurled || (midAng <= 115 && middleToRingDist < 0.24 && middleBelowRingY < 0.10);
     const pointingDownIndexThumb = (
-      idxAng >= 122 &&
+      idxAng >= 120 &&
       pts[8].y > pts[5].y + 0.08 &&
       pts[4].y > pts[2].y + 0.03 &&
-      middleStrictCurled &&
       ringAng <= 130 &&
-      pinkyAng <= 130
+      pinkyAng <= 130 &&
+      middleFoldedWithRing
     );
 
     const enieFoldedPosture = ringCurled && pinkyCurled && !indexExtendedStraight && !middleExtendedStraight;
@@ -1540,9 +1547,12 @@
       pinkyOnlyExtended: pinkyExt && indexCurled && middleCurled && ringCurled,
       ringPinkyCurled: ringCurled && pinkyCurled,
       middleStrictCurled,
+      middleFoldedWithRing,
       pointingDownTwoFingers,
       pointingDownIndexThumb,
       enieFoldedPosture,
+      middleToRingDist,
+      middleBelowRingY,
       twoFingerSpan,
       knuckleSpan,
       latDot
@@ -1599,24 +1609,23 @@
       }
     }
 
-    // 2. Desambiguación de P (dedo medio hacia abajo más extendido que anular/meñique cerrados)
+    // 2. Desambiguación prioritaria de P antes que Q (dedo medio separado o más bajo que el anular recogido)
     const pCluster = ['P', 'K', 'Q', 'H', 'G'];
     const sumPKQHG = pCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
-    if (geom.pointingDownTwoFingers && sumPKQHG >= 0.45) {
+    if (geom.pointingDownTwoFingers && !geom.pointingDownIndexThumb && sumPKQHG >= 0.40) {
       return {
         label: 'P',
-        score: Math.min(0.99, Math.max(best.score, (probMap.P || 0) + 0.24, sumPKQHG * 0.88, 0.74)),
+        score: Math.min(0.99, Math.max(best.score, 0.78)),
         refined: best.label !== 'P'
       };
     }
 
-    // 3. Desambiguación de Q (índice y pulgar hacia abajo; jamás sobreescribe P si el dedo medio no está recogido)
+    // 3. Desambiguación de Q (índice y pulgar hacia abajo con dedo medio recogido junto al anular)
     const qCluster = ['Q', 'G', 'P', 'D', 'X'];
     const qInTop3 = topCandidates.slice(0, 3).some((c) => c && c.label === 'Q');
     const sumQGPDX = qCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
     if (
       !geom.pointingDownTwoFingers &&
-      geom.middleStrictCurled !== false &&
       geom.pointingDownIndexThumb &&
       (qInTop3 || sumQGPDX >= 0.45)
     ) {
@@ -1650,7 +1659,7 @@
     const recent = history.filter((item) => item && (refNow - item.at) >= 0 && (refNow - item.at) <= 1350);
     if (recent.length < 4) return empty;
     const spanMs = recent[recent.length - 1].at - recent[0].at;
-    if (spanMs < 350) return empty;
+    if (spanMs < 300) return empty;
 
     let palmSum = 0;
     for (let i = 0; i < recent.length; i += 1) {
@@ -1658,7 +1667,7 @@
     }
     const avgPalm = palmSum / recent.length;
 
-    // 1. Oscilación horizontal para Ñ (coordenadas X multiplicadas por aspect)
+    // 1. Oscilación horizontal para Ñ sobre zona frontal/punta del índice (X escalada por aspect)
     const enieWindow = recent.filter((item) => (refNow - item.at) >= 0 && (refNow - item.at) <= 1300);
     let minX = Infinity;
     let maxX = -Infinity;
@@ -1668,8 +1677,8 @@
     for (let i = 0; i < enieWindow.length; i += 1) {
       const p = enieWindow[i];
       const ax = p.aspect || 1;
-      const cx = ((p.index[0] + p.wrist[0]) * 0.5) * ax;
-      const cy = (p.index[1] + p.wrist[1]) * 0.5;
+      const cx = p.index[0] * ax;
+      const cy = p.index[1];
       if (cx < minX) minX = cx;
       if (cx > maxX) maxX = cx;
       if (cy < minY) minY = cy;
@@ -1677,7 +1686,7 @@
       if (i > 0) {
         const prev = enieWindow[i - 1];
         const prevAx = prev.aspect || ax;
-        const prevCx = ((prev.index[0] + prev.wrist[0]) * 0.5) * prevAx;
+        const prevCx = prev.index[0] * prevAx;
         const dx = cx - prevCx;
         if (Math.abs(dx) >= avgPalm * 0.025) {
           const s = dx > 0 ? 1 : -1;
@@ -1692,9 +1701,9 @@
     const spanY = Number.isFinite(maxY - minY) ? (maxY - minY) : 0;
     const enieDuration = enieWindow.length >= 2 ? (enieWindow[enieWindow.length - 1].at - enieWindow[0].at) : 0;
     const enieMotionOk = (
-      enieDuration >= 450 &&
-      spanX >= 0.28 * avgPalm &&
-      spanX > spanY * 1.25 &&
+      enieDuration >= 320 &&
+      spanX >= 0.20 * avgPalm &&
+      spanX > spanY * 1.10 &&
       reversals >= 2
     );
 
@@ -2412,6 +2421,7 @@
     let handsDownSince = null;
     let lastLetterConfirmedAt = 0;
     let missingHandFrames = 0;
+    let missingPoseFrames = 0;
     let speechTimer = null;
     let autoPolishTimer = 0;
     let polishRequestId = 0;
@@ -2718,6 +2728,7 @@
       lastDynamicEmitAt = 0;
       resetTrajectory();
       missingHandFrames = 0;
+      missingPoseFrames = 0;
       lastLetterConfirmedAt = 0;
       recentStaticHistory.length = 0;
       lastStaticConfirmed.label = null;
@@ -2901,8 +2912,9 @@
           baseOptions: { modelAssetPath: url },
           runningMode: 'VIDEO',
           numPoses: 1,
-          minPoseDetectionConfidence: 0.45,
-          minTrackingConfidence: 0.45
+          minPoseDetectionConfidence: 0.35,
+          minPosePresenceConfidence: 0.35,
+          minTrackingConfidence: 0.35
         });
         return makeTask(PoseLandmarker, poseOpts(preferredPoseUrl))
           .catch((fullErr) => {
@@ -2923,9 +2935,9 @@
           baseOptions: { modelAssetPath: HAND_MODEL_URL },
           runningMode: 'VIDEO',
           numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5
+          minHandDetectionConfidence: 0.35,
+          minHandPresenceConfidence: 0.35,
+          minTrackingConfidence: 0.35
         }),
         createPoseLandmarker()
       ]);
@@ -2967,8 +2979,8 @@
       instance.setOptions({
         maxNumHands: 2,
         modelComplexity: lowPower ? 0 : 1,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
+        minDetectionConfidence: 0.35,
+        minTrackingConfidence: 0.35
       });
       instance.onResults((legacyRes) => {
         if (!running || !legacyRes) return;
@@ -3164,10 +3176,17 @@
                 const poseRes = visionEngine.poseLandmarker.detectForVideo(video, auxTs);
                 const rawPose =
                   poseRes && Array.isArray(poseRes.landmarks) && poseRes.landmarks[0] ? poseRes.landmarks[0] : null;
-                latestPoseLandmarks = rawPose;
-                smoothedPoseLandmarks = rawPose
-                  ? smoothLandmarksEMA(smoothedPoseLandmarks, rawPose, POSE_EMA_ALPHA, 0.4)
-                  : null;
+                if (rawPose) {
+                  missingPoseFrames = 0;
+                  latestPoseLandmarks = rawPose;
+                  smoothedPoseLandmarks = smoothLandmarksEMA(smoothedPoseLandmarks, rawPose, POSE_EMA_ALPHA, 0.4);
+                } else {
+                  missingPoseFrames += 1;
+                  if (missingPoseFrames > POSE_DROPOUT_GRACE_FRAMES) {
+                    latestPoseLandmarks = null;
+                    smoothedPoseLandmarks = null;
+                  }
+                }
               } catch (poseErr) {
                 console.warn('[Cámara IA]', poseErr);
                 visionEngine.poseLandmarker = null;
@@ -3264,7 +3283,7 @@
         const nose = poseLandmarks[0];
         const ls = poseLandmarks[11];
         const rs = poseLandmarks[12];
-        if (nose && ls && rs && vis(nose) >= 0.3 && vis(ls) >= 0.3 && vis(rs) >= 0.3) {
+        if (nose && ls && rs && vis(nose) >= 0.20 && vis(ls) >= 0.20 && vis(rs) >= 0.20) {
           ctx.moveTo(nose.x * w, nose.y * h);
           ctx.lineTo(((ls.x + rs.x) / 2) * w, ((ls.y + rs.y) / 2) * h);
         }
@@ -3272,7 +3291,7 @@
         POSE_UPPER_EDGES.forEach(([a, b]) => {
           const pa = poseLandmarks[a];
           const pb = poseLandmarks[b];
-          if (!pa || !pb || vis(pa) < 0.28 || vis(pb) < 0.28) return;
+          if (!pa || !pb || vis(pa) < 0.20 || vis(pb) < 0.20) return;
           ctx.moveTo(pa.x * w, pa.y * h);
           ctx.lineTo(pb.x * w, pb.y * h);
         });
@@ -3284,7 +3303,7 @@
 
       [0, 11, 12, 13, 14, 15, 16, 23, 24].forEach((idx) => {
         const pt = poseLandmarks[idx];
-        if (!pt || vis(pt) < 0.3) return;
+        if (!pt || vis(pt) < 0.20) return;
         ctx.beginPath();
         ctx.arc(pt.x * w, pt.y * h, idx === 0 ? 5.5 : 4.5, 0, Math.PI * 2);
         ctx.fillStyle = nodeFill;
@@ -3667,10 +3686,13 @@
         const isSpace = spellCandidate.label === SPACE_TOKEN_LABEL;
         const tokenId = `spell:${spellCandidate.label}`;
         const last = lastAddedAt[tokenId];
+        const prevTok = sentenceTokens.length > 0 ? sentenceTokens[sentenceTokens.length - 1] : null;
+        const isSameAsLastToken = Boolean(prevTok && prevTok.id === tokenId);
+        const requiredCooldownMs = isSameAsLastToken ? SAME_LETTER_COOLDOWN_MS : SPELL_COOLDOWN_MS;
         const canSpace =
           !isSpace || (sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind !== 'space');
 
-        if (canSpace && (typeof last !== 'number' || now - last >= SPELL_COOLDOWN_MS)) {
+        if (canSpace && (typeof last !== 'number' || now - last >= requiredCooldownMs)) {
           lastAddedAt[tokenId] = now;
           lastLetterConfirmedAt = now;
           if (isSpace) {
@@ -3785,7 +3807,8 @@
         lastStaticConfirmed.at > 0 &&
         now - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS &&
         ((label === 'Z' && lastStaticConfirmed.label === 'D' && lastTok.text === 'D') ||
-         (label === 'J' && lastStaticConfirmed.label === 'I' && lastTok.text === 'I'));
+         (label === 'J' && lastStaticConfirmed.label === 'I' && lastTok.text === 'I') ||
+         (label === 'Ñ' && lastStaticConfirmed.label === 'N' && lastTok.text === 'N'));
 
       if (replaceBase) {
         delete lastAddedAt[`spell:${lastStaticConfirmed.label}`];
@@ -3863,8 +3886,9 @@
       });
 
       let matchedDyn = null;
+      const lastPalmNow = trajHistory.length ? (trajHistory[trajHistory.length - 1].palm || 0.08) : 0.08;
 
-      // 1. Blindaje estricto de Ñ: postura N/M real con dedos doblados + no incompatible + vaivén X (>=0.28) + racha GRU >= 3
+      // 1. Consenso híbrido de Ñ: postura N/M con dedos doblados + sin incompatibles + bloqueo ESTATICA >= 0.75
       const activeIncompatible =
         latestStatic &&
         evalNow - latestStatic.at <= 500 &&
@@ -3875,18 +3899,20 @@
         hasStaticCandidate(ENIE_COMPATIBLE_LABELS, 0.28) ||
         (ENIE_COMPATIBLE_LABELS.has(lastStaticConfirmed.label) && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS);
       const eniePostureOk = foldedNMPosture && compatibleEnieHistory && !activeIncompatible;
+      const enieGruStrong = pEnie >= ENIE_GRU_MIN_CONF && motion.spanX >= 0.18 * lastPalmNow;
+      const enieHybridConsensus = motion.enieMotionOk && pEnie >= 0.32;
 
-      if (label === 'Ñ' && bestProb >= ENIE_GRU_MIN_CONF && eniePostureOk && motion.enieMotionOk) {
+      if (eniePostureOk && pStatic < 0.75 && (enieGruStrong || enieHybridConsensus)) {
+        const enieScore = Math.min(0.99, Math.max(pEnie, enieGruStrong ? ENIE_GRU_MIN_CONF : 0.72));
         matchedDyn = {
           label: 'Ñ',
-          score: Math.max(bestProb, pEnie),
-          rawProb: bestProb,
+          score: enieScore,
+          rawProb: Math.max(bestProb, pEnie),
           streakReq: ENIE_STREAK_REQUIRED
         };
       }
 
       // 2. Z con postura estricta (indexOnlyExtended actual, sin incompatibles) + consenso GRU + zig-zag por anclas
-      const lastPalmNow = trajHistory.length ? (trajHistory[trajHistory.length - 1].palm || 0.08) : 0.08;
       if (!matchedDyn && postures) {
         const zActiveIncompatible = Boolean(
           latestStatic &&
@@ -4183,6 +4209,19 @@
 
         if (missingHandFrames <= HAND_DROPOUT_GRACE_FRAMES) {
           drawMotionTrail();
+          ctx.save();
+          ctx.globalAlpha = 0.72;
+          ['Right', 'Left'].forEach((side) => {
+            const cachedLm = smoothedHandSlots[side];
+            if (cachedLm) {
+              const palm = computePalmOrientation3D(
+                cachedLm.map((p) => ({ x: p.x * aspect, y: p.y, z: (p.z || 0) * aspect })),
+                side
+              );
+              drawHandEnhanced(cachedLm, side, palm);
+            }
+          });
+          ctx.restore();
           return;
         }
 
@@ -4349,10 +4388,19 @@
           const tracingDynamicLetter = Boolean(
             curPostures.pinkyOnlyExtended ||
             curPostures.indexOnlyExtended ||
+            curPostures.enieFoldedPosture ||
             (lastStaticConfirmed.at > 0 &&
               now - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS &&
-              (lastStaticConfirmed.label === 'I' || lastStaticConfirmed.label === 'D')) ||
-            recentStaticHistory.some((h) => h && now - h.at <= 700 && (h.top1 === 'I' || h.top1 === 'D'))
+              (lastStaticConfirmed.label === 'I' ||
+                lastStaticConfirmed.label === 'D' ||
+                lastStaticConfirmed.label === 'N' ||
+                lastStaticConfirmed.label === 'M')) ||
+            recentStaticHistory.some(
+              (h) =>
+                h &&
+                ((now - h.at <= 700 && (h.top1 === 'I' || h.top1 === 'D')) ||
+                  (now - h.at <= 800 && (h.top1 === 'N' || h.top1 === 'M')))
+            )
           );
           if (wideArmMotion && !tracingDynamicLetter) lastLetterConfirmedAt = 0;
           const recentSpell = lastLetterConfirmedAt > 0 && now - lastLetterConfirmedAt <= SPELL_SESSION_HOLD_MS;

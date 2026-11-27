@@ -262,6 +262,7 @@
           signal: controller ? controller.signal : undefined
         });
         if (!res.ok) {
+          console.warn('[SeñaSegura · Gemini LSP] Fallback local:', `HTTP ${res.status}`);
           return { text: fallback, corrected: false, source: 'local' };
         }
         const json = await res.json();
@@ -294,6 +295,7 @@
           signal: controller ? controller.signal : undefined
         });
         if (!res.ok) {
+          console.warn('[SeñaSegura · Gemini LSP] Fallback local:', `HTTP ${res.status}`);
           return { text: fallback, corrected: false, source: 'local' };
         }
         const json = await res.json();
@@ -302,14 +304,20 @@
 
       const cleaned = cleanModelOutput(candidateText);
       if (!cleaned) {
+        console.warn('[SeñaSegura · Gemini LSP] Fallback local:', 'respuesta JSON sin texto válido');
         return { text: fallback, corrected: false, source: 'local' };
       }
+      console.info('[SeñaSegura · Gemini LSP] Refinado con gemini-3.8-flash');
       return {
         text: cleaned,
         corrected: cleaned !== fallback,
         source: DEFAULT_MODEL
       };
-    } catch (_) {
+    } catch (err) {
+      const reason = err && err.name === 'AbortError'
+        ? 'timeout'
+        : (err && err.message ? err.message : String(err));
+      console.warn('[SeñaSegura · Gemini LSP] Fallback local:', reason);
       return { text: fallback, corrected: false, source: 'local' };
     } finally {
       if (timer !== null) clearTimeout(timer);

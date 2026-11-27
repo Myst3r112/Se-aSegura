@@ -32,6 +32,8 @@ SeñaSegura/
 │   ├── senas_dinamicas/           # GraphModel TF.js [1, 30, 159] (118 señas dinámicas PUCP LSP) + metadata.json
 │   ├── model_alfabeto_lsp_3d/     # GraphModel TF.js MLP 90D Zero-Ambiguity [1, 90] (A–Z + ESPACIO) + metadata.json
 │   └── model_alfabeto_dinamico_3d/ # GraphModel TF.js Micro-GRU [1, 16, 12] (ESTATICA, J, Ñ, Z) + metadata.json
+├── tools/
+│   └── capturar-alfabeto-lsp.html  # Recolector local 3D de dataset 100 % LSP (uso interno de entrenamiento; no enlazado en producción)
 ├── assets/
 │   ├── fonts/                  # Atkinson Hyperlegible (400 y 700 woff2)
 │   ├── icons/                  # Iconografía SVG oficial exportada desde Figma

@@ -641,12 +641,11 @@
       const zCross = Math.abs((W[8].z || 0) - (W[12].z || 0)) / palmW > 0.14 && tipGapIM < 0.22;
       if (latDot <= 0 || zCross) id = 'letra_r';
       else if (tipGapIM >= 0.28 && thumbToMiddlePip < 0.50 && thumbToMiddleMcp < 0.56) id = 'letra_k';
-      else if (tipGapIM < 0.28) id = 'letra_u';
       else id = 'letra_v';
-    } else if (I && M && R && !K) {
-      id = 'letra_w';
     } else if (I && !M && !R && K) {
       id = 'letra_u';
+    } else if (I && M && R && !K) {
+      id = 'letra_w';
     } else if (I && !M && !R && !K) {
       const lAngle = angleDeg(W[4], W[2], W[5]);
       if (thumbSpread && lAngle >= 45 && thumbToIndexMcp > 0.70) id = 'letra_l';
@@ -730,7 +729,7 @@
       return { id: 'entiendo', score };
     }
     if (pid === 'letra_i' && trajType === 'trazo_j') return { id: 'letra_j', score };
-    if ((pid === 'letra_u' || pid === 'letra_v') && trajType === 'oscilacion_h') return { id: 'letra_enie', score };
+    if (pid === 'letra_v' && trajType === 'oscilacion_h') return { id: 'letra_enie', score };
     if (pid === 'indice' && trajType === 'trazo_z') return { id: 'letra_z', score };
     if (pid === 'indice' && trajType === 'oscilacion_h') return { id: 'negar_mov', score };
 
@@ -1239,7 +1238,6 @@
     );
 
     const enieFoldedPosture = ringCurled && pinkyCurled && !indexExtendedStraight && !middleExtendedStraight;
-
     const lspUHornsPosture = (
       idxAng >= 130 &&
       dist3(pts[8], pts[0]) > dist3(pts[6], pts[0]) * 1.10 &&
@@ -1302,36 +1300,22 @@
       };
     }
 
-    const pU = probMap.U || 0;
     const pV = probMap.V || 0;
     const pR = probMap.R || 0;
-    const sumUVR = pU + pV + pR;
-    if (sumUVR >= 0.55 && geom.indexExt && geom.middleExt) {
-      const tipDist = geom.twoFingerSpan;
-      const uLimit = Math.max(0.36, geom.knuckleSpan * 1.48);
-      if (geom.latDot > 0.0 && tipDist <= uLimit) {
+    const sumVR = pV + pR;
+    if (sumVR >= 0.55 && geom.indexExt && geom.middleExt) {
+      if (geom.latDot <= 0.0) {
         return {
-          label: 'U',
-          score: Math.min(0.99, Math.max(best.score, pU + 0.20, sumUVR * 0.88, 0.74)),
-          refined: best.label !== 'U'
+          label: 'R',
+          score: Math.min(0.99, Math.max(best.score, pR + 0.15, sumVR * 0.85, 0.74)),
+          refined: best.label !== 'R'
         };
       }
-      if (best.label === 'U' || best.label === 'V' || best.label === 'R') {
-        if (geom.latDot <= 0.0) {
-          return {
-            label: 'R',
-            score: Math.min(0.99, Math.max(best.score, pR + 0.15, sumUVR * 0.85, 0.74)),
-            refined: best.label !== 'R'
-          };
-        }
-        if (tipDist > 0.38) {
-          return {
-            label: 'V',
-            score: Math.min(0.99, Math.max(best.score, pV + 0.12, sumUVR * 0.82)),
-            refined: best.label !== 'V'
-          };
-        }
-      }
+      return {
+        label: 'V',
+        score: Math.min(0.99, Math.max(best.score, pV + 0.12, sumVR * 0.82, 0.74)),
+        refined: best.label !== 'V'
+      };
     }
 
     const pCluster = ['P', 'K', 'Q', 'H', 'G'];

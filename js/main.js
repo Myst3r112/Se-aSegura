@@ -2741,7 +2741,7 @@
             y += 10;
           });
 
-          const verifyUrl = buildReceiptVerifyUrl(code);
+          const verifyUrl = buildReceiptVerifyUrl(code, sectorVal, procVal);
           const qrMatrix = encodeIsoQrMatrix(verifyUrl);
           if (qrMatrix) {
             const qSize = qrMatrix.length;
@@ -2868,6 +2868,7 @@
      */
     window.SenaSegura = Object.freeze({
       getChannel: () => state.channel,
+      getContext: () => ({ sector: state.sector, procedure: state.procedure }),
       setChannel,
       appendChatMessage(sender, text, type = 'user') {
         state.sessionActive = true;

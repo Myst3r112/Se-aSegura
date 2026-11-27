@@ -3657,6 +3657,108 @@ html[data-contrast="high"] .vision-toggle-btn[aria-pressed="true"] {
   border-color: var(--color-focus);
 }
 
+/* Popover de configuración opcional Gemini LSP (CLS = 0 en Alto Contraste) */
+.vision-gemini-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-12);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  min-width: 0;
+}
+
+.vision-gemini-popover[hidden] {
+  display: none;
+}
+
+.vision-gemini-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vision-gemini-title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.vision-gemini-note {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+
+.vision-gemini-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.vision-gemini-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  min-width: 0;
+}
+
+.vision-gemini-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 40px;
+  padding: 6px 10px;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-8);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 0.875rem;
+}
+
+.vision-gemini-input:focus-visible {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.vision-gemini-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vision-gemini-feedback {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  overflow-wrap: anywhere;
+}
+
+.vision-gemini-feedback:empty {
+  display: none;
+}
+
+html[data-contrast="high"] .vision-gemini-popover,
+html[data-contrast="high"] .vision-gemini-input {
+  background-color: var(--color-bg);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+html[data-contrast="high"] .vision-gemini-note,
+html[data-contrast="high"] .vision-gemini-feedback {
+  color: var(--color-focus);
+}
+
 .vision-hands-count {
   display: inline-flex;
   align-items: center;

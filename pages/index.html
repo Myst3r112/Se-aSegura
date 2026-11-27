@@ -9,9 +9,10 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=18">
-  <script src="../js/main.js?v=18" defer></script>
-  <script src="../js/vision-ai.js?v=18" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=19">
+  <script src="../js/main.js?v=19" defer></script>
+  <script src="../js/gemini-lsp.js?v=19" defer></script>
+  <script src="../js/vision-ai.js?v=19" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -552,6 +553,7 @@
                         <button type="button" class="vision-toggle-btn is-active" id="btn-vision-overlay" aria-pressed="true">Ver enfoque IA</button>
                         <button type="button" class="vision-toggle-btn is-active" id="btn-vision-mirror" aria-pressed="true">Espejo</button>
                         <button type="button" class="vision-toggle-btn" id="btn-vision-expand" aria-pressed="false" aria-label="Ampliar vista de cámara a ancho completo">Ampliar vista</button>
+                        <button type="button" class="vision-toggle-btn vision-gemini-toggle" id="btn-vision-gemini-config" aria-expanded="false" aria-controls="vision-gemini-popover">IA Gemini LSP: <span id="vision-gemini-state">Inactiva</span></button>
                       </div>
                       <span class="vision-hands-count" id="vision-hands-count" hidden aria-live="polite" aria-label="Manos detectadas: 0 de 2">Manos: 0 / 2</span>
                       <div class="vision-status" id="vision-status" data-state="idle" role="status">
@@ -566,6 +568,29 @@
                         <span class="vision-status-text" id="vision-status-text">Cámara inactiva</span>
                       </div>
                     </div>
+                  </div>
+
+                  <div class="vision-gemini-popover" id="vision-gemini-popover" hidden role="region" aria-labelledby="vision-gemini-title">
+                    <div class="vision-gemini-head">
+                      <h5 class="vision-gemini-title" id="vision-gemini-title">Capa híbrida Gemini LSP (solo texto)</h5>
+                      <p class="vision-gemini-note">Opcional y privada: nunca envía video ni fotos (Ley N.° 29733). Solo pule glosas y deletreo en Lengua de Señas Peruana.</p>
+                    </div>
+                    <div class="vision-gemini-grid">
+                      <label class="vision-gemini-field">
+                        <span>URL Proxy Worker (GitHub Pages)</span>
+                        <input type="url" id="vision-gemini-proxy" class="vision-gemini-input" placeholder="https://tu-worker.workers.dev" autocomplete="off" spellcheck="false">
+                      </label>
+                      <label class="vision-gemini-field">
+                        <span>Clave temporal de sesión (solo prueba local)</span>
+                        <input type="password" id="vision-gemini-key" class="vision-gemini-input" placeholder="Opcional · se borra al cerrar o purgar" autocomplete="off">
+                      </label>
+                    </div>
+                    <div class="vision-gemini-actions">
+                      <button type="button" class="vision-toggle-btn is-active" id="btn-vision-gemini-save">Guardar</button>
+                      <button type="button" class="vision-toggle-btn" id="btn-vision-gemini-disconnect" disabled>Desconectar</button>
+                      <button type="button" class="vision-toggle-btn" id="btn-vision-gemini-close">Cerrar</button>
+                    </div>
+                    <p class="vision-gemini-feedback" id="vision-gemini-feedback" role="status" aria-live="polite"></p>
                   </div>
 
                   <p class="vision-notice" id="vision-notice" role="status" hidden></p>
@@ -630,6 +655,9 @@
                         <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-speak" disabled>
                           <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
                           <span>Enviar y leer al funcionario</span>
+                        </button>
+                        <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-polish" hidden disabled title="Refina la oración en Lengua de Señas Peruana con Gemini">
+                          <span>Pulir LSP</span>
                         </button>
                         <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-space" disabled aria-label="Insertar espacio entre palabras deletreadas">
                           <span>Espacio</span>

@@ -56,11 +56,14 @@
   const STATIC_HISTORY_MAX_MS = 900;
   const DYNAMIC_EMIT_LOCK_MS = 900; // evita re-disparar la letra dinámica o confirmar la postura base tras emitirla
   const DYNAMIC_REPLACE_WINDOW_MS = 1200; // reemplazo limpio D→Z e I→J
-  const ENIE_GRU_MIN_CONF = 0.84;
-  const ENIE_STREAK_REQUIRED = 2;
+  const ENIE_GRU_MIN_CONF = 0.88;
+  const ENIE_STREAK_REQUIRED = 3;
   const ZJ_GRU_MIN_CONF = 0.72;
-  const ENIE_COMPATIBLE_LABELS = new Set(['N', 'M', 'H', 'T']);
-  const ENIE_INCOMPATIBLE_LABELS = new Set(['A', 'B', 'C', 'D', 'F', 'I', 'L', 'O', 'P', 'U', 'V', 'W', 'Y']);
+  const ENIE_COMPATIBLE_LABELS = new Set(['N', 'M']);
+  const ENIE_INCOMPATIBLE_LABELS = new Set([
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
+    'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'Y', 'X'
+  ]);
   const STATIC_SPACE_LABEL = 'ESPACIO';
   const SPELL_SESSION_HOLD_MS = 2800; // protege sesión de deletreo activa frente al motor de 118 señas
   const MAX_TRAIL_POINTS = 14; // estela visual de trazos J, Ñ, Z y señas dinámicas
@@ -243,6 +246,10 @@
   /* =========================================================
      2. EXTRACTORES DE LOS 7 PARÁMETROS LSP (FUNCIONES PURAS)
      ========================================================= */
+  function clamp(val, min, max) {
+    return Math.min(max, Math.max(min, val));
+  }
+
   function dist3(a, b) {
     return Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
   }
@@ -1521,6 +1528,8 @@
         pinkyOnlyExtended: false,
         ringPinkyCurled: false,
         pointingDownTwoFingers: false,
+        pointingDownIndexThumb: false,
+        enieFoldedPosture: false,
         twoFingerSpan: 0,
         knuckleSpan: 0,
         latDot: 0
@@ -1536,6 +1545,9 @@
     const ringExt = ringAng >= 130 || dist3(pts[16], pts[0]) > dist3(pts[14], pts[0]) * 1.15;
     const pinkyExt = pinkyAng >= 130 || dist3(pts[20], pts[0]) > dist3(pts[18], pts[0]) * 1.15;
 
+    const indexExtendedStraight = idxAng >= 142 && dist3(pts[8], pts[0]) > dist3(pts[6], pts[0]) * 1.14;
+    const middleExtendedStraight = midAng >= 142 && dist3(pts[12], pts[0]) > dist3(pts[10], pts[0]) * 1.14;
+
     const ringCurled = ringAng <= 125 && dist3(pts[16], pts[0]) <= dist3(pts[14], pts[0]) * 1.08;
     const pinkyCurled = pinkyAng <= 125 && dist3(pts[20], pts[0]) <= dist3(pts[18], pts[0]) * 1.08;
     const middleCurled = midAng <= 125 && dist3(pts[12], pts[0]) <= dist3(pts[10], pts[0]) * 1.08;
@@ -1546,11 +1558,22 @@
     const latDot = (pts[12].x - pts[8].x) * (pts[9].x - pts[5].x) + (pts[12].y - pts[8].y) * (pts[9].y - pts[5].y);
 
     const pointingDownTwoFingers = (
-      idxAng >= 125 && midAng >= 125 &&
-      ringAng <= 125 && pinkyAng <= 125 &&
-      pts[8].y > pts[5].y + 0.10 &&
-      pts[12].y > pts[9].y + 0.10
+      idxAng >= 120 && midAng >= 120 &&
+      ringAng <= 130 && pinkyAng <= 130 &&
+      pts[8].y > pts[5].y + 0.08 &&
+      pts[12].y > pts[9].y + 0.08
     );
+
+    const pointingDownIndexThumb = (
+      idxAng >= 122 &&
+      pts[8].y > pts[5].y + 0.08 &&
+      pts[4].y > pts[2].y + 0.03 &&
+      midAng <= 130 &&
+      ringAng <= 130 &&
+      pinkyAng <= 130
+    );
+
+    const enieFoldedPosture = ringCurled && pinkyCurled && !indexExtendedStraight && !middleExtendedStraight;
 
     return {
       indexExt,
@@ -1561,6 +1584,8 @@
       pinkyOnlyExtended: pinkyExt && indexCurled && middleCurled && ringCurled,
       ringPinkyCurled: ringCurled && pinkyCurled,
       pointingDownTwoFingers,
+      pointingDownIndexThumb,
+      enieFoldedPosture,
       twoFingerSpan,
       knuckleSpan,
       latDot
@@ -1568,7 +1593,7 @@
   }
 
   /**
-   * Desambigua pares estáticos 3D cercanos (`U`/`V`/`R` y `P` frente a `{K, Q, H, G}`)
+   * Desambigua pares estáticos 3D cercanos (`U`/`V`/`R`, `P` frente a `{K, Q, H, G}` y `Q` frente a `{Q, G, P, D, X}`)
    * usando la geometría canónica `pts` sin alterar los pesos del modelo entrenado.
    */
   function refineStatic3DLabel(topCandidates, pts, postures = null) {
@@ -1587,36 +1612,49 @@
     const pV = probMap.V || 0;
     const pR = probMap.R || 0;
     const sumUVR = pU + pV + pR;
-    if (sumUVR >= 0.65 && (best.label === 'U' || best.label === 'V' || best.label === 'R')) {
+    if (sumUVR >= 0.55 && geom.indexExt && geom.middleExt) {
       const tipDist = geom.twoFingerSpan;
-      const uLimit = Math.max(0.34, geom.knuckleSpan * 1.40);
-      if (geom.latDot <= 0.02 && geom.indexExt && geom.middleExt) {
-        return { label: 'R', score: Math.max(best.score, pR + 0.15, sumUVR * 0.85), refined: best.label !== 'R' };
+      const uLimit = Math.max(0.36, geom.knuckleSpan * 1.48);
+      if (geom.latDot > 0.0 && tipDist <= uLimit) {
+        return { label: 'U', score: Math.max(best.score, pU + 0.20, sumUVR * 0.88, 0.74), refined: best.label !== 'U' };
       }
-      if (geom.latDot > 0.02 && tipDist <= uLimit && geom.indexExt && geom.middleExt) {
-        return { label: 'U', score: Math.max(best.score, pU + 0.18, sumUVR * 0.85), refined: best.label !== 'U' };
-      }
-      if (tipDist > 0.38 && geom.indexExt && geom.middleExt) {
-        return { label: 'V', score: Math.max(best.score, pV + 0.12, sumUVR * 0.82), refined: best.label !== 'V' };
+      if (best.label === 'U' || best.label === 'V' || best.label === 'R') {
+        if (geom.latDot <= 0.0) {
+          return { label: 'R', score: Math.max(best.score, pR + 0.15, sumUVR * 0.85, 0.74), refined: best.label !== 'R' };
+        }
+        if (tipDist > 0.38) {
+          return { label: 'V', score: Math.max(best.score, pV + 0.12, sumUVR * 0.82), refined: best.label !== 'V' };
+        }
       }
     }
 
     // 2. Desambiguación de P (dedos índice y medio apuntando hacia abajo, anular y meñique cerrados)
     const pCluster = ['P', 'K', 'Q', 'H', 'G'];
-    const pInTop3 = topCandidates.slice(0, 3).some((c) => c && c.label === 'P');
     const sumPKQHG = pCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
-    if ((pInTop3 || sumPKQHG >= 0.58) && geom.pointingDownTwoFingers && (probMap.P || 0) >= 0.06) {
+    if (geom.pointingDownTwoFingers && sumPKQHG >= 0.45) {
       return {
         label: 'P',
-        score: Math.max(best.score, (probMap.P || 0) + 0.22, sumPKQHG * 0.85),
+        score: Math.max(best.score, (probMap.P || 0) + 0.24, sumPKQHG * 0.88, 0.74),
         refined: best.label !== 'P'
+      };
+    }
+
+    // 3. Desambiguación de Q (índice y pulgar apuntando hacia abajo, medio/anular/meñique cerrados)
+    const qCluster = ['Q', 'G', 'P', 'D', 'X'];
+    const qInTop3 = topCandidates.slice(0, 3).some((c) => c && c.label === 'Q');
+    const sumQGPDX = qCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
+    if (!geom.pointingDownTwoFingers && geom.pointingDownIndexThumb && (qInTop3 || sumQGPDX >= 0.45)) {
+      return {
+        label: 'Q',
+        score: Math.max(best.score, (probMap.Q || 0) + 0.24, sumQGPDX * 0.88, 0.74),
+        refined: best.label !== 'Q'
       };
     }
 
     return { label: best.label, score: best.score, refined: false };
   }
 
-  /** Evalúa firmas geométricas 3D/2D de movimiento para `Ñ`, `Z` y `J` sobre `trajHistory`. */
+  /** Evalúa firmas geométricas 3D/2D de movimiento para `Ñ`, `Z` y `J` sobre `trajHistory` escalando X por aspect. */
   function analyzeTrajectoryMotion(history, nowMs = null) {
     const empty = {
       enieMotionOk: false,
@@ -1624,6 +1662,8 @@
       jMotionOk: false,
       spanX: 0,
       spanY: 0,
+      zSpanX: 0,
+      zSpanY: 0,
       reversals: 0,
       dropY: 0,
       hookDx: 0
@@ -1642,7 +1682,7 @@
     }
     const avgPalm = palmSum / recent.length;
 
-    // 1. Oscilación horizontal para Ñ (nudillos/muñeca/índice horizontalmente sin desplazamiento vertical grande)
+    // 1. Oscilación horizontal para Ñ (coordenadas X multiplicadas por aspect)
     const enieWindow = recent.filter((item) => (refNow - item.at) >= 0 && (refNow - item.at) <= 1300);
     let minX = Infinity;
     let maxX = -Infinity;
@@ -1651,7 +1691,8 @@
     const dirSequence = [];
     for (let i = 0; i < enieWindow.length; i += 1) {
       const p = enieWindow[i];
-      const cx = (p.index[0] + p.wrist[0]) * 0.5;
+      const ax = p.aspect || 1;
+      const cx = ((p.index[0] + p.wrist[0]) * 0.5) * ax;
       const cy = (p.index[1] + p.wrist[1]) * 0.5;
       if (cx < minX) minX = cx;
       if (cx > maxX) maxX = cx;
@@ -1659,7 +1700,8 @@
       if (cy > maxY) maxY = cy;
       if (i > 0) {
         const prev = enieWindow[i - 1];
-        const prevCx = (prev.index[0] + prev.wrist[0]) * 0.5;
+        const prevAx = prev.aspect || ax;
+        const prevCx = ((prev.index[0] + prev.wrist[0]) * 0.5) * prevAx;
         const dx = cx - prevCx;
         if (Math.abs(dx) >= avgPalm * 0.025) {
           const s = dx > 0 ? 1 : -1;
@@ -1675,26 +1717,31 @@
     const enieDuration = enieWindow.length >= 2 ? (enieWindow[enieWindow.length - 1].at - enieWindow[0].at) : 0;
     const enieMotionOk = (
       enieDuration >= 450 &&
-      spanX >= 0.24 * avgPalm &&
+      spanX >= 0.28 * avgPalm &&
       spanX > spanY * 1.25 &&
       reversals >= 2
     );
 
-    // 2. Zig-zag Z sobre punta del índice [8] (agnóstico al signo espejo horizontal)
+    // 2. Zig-zag Z sobre punta del índice [8] (X escalada por aspect)
     let zMinX = Infinity;
     let zMaxX = -Infinity;
     let zMinY = Infinity;
     let zMaxY = -Infinity;
     const zHorizDirs = [];
     for (let i = 0; i < recent.length; i += 1) {
-      const p = recent[i].index;
-      if (p[0] < zMinX) zMinX = p[0];
-      if (p[0] > zMaxX) zMaxX = p[0];
-      if (p[1] < zMinY) zMinY = p[1];
-      if (p[1] > zMaxY) zMaxY = p[1];
+      const item = recent[i];
+      const ax = item.aspect || 1;
+      const px = item.index[0] * ax;
+      const py = item.index[1];
+      if (px < zMinX) zMinX = px;
+      if (px > zMaxX) zMaxX = px;
+      if (py < zMinY) zMinY = py;
+      if (py > zMaxY) zMaxY = py;
       if (i > 0) {
-        const dx = p[0] - recent[i - 1].index[0];
-        if (Math.abs(dx) >= avgPalm * 0.04) {
+        const prevItem = recent[i - 1];
+        const prevAx = prevItem.aspect || ax;
+        const dx = px - prevItem.index[0] * prevAx;
+        if (Math.abs(dx) >= avgPalm * 0.03) {
           const s = dx > 0 ? 1 : -1;
           if (!zHorizDirs.length || zHorizDirs[zHorizDirs.length - 1] !== s) {
             zHorizDirs.push(s);
@@ -1705,12 +1752,12 @@
     const zSpanX = Number.isFinite(zMaxX - zMinX) ? (zMaxX - zMinX) : 0;
     const zSpanY = Number.isFinite(zMaxY - zMinY) ? (zMaxY - zMinY) : 0;
     const zMotionOk = (
-      zSpanX >= 0.36 * avgPalm &&
-      zSpanY >= 0.26 * avgPalm &&
+      zSpanX >= 0.30 * avgPalm &&
+      zSpanY >= 0.22 * avgPalm &&
       zHorizDirs.length >= 3
     );
 
-    // 3. Trazo descendente + gancho para J sobre punta del meñique [20]
+    // 3. Trazo descendente + gancho para J sobre punta del meñique [20] (X escalada por aspect)
     let lowestY = -Infinity;
     let maxDropY = 0;
     let hookDx = 0;
@@ -1727,14 +1774,17 @@
     }
     maxDropY = Math.max(lowestY - pFirst[1], recent[bottomIdx].pinky[1] - peakStart[1]);
     if (bottomIdx < recent.length - 1) {
-      const bottomX = recent[bottomIdx].pinky[0];
+      const bottomItem = recent[bottomIdx];
+      const bottomX = bottomItem.pinky[0] * (bottomItem.aspect || 1);
       for (let i = bottomIdx + 1; i < recent.length; i += 1) {
-        const dx = recent[i].pinky[0] - bottomX;
+        const dx = recent[i].pinky[0] * (recent[i].aspect || 1) - bottomX;
         if (Math.abs(dx) > Math.abs(hookDx)) hookDx = dx;
       }
     } else if (recent.length >= 4) {
       const split = Math.floor(recent.length * 0.65);
-      hookDx = recent[recent.length - 1].pinky[0] - recent[split].pinky[0];
+      const lastItem = recent[recent.length - 1];
+      const splitItem = recent[split];
+      hookDx = lastItem.pinky[0] * (lastItem.aspect || 1) - splitItem.pinky[0] * (splitItem.aspect || 1);
     }
     const jMotionOk = maxDropY >= 0.28 * avgPalm && Math.abs(hookDx) >= 0.16 * avgPalm;
 
@@ -1744,6 +1794,8 @@
       jMotionOk,
       spanX,
       spanY,
+      zSpanX,
+      zSpanY,
       reversals,
       dropY: maxDropY,
       hookDx
@@ -1832,8 +1884,10 @@
         if (!w) continue;
         const elev = (hipLineY - w.y) / torsoHeight;
         elevSum += elev;
-        const tipMid = hand[12];
-        const pointingDown = tipMid && tipMid.y > w.y + 0.04;
+        const pointingDown = Boolean(
+          (hand[12] && hand[12].y > w.y + 0.04) ||
+          (hand[8] && hand[8].y > w.y + 0.04)
+        );
         if (pointingDown ? (w.y >= 0.92 || elev < 0.05) : (w.y >= 0.89 || elev < 0.12)) {
           restCount += 1;
         }
@@ -2011,6 +2065,7 @@
 
   // API pública para pruebas unitarias, telemetría y verificación (sin alterar DOM)
   window.SenaSeguraVision = Object.freeze({
+    clamp,
     classifyHand,
     resolveMultiHandGesture,
     majorityVoteGesture,
@@ -2265,7 +2320,17 @@
     const btnSpace = $('btn-vision-space');
     const btnUndo = $('btn-vision-undo');
     const btnClear = $('btn-vision-clear');
+    const btnPolish = $('btn-vision-polish');
     const btnEscalate = $('btn-vision-escalate');
+    const btnGeminiConfig = $('btn-vision-gemini-config');
+    const geminiStateEl = $('vision-gemini-state');
+    const geminiPopover = $('vision-gemini-popover');
+    const geminiProxyInput = $('vision-gemini-proxy');
+    const geminiKeyInput = $('vision-gemini-key');
+    const btnGeminiSave = $('btn-vision-gemini-save');
+    const btnGeminiDisconnect = $('btn-vision-gemini-disconnect');
+    const btnGeminiClose = $('btn-vision-gemini-close');
+    const geminiFeedback = $('vision-gemini-feedback');
     const simBox = $('vision-simulation');
     const simGrid = $('vision-gesture-grid');
     const lettersBar = $('vision-letters-bar');
@@ -2329,6 +2394,8 @@
     let missingHandFrames = 0;
     let speechTimer = null;
     let sentenceTokens = [];
+    let polishedSentenceText = '';
+    let isRefiningLsp = false;
     let dynamicEvalCounter = 0;
     let isDynamicInferring = false;
     let isAlphabetInferring = false;
@@ -2358,7 +2425,7 @@
     const spellTrackBuffer = [];
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, meta: null };
     const dynCandidate = { id: null, streak: 0, lastProb: 0, since: 0 };
-    const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0 };
+    const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, alts: null };
 
     function setAiReadyState(state) {
       if (!aiReadyEl) return;
@@ -2416,6 +2483,7 @@
       spellCandidate.confirmed = false;
       spellCandidate.scoreSum = 0;
       spellCandidate.scoreN = 0;
+      spellCandidate.alts = null;
     }
 
     /** Reinicia el buffer y la historia temporal de la Micro-GRU. */
@@ -2491,22 +2559,61 @@
       urgentHint.hidden = !isUrgent;
     }
 
+    function syncGeminiUi({ populateInputs = false } = {}) {
+      const geminiApi = window.SenaSeguraGemini;
+      const cfg = geminiApi && typeof geminiApi.getConfig === 'function'
+        ? geminiApi.getConfig()
+        : { active: false, mode: 'none', proxyUrl: '', hasSessionKey: false };
+      const active = Boolean(cfg.active);
+
+      if (geminiStateEl) geminiStateEl.textContent = active ? 'Activa' : 'Inactiva';
+      if (btnGeminiConfig) {
+        btnGeminiConfig.classList.toggle('is-active', active);
+      }
+      if (btnGeminiDisconnect) btnGeminiDisconnect.disabled = !active;
+      if (populateInputs) {
+        if (geminiProxyInput) geminiProxyInput.value = cfg.proxyUrl || '';
+        if (geminiKeyInput && !cfg.hasSessionKey) geminiKeyInput.value = '';
+      }
+
+      const hasTokens = sentenceTokens.length > 0;
+      if (btnPolish) {
+        btnPolish.hidden = !active;
+        btnPolish.disabled = !active || !hasTokens || isRefiningLsp;
+      }
+    }
+
+    function setGeminiPopoverOpen(open) {
+      if (!geminiPopover || !btnGeminiConfig) return;
+      geminiPopover.hidden = !open;
+      btnGeminiConfig.setAttribute('aria-expanded', String(open));
+      if (open) {
+        syncGeminiUi({ populateInputs: true });
+        if (geminiFeedback) geminiFeedback.textContent = '';
+        if (geminiProxyInput) geminiProxyInput.focus();
+      }
+    }
+
     function renderSentence() {
       const text = composeSentence(sentenceTokens, activeSentenceExpression);
-      const hasTrailingSpace = sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'space';
-      sentenceEl.textContent = text ? (hasTrailingSpace ? `${text} ␣` : text) : DEFAULT_SENTENCE;
-      sentenceEl.classList.toggle('is-empty', !text);
+      const shownText = (polishedSentenceText && sentenceTokens.length > 0) ? polishedSentenceText : text;
+      const hasTrailingSpace = !polishedSentenceText && sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind === 'space';
+      sentenceEl.textContent = shownText ? (hasTrailingSpace ? `${shownText} ␣` : shownText) : DEFAULT_SENTENCE;
+      sentenceEl.classList.toggle('is-empty', !shownText);
       const hasTokens = sentenceTokens.length > 0;
       const canReset = hasTokens || Boolean(lastConfirmed);
       btnSpeak.disabled = !hasTokens;
       if (btnSpace) btnSpace.disabled = !hasTokens || hasTrailingSpace;
       btnUndo.disabled = !canReset;
       if (btnClear) btnClear.disabled = !canReset;
+      syncGeminiUi();
     }
 
     function resetOutput() {
       lastConfirmed = null;
       sentenceTokens = [];
+      polishedSentenceText = '';
+      isRefiningLsp = false;
       activeSentenceExpression = 'neutro';
       latestDescriptorSnapshot = null;
       lastStaticConfirmed.label = null;
@@ -3425,7 +3532,12 @@
               lastAddedAt[tokenId] = evalNow;
               const confirmedToken = { id: tokenId, kind: 'word', text: word, phrase: word, label: word };
               lastConfirmed = confirmedToken;
-              sentenceTokens.push({ id: tokenId, kind: 'word', text: word });
+              const wordAlts = [{ label: word, score: Number(bestProb.toFixed(3)) }];
+              if (secondWord && secondWord !== word && secondProb >= 0.08) {
+                wordAlts.push({ label: secondWord, score: Number(secondProb.toFixed(3)) });
+              }
+              polishedSentenceText = '';
+              sentenceTokens.push({ id: tokenId, kind: 'word', text: word, alts: wordAlts });
               lastDetectEl.textContent = `Última seña: ${word} · Confianza: ${pct}%`;
               renderSentence();
               sentNote.textContent = 'Pausa ~6 s sin manos para enviar o pulsa “Enviar y leer al funcionario”.';
@@ -3449,11 +3561,12 @@
         });
     }
 
-    function feedSpellLetter(label, score, now) {
+    function feedSpellLetter(label, score, now, alts = null) {
       if (label && label === spellCandidate.label) {
         spellCandidate.lastSeen = now;
         spellCandidate.scoreSum += score;
         spellCandidate.scoreN += 1;
+        if (Array.isArray(alts) && alts.length > 0) spellCandidate.alts = alts;
       } else if (spellCandidate.label && now - spellCandidate.lastSeen < GRACE_MS) {
         // Mantiene progreso ante micro-parpadeos
       } else {
@@ -3463,6 +3576,7 @@
         spellCandidate.confirmed = false;
         spellCandidate.scoreSum = label ? score : 0;
         spellCandidate.scoreN = label ? 1 : 0;
+        spellCandidate.alts = label && Array.isArray(alts) && alts.length > 0 ? alts : null;
       }
 
       if (!spellCandidate.label) {
@@ -3505,7 +3619,12 @@
             label: displayChar
           };
           lastConfirmed = token;
-          sentenceTokens.push({ id: token.id, kind: token.kind, text: token.text });
+          polishedSentenceText = '';
+          const pushedToken = { id: token.id, kind: token.kind, text: token.text };
+          if (!isSpace && Array.isArray(spellCandidate.alts) && spellCandidate.alts.length > 0) {
+            pushedToken.alts = spellCandidate.alts.slice(0, 3);
+          }
+          sentenceTokens.push(pushedToken);
           renderSentence();
           lastDetectEl.textContent = `Última letra: ${displayChar} · Confianza: ${pct}%`;
           sentNote.textContent = 'Letra confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
@@ -3549,7 +3668,7 @@
           worldPalm,
           normal: palmNormal && palmNormal.length >= 3 ? [palmNormal[0], palmNormal[1], palmNormal[2]] : [0, 0, 1],
           flip: normalizeHandedness(side) === 'Left' ? -1 : 1,
-          mirrorSign: mirrorEnabled ? -1 : 1,
+          mirrorSign: 1,
           aspect: safeAspect
         });
         while (
@@ -3560,7 +3679,7 @@
         }
       }
 
-      const frameOpts = { prevWorld: prevTrajWorld, curWorld: curW, mirrorX: mirrorEnabled, dzDamping: 0.35 };
+      const frameOpts = { prevWorld: prevTrajWorld, curWorld: curW, mirrorX: false, dzDamping: 0.35 };
       if (!prevTrajLandmarks) {
         const zeroFrame = extractTrajectoryFrame(null, cur, side, aspect, palmNormal, frameOpts);
         if (!zeroFrame) return;
@@ -3599,10 +3718,20 @@
 
       if (replaceBase) {
         delete lastAddedAt[`spell:${lastStaticConfirmed.label}`];
-        sentenceTokens[sentenceTokens.length - 1] = { id: tokenId, kind: 'letter', text: label };
+        const dynAlts = [{ label, score: Number(score.toFixed(3)) }];
+        if (lastStaticConfirmed.label && lastStaticConfirmed.label !== label) {
+          dynAlts.push({ label: lastStaticConfirmed.label, score: 0.45 });
+        }
+        sentenceTokens[sentenceTokens.length - 1] = { id: tokenId, kind: 'letter', text: label, alts: dynAlts };
       } else {
-        sentenceTokens.push({ id: tokenId, kind: 'letter', text: label });
+        sentenceTokens.push({
+          id: tokenId,
+          kind: 'letter',
+          text: label,
+          alts: [{ label, score: Number(score.toFixed(3)) }]
+        });
       }
+      polishedSentenceText = '';
       lastStaticConfirmed.label = null;
       lastStaticConfirmed.at = 0;
 
@@ -3657,18 +3786,17 @@
         return Array.isArray(entry.top3) && entry.top3.some((c) => c && targetSet.has(c.label) && c.score >= minTopScore);
       });
 
-      // 1. Control estricto de Ñ: postura (N/M/H/T + anular/meñique cerrados) + no incompatible + vaivén X + racha GRU >= 2
+      // 1. Blindaje estricto de Ñ: postura N/M real con dedos doblados + no incompatible + vaivén X (>=0.28) + racha GRU >= 3
       const activeIncompatible =
         latestStatic &&
-        evalNow - latestStatic.at <= 450 &&
+        evalNow - latestStatic.at <= 500 &&
         ENIE_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
-        latestStatic.top1Prob >= 0.68;
-      const ringPinkyFolded = Boolean(postures && postures.ringPinkyCurled);
+        latestStatic.top1Prob >= 0.48;
+      const foldedNMPosture = Boolean(postures && postures.enieFoldedPosture);
       const compatibleEnieHistory =
-        hasStaticCandidate(new Set(['N']), 0.18) ||
-        (ringPinkyFolded && hasStaticCandidate(ENIE_COMPATIBLE_LABELS, 0.22)) ||
-        (lastStaticConfirmed.label === 'N' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS);
-      const eniePostureOk = compatibleEnieHistory && !activeIncompatible;
+        hasStaticCandidate(ENIE_COMPATIBLE_LABELS, 0.28) ||
+        (ENIE_COMPATIBLE_LABELS.has(lastStaticConfirmed.label) && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS);
+      const eniePostureOk = foldedNMPosture && compatibleEnieHistory && !activeIncompatible;
 
       if (label === 'Ñ' && bestProb >= ENIE_GRU_MIN_CONF && eniePostureOk && motion.enieMotionOk) {
         if (trajStreak.label === 'Ñ') {
@@ -3686,13 +3814,14 @@
       }
 
       // 2. Z híbrida: postura de índice extendido ('D' reciente o indexOnlyExtended) + Micro-GRU remuestreada >= 0.72 o zig-zag 3D
+      const lastPalmNow = trajHistory.length ? (trajHistory[trajHistory.length - 1].palm || 0.08) : 0.08;
       const zPostureOk = Boolean(
         !postures.pinkyExt &&
         ((postures && postures.indexOnlyExtended) ||
-         hasStaticCandidate(new Set(['D']), 0.24) ||
+         hasStaticCandidate(new Set(['D']), 0.20) ||
          (lastStaticConfirmed.label === 'D' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
       );
-      if (zPostureOk && ((pZ >= ZJ_GRU_MIN_CONF && motion.zMotionOk) || (pZ >= ZJ_GRU_MIN_CONF && motion.spanX >= 0.18 * (trajHistory[trajHistory.length - 1]?.palm || 0.08)) || motion.zMotionOk)) {
+      if (zPostureOk && ((pZ >= ZJ_GRU_MIN_CONF && motion.zSpanX >= 0.18 * lastPalmNow) || motion.zMotionOk)) {
         const zScore = pZ >= ZJ_GRU_MIN_CONF ? pZ : Math.max(0.76, pZ);
         return { emit: true, label: 'Z', score: zScore, rawLabel: 'Z', rawProb: Math.max(bestProb, zScore) };
       }
@@ -3704,7 +3833,7 @@
          hasStaticCandidate(new Set(['I']), 0.24) ||
          (lastStaticConfirmed.label === 'I' && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS))
       );
-      if (jPostureOk && ((pJ >= ZJ_GRU_MIN_CONF && motion.dropY >= 0.14 * (trajHistory[trajHistory.length - 1]?.palm || 0.08)) || motion.jMotionOk)) {
+      if (jPostureOk && ((pJ >= ZJ_GRU_MIN_CONF && motion.dropY >= 0.14 * lastPalmNow) || motion.jMotionOk)) {
         const jScore = pJ >= ZJ_GRU_MIN_CONF ? pJ : Math.max(0.76, pJ);
         return { emit: true, label: 'J', score: jScore, rawLabel: 'J', rawProb: Math.max(bestProb, jScore) };
       }
@@ -3876,7 +4005,19 @@
             timestamp: evalNow
           });
 
-          feedSpellLetter(resolvedLabel, resolvedScore, evalNow);
+          const spellAlts = [];
+          if (rawLabel && rawLabel !== STATIC_SPACE_LABEL) {
+            spellAlts.push({ label: rawLabel, score: Number(bestProb.toFixed(3)) });
+          }
+          for (let i = 0; i < top3.length && spellAlts.length < 3; i += 1) {
+            const cand = top3[i];
+            if (!cand || !cand.label || cand.label === STATIC_SPACE_LABEL) continue;
+            if (!spellAlts.some((x) => x.label === cand.label)) {
+              spellAlts.push({ label: cand.label, score: Number(cand.score.toFixed(3)) });
+            }
+          }
+
+          feedSpellLetter(resolvedLabel, resolvedScore, evalNow, spellAlts);
         })
         .catch((err) => {
           console.warn('[Cámara IA · Alfabeto 3D]', err);
@@ -3973,11 +4114,14 @@
         ? smoothLandmarksEMA(smoothedHandSlots.Right, assigned.Right, HAND_EMA_ALPHA)
         : null;
 
+      const rawMpPrimarySide = rawLandmarks.length === 1
+        ? normalizeHandedness(allHandedness[0] && allHandedness[0][0])
+        : null;
+
       if (rawLandmarks.length === 1 && Array.isArray(allWorldLandmarks[0]) && allWorldLandmarks[0].length >= 21) {
-        const primaryWorldSide = assigned.Right ? 'Right' : 'Left';
-        const otherSide = primaryWorldSide === 'Right' ? 'Left' : 'Right';
-        smoothedWorldSlots[primaryWorldSide] = smoothLandmarksEMA(
-          smoothedWorldSlots[primaryWorldSide],
+        const otherSide = rawMpPrimarySide === 'Right' ? 'Left' : 'Right';
+        smoothedWorldSlots[rawMpPrimarySide] = smoothLandmarksEMA(
+          smoothedWorldSlots[rawMpPrimarySide],
           allWorldLandmarks[0],
           HAND_EMA_ALPHA,
           0.5
@@ -4085,13 +4229,13 @@
           }
         } else {
           const h0 = handsForFrame[0];
-          const primarySide = smoothedHandSlots.Right ? 'Right' : 'Left';
+          const rawMpSide = rawMpPrimarySide || (smoothedHandSlots.Right ? 'Right' : 'Left');
           const worldFor90 =
-            smoothedWorldSlots[primarySide] ||
+            smoothedWorldSlots[rawMpSide] ||
             h0.map((p) => ({ x: p.x * aspect, y: p.y, z: (p.z || 0) * aspect }));
-          const pts3d = canonicalizeHand3D(worldFor90, primarySide);
+          const pts3d = canonicalizeHand3D(worldFor90, rawMpSide);
           const curPostures = detectCanonicalHandPostures(pts3d);
-          singleHandCtx = { primarySide, worldFor90, pts3d, curPostures };
+          singleHandCtx = { rawMpSide, worldFor90, pts3d, curPostures };
 
           const palmSize0 =
             Math.hypot((h0[9].x - h0[0].x) * aspect, h0[9].y - h0[0].y) || 0.1;
@@ -4136,12 +4280,12 @@
           pauseWordDispatch: spellingSessionActive
         });
         if (handsForFrame.length === 1 && singleHandCtx && dynCandidate.streak === 0 && (activeTf.alphabet || activeTf.trajectory)) {
-          const { primarySide, worldFor90, pts3d, curPostures } = singleHandCtx;
-          const raw90 = extractHand90Features(worldFor90, primarySide);
+          const { rawMpSide, worldFor90, pts3d, curPostures } = singleHandCtx;
+          const raw90 = extractHand90Features(worldFor90, rawMpSide);
           const palmNormal3d = [raw90[78], raw90[79], raw90[80]];
           if (activeTf.trajectory) {
-            pushTrajectoryFrame(handsForFrame[0], primarySide, aspect, palmNormal3d, now, worldFor90);
-            evaluateTrajectoryGru(primarySide, aspect, curPostures, now);
+            pushTrajectoryFrame(handsForFrame[0], rawMpSide, aspect, palmNormal3d, now, worldFor90);
+            evaluateTrajectoryGru(rawMpSide, aspect, curPostures, now);
           }
           if (activeTf.alphabet) {
             evaluateAlphabetTf(raw90, pts3d, quickSteady, now);
@@ -4303,6 +4447,7 @@
         lastAddedAt[id] = now;
         const isLetter = gesture.kind === 'letter';
         const isSpace = gesture.kind === 'space';
+        polishedSentenceText = '';
         sentenceTokens.push({
           id,
           kind: isSpace ? 'space' : (isLetter ? 'letter' : 'word'),
@@ -4365,13 +4510,7 @@
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     }
 
-    function sendSentence({ auto = false } = {}) {
-      if (sentenceTokens.length === 0) return;
-      const text = composeSentence(sentenceTokens, activeSentenceExpression);
-      sentenceTokens = [];
-      activeSentenceExpression = 'neutro';
-      renderSentence();
-
+    function finalizeAndDispatchSentence(text, auto) {
       const bridge = window.SenaSegura;
       if (bridge && typeof bridge.appendChatMessage === 'function') {
         bridge.appendChatMessage(CHAT_SENDER, text, 'user');
@@ -4384,8 +4523,106 @@
       sentNote.hidden = false;
     }
 
+    async function polishSentenceNow() {
+      const geminiApi = window.SenaSeguraGemini;
+      if (!geminiApi || !geminiApi.isConfigured() || sentenceTokens.length === 0 || isRefiningLsp) return;
+      const baseText = composeSentence(sentenceTokens, activeSentenceExpression);
+      if (!baseText) return;
+      const tokensSnapshot = sentenceTokens.slice();
+      const lenAtCall = sentenceTokens.length;
+      const tokenAtCall = sessionToken;
+      const bridge = window.SenaSegura;
+      const ctxInfo = bridge && typeof bridge.getContext === 'function' ? bridge.getContext() : {};
+
+      isRefiningLsp = true;
+      renderSentence();
+      sentNote.textContent = 'Puliendo oración en LSP con Gemini…';
+      sentNote.hidden = false;
+
+      try {
+        const result = await geminiApi.refineLspSentence({
+          tokens: tokensSnapshot,
+          rawText: baseText,
+          sector: ctxInfo.sector || '',
+          procedure: ctxInfo.procedure || '',
+          timeoutMs: 4500
+        });
+        if (tokenAtCall !== sessionToken || sentenceTokens.length !== lenAtCall) return;
+        const refinedText = result && result.text ? result.text : baseText;
+        if (result && result.source === geminiApi.DEFAULT_MODEL) {
+          polishedSentenceText = refinedText;
+          sentNote.textContent = result.corrected
+            ? `Oración pulida en LSP (${result.source}). Revisa o pulsa “Enviar y leer al funcionario”.`
+            : `Oración validada en LSP (${result.source}).`;
+        } else {
+          polishedSentenceText = '';
+          sentNote.textContent = 'No se pudo conectar con Gemini; se mantiene el texto local exacto.';
+        }
+        sentNote.hidden = false;
+      } catch (_) {
+        if (tokenAtCall === sessionToken) {
+          sentNote.textContent = 'Sin conexión a Gemini; se mantiene el texto local exacto.';
+          sentNote.hidden = false;
+        }
+      } finally {
+        isRefiningLsp = false;
+        renderSentence();
+      }
+    }
+
+    async function sendSentence({ auto = false } = {}) {
+      if (sentenceTokens.length === 0) return;
+      const tokensSnapshot = sentenceTokens.slice();
+      const baseText = composeSentence(tokensSnapshot, activeSentenceExpression);
+      const alreadyPolished = Boolean(polishedSentenceText);
+      const textBeforeSend = polishedSentenceText || baseText;
+      const wasUrgentAux = Boolean(lastConfirmed && lastConfirmed.id === 'auxilio');
+
+      sentenceTokens = [];
+      polishedSentenceText = '';
+      activeSentenceExpression = 'neutro';
+      renderSentence();
+
+      const geminiApi = window.SenaSeguraGemini;
+      const canUseGemini =
+        !alreadyPolished &&
+        !wasUrgentAux &&
+        geminiApi &&
+        typeof geminiApi.isConfigured === 'function' &&
+        geminiApi.isConfigured() &&
+        typeof geminiApi.refineLspSentence === 'function';
+
+      if (!canUseGemini) {
+        finalizeAndDispatchSentence(textBeforeSend, auto);
+        return;
+      }
+
+      const tokenAtSend = sessionToken;
+      const bridge = window.SenaSegura;
+      const ctxInfo = bridge && typeof bridge.getContext === 'function' ? bridge.getContext() : {};
+      sentNote.textContent = 'Refinando oración LSP con Gemini…';
+      sentNote.hidden = false;
+
+      try {
+        const result = await geminiApi.refineLspSentence({
+          tokens: tokensSnapshot,
+          rawText: textBeforeSend,
+          sector: ctxInfo.sector || '',
+          procedure: ctxInfo.procedure || '',
+          timeoutMs: 1900
+        });
+        if (tokenAtSend !== sessionToken) return;
+        const finalText = result && result.text ? result.text : textBeforeSend;
+        finalizeAndDispatchSentence(finalText, auto);
+      } catch (_) {
+        if (tokenAtSend !== sessionToken) return;
+        finalizeAndDispatchSentence(textBeforeSend, auto);
+      }
+    }
+
     function insertSpace() {
       if (sentenceTokens.length === 0 || sentenceTokens[sentenceTokens.length - 1].kind === 'space') return;
+      polishedSentenceText = '';
       sentenceTokens.push({ id: `spell:${SPACE_TOKEN_LABEL}`, kind: 'space', text: ' ' });
       lastLetterConfirmedAt = performance.now();
       resetSpellCandidate();
@@ -4397,6 +4634,7 @@
 
     function undoLast() {
       if (sentenceTokens.length > 0) {
+        polishedSentenceText = '';
         const removed = sentenceTokens.pop();
         delete lastAddedAt[removed.id];
         const removedGesture = GESTURE_BY_ID[removed.id];
@@ -4583,10 +4821,69 @@
     });
 
     btnSpeak.addEventListener('click', () => sendSentence({ auto: false }));
+    if (btnPolish) btnPolish.addEventListener('click', polishSentenceNow);
     if (btnSpace) btnSpace.addEventListener('click', insertSpace);
     btnUndo.addEventListener('click', undoLast);
     if (btnClear) btnClear.addEventListener('click', clearAllOutput);
     btnEscalate.addEventListener('click', escalate);
+
+    if (btnGeminiConfig && geminiPopover) {
+      btnGeminiConfig.addEventListener('click', () => {
+        setGeminiPopoverOpen(geminiPopover.hidden);
+      });
+      if (btnGeminiClose) {
+        btnGeminiClose.addEventListener('click', () => {
+          setGeminiPopoverOpen(false);
+          btnGeminiConfig.focus();
+        });
+      }
+      if (btnGeminiSave) {
+        btnGeminiSave.addEventListener('click', () => {
+          const geminiApi = window.SenaSeguraGemini;
+          if (!geminiApi) return;
+          try {
+            const cfg = geminiApi.saveConfig({
+              proxyUrl: geminiProxyInput ? geminiProxyInput.value : '',
+              apiKey: geminiKeyInput ? geminiKeyInput.value : ''
+            });
+            syncGeminiUi({ populateInputs: true });
+            if (geminiFeedback) {
+              geminiFeedback.textContent = cfg.active
+                ? (cfg.mode === 'proxy'
+                  ? 'Proxy Worker guardado. Gemini LSP activo sin exponer claves.'
+                  : 'Clave temporal guardada solo en esta pestaña (se borra al salir o purgar).')
+                : 'Sin URL ni clave activa: el sistema opera 100 % offline.';
+            }
+          } catch (err) {
+            if (geminiFeedback) {
+              geminiFeedback.textContent = err && err.message ? err.message : 'Revisa la URL ingresada.';
+            }
+          }
+        });
+      }
+      if (btnGeminiDisconnect) {
+        btnGeminiDisconnect.addEventListener('click', () => {
+          const geminiApi = window.SenaSeguraGemini;
+          if (geminiApi) geminiApi.disconnect();
+          if (geminiProxyInput) geminiProxyInput.value = '';
+          if (geminiKeyInput) geminiKeyInput.value = '';
+          syncGeminiUi();
+          if (geminiFeedback) geminiFeedback.textContent = 'Gemini LSP desconectado. Modo local 100 % activo.';
+        });
+      }
+      geminiPopover.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          setGeminiPopoverOpen(false);
+          btnGeminiConfig.focus();
+        }
+      });
+    }
+
+    document.addEventListener('senasegura:geminichange', () => {
+      syncGeminiUi();
+    });
 
     if (btnOverlay) {
       btnOverlay.addEventListener('click', () => {
@@ -4623,15 +4920,21 @@
 
     document.addEventListener('senasegura:channelchange', (e) => {
       if (!e.detail || e.detail.channel !== 'camara') {
+        setGeminiPopoverOpen(false);
         setVisionExpanded(false);
         resetToIdle();
       }
     });
 
     document.addEventListener('senasegura:purge', () => {
+      setGeminiPopoverOpen(false);
+      if (geminiProxyInput) geminiProxyInput.value = '';
+      if (geminiKeyInput) geminiKeyInput.value = '';
+      if (geminiFeedback) geminiFeedback.textContent = '';
       setVisionExpanded(false);
       resetToIdle();
       cancelSpeech();
+      syncGeminiUi();
     });
 
     document.addEventListener('visibilitychange', () => {
@@ -4685,6 +4988,8 @@
     };
     window.addEventListener('beforeunload', releaseOnExit);
     window.addEventListener('pagehide', releaseOnExit);
+
+    syncGeminiUi();
 
     if ('speechSynthesis' in window && typeof window.speechSynthesis.getVoices === 'function') {
       window.speechSynthesis.getVoices();

@@ -22,7 +22,10 @@ SeñaSegura/
 │   └── styles.css              # Tokens oficiales, layout responsive, Alto Contraste y @media print
 ├── js/
 │   ├── main.js                 # Lógica modular compartida en Vanilla JS (ES6+) para index.html y app.html (incluye QR SVG V1–V6 URL verificable)
+│   ├── gemini-lsp.js           # Capa híbrida opcional (gemini-3.8-flash) para refinar glosas/deletreo únicamente en LSP peruana (solo texto; fallback 100 % offline)
 │   └── vision-ai.js            # Cámara IA unificada LSP: precarga silenciosa + árbitro neuronal 60 FPS en TensorFlow.js (118 señas dinámicas + MLP 90D Zero-Ambiguity + Micro-GRU trayectorias J, Ñ, Z) sobre MediaPipe + respaldo geométrico
+├── workers/
+│   └── gemini-lsp-proxy.js     # Plantilla Cloudflare Worker gratuita con CORS seguro para GitHub Pages sin exponer GEMINI_API_KEY
 ├── models/
 │   ├── senas_dinamicas/           # GraphModel TF.js [1, 30, 159] (118 señas dinámicas PUCP LSP) + metadata.json
 │   ├── model_alfabeto_lsp_3d/     # GraphModel TF.js MLP 90D Zero-Ambiguity [1, 90] (A–Z + ESPACIO) + metadata.json

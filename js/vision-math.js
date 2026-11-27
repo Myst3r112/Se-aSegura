@@ -1177,6 +1177,7 @@
         pointingDownIndexThumb: false,
         enieFoldedPosture: false,
         lspUHornsPosture: false,
+        yThumbPinkyPosture: false,
         middleToRingDist: 0,
         middleBelowRingY: 0,
         twoFingerSpan: 0,
@@ -1252,6 +1253,15 @@
       pts[12].y > pts[8].y + 0.16 &&
       pts[16].y > pts[20].y + 0.12
     );
+    const yThumbPinkyPosture = (
+      !indexExt &&
+      idxAng <= 120 &&
+      middleCurledCheck(midAng, pts) &&
+      ringCurled &&
+      pinkyExt &&
+      dist3(pts[4], pts[5]) >= 0.78 &&
+      dist3(pts[4], pts[17]) >= 0.92
+    );
 
     return {
       indexExt,
@@ -1267,6 +1277,7 @@
       pointingDownIndexThumb,
       enieFoldedPosture,
       lspUHornsPosture,
+      yThumbPinkyPosture,
       middleToRingDist,
       middleBelowRingY,
       twoFingerSpan,
@@ -1279,7 +1290,7 @@
     return midAng <= 125 && dist3(pts[12], pts[0]) <= dist3(pts[10], pts[0]) * 1.08;
   }
 
-  function refineStatic3DLabel(topCandidates, pts, postures = null) {
+  function refineStatic3DLabel(topCandidates, pts, postures = null, options = null) {
     if (!Array.isArray(topCandidates) || !topCandidates.length || !Array.isArray(pts) || pts.length < 21) {
       return topCandidates && topCandidates[0]
         ? { label: topCandidates[0].label, score: Math.min(0.99, topCandidates[0].score), refined: false }
@@ -1291,6 +1302,8 @@
     });
     const geom = postures || detectCanonicalHandPostures(pts);
     const best = topCandidates[0];
+    const knownLabels = options && Array.isArray(options.knownLabels) ? new Set(options.knownLabels) : null;
+    const geometricId = options && options.geometricId ? options.geometricId : null;
 
     if (geom.lspUHornsPosture) {
       return {
@@ -1300,30 +1313,65 @@
       };
     }
 
+    if (best.label === 'U' && !geom.lspUHornsPosture && !geom.indexExt && geom.pinkyExt) {
+      if (geom.yThumbPinkyPosture && (!knownLabels || !knownLabels.has('Y'))) {
+        return { label: 'Y', score: 0.85, refined: true };
+      }
+      return {
+        label: 'I',
+        score: Math.min(0.99, Math.max(0.78, probMap.I || 0.78)),
+        refined: true
+      };
+    }
+
+    if (geom.yThumbPinkyPosture && (!knownLabels || !knownLabels.has('Y'))) {
+      return {
+        label: 'Y',
+        score: 0.85,
+        refined: best.label !== 'Y'
+      };
+    }
+
     const pV = probMap.V || 0;
     const pR = probMap.R || 0;
     const sumVR = pV + pR;
-    if (sumVR >= 0.55 && geom.indexExt && geom.middleExt) {
+    const vrMissingInModel = Boolean(knownLabels && !knownLabels.has('V') && !knownLabels.has('R'));
+    if (
+      geom.indexExt &&
+      geom.middleExt &&
+      !geom.ringExt &&
+      !geom.pinkyExt &&
+      !geom.pointingDownTwoFingers &&
+      (sumVR >= 0.55 || vrMissingInModel)
+    ) {
       if (geom.latDot <= 0.0) {
         return {
           label: 'R',
-          score: Math.min(0.99, Math.max(best.score, pR + 0.15, sumVR * 0.85, 0.74)),
+          score: Math.min(0.99, Math.max(sumVR > 0 ? best.score : 0.84, pR + 0.15, sumVR * 0.85, 0.78)),
           refined: best.label !== 'R'
+        };
+      }
+      if (geometricId === 'letra_k' && (!knownLabels || !knownLabels.has('K'))) {
+        return {
+          label: 'K',
+          score: 0.84,
+          refined: best.label !== 'K'
         };
       }
       return {
         label: 'V',
-        score: Math.min(0.99, Math.max(best.score, pV + 0.12, sumVR * 0.82, 0.74)),
+        score: Math.min(0.99, Math.max(sumVR > 0 ? best.score : 0.84, pV + 0.12, sumVR * 0.82, 0.78)),
         refined: best.label !== 'V'
       };
     }
 
     const pCluster = ['P', 'K', 'Q', 'H', 'G'];
     const sumPKQHG = pCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
-    if (geom.pointingDownTwoFingers && !geom.pointingDownIndexThumb && sumPKQHG >= 0.40) {
+    const pMissingInModel = Boolean(knownLabels && !knownLabels.has('P'));
+    if (geom.pointingDownTwoFingers && !geom.pointingDownIndexThumb && (sumPKQHG >= 0.40 || pMissingInModel)) {
       return {
         label: 'P',
-        score: Math.min(0.99, Math.max(best.score, 0.78)),
+        score: Math.min(0.99, pMissingInModel ? 0.84 : Math.max(best.score, 0.78)),
         refined: best.label !== 'P'
       };
     }
@@ -1331,12 +1379,27 @@
     const qCluster = ['Q', 'G', 'P', 'D', 'X'];
     const qInTop3 = topCandidates.slice(0, 3).some((c) => c && c.label === 'Q');
     const sumQGPDX = qCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
-    if (!geom.pointingDownTwoFingers && geom.pointingDownIndexThumb && (qInTop3 || sumQGPDX >= 0.45)) {
+    const qMissingInModel = Boolean(knownLabels && !knownLabels.has('Q'));
+    if (!geom.pointingDownTwoFingers && geom.pointingDownIndexThumb && (qInTop3 || sumQGPDX >= 0.45 || qMissingInModel)) {
       return {
         label: 'Q',
-        score: Math.min(0.99, Math.max(best.score, (probMap.Q || 0) + 0.24, sumQGPDX * 0.88, 0.74)),
+        score: Math.min(0.99, qMissingInModel ? 0.84 : Math.max(best.score, (probMap.Q || 0) + 0.24, sumQGPDX * 0.88, 0.74)),
         refined: best.label !== 'Q'
       };
+    }
+
+    if (knownLabels && geometricId && Object.prototype.hasOwnProperty.call(GESTURE_BY_ID, geometricId)) {
+      const geoEntry = GESTURE_BY_ID[geometricId];
+      const geoLetter = geoEntry && geoEntry.kind === 'letter' ? geoEntry.letter : null;
+      if (geoLetter && !knownLabels.has(geoLetter)) {
+        const orthogonalConsonants = new Set(['B', 'D', 'F', 'K', 'L', 'R', 'V', 'W', 'Y']);
+        if (orthogonalConsonants.has(geoLetter)) {
+          return { label: geoLetter, score: 0.84, refined: true };
+        }
+        if ((geoLetter === 'C' || geoLetter === 'S') && best.score < 0.82) {
+          return { label: geoLetter, score: 0.80, refined: true };
+        }
+      }
     }
 
     return { label: best.label, score: Math.min(0.99, best.score), refined: false };

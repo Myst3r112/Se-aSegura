@@ -224,31 +224,195 @@
     return promise;
   }
 
-  async function loadGraphModelWithFallback(candidateDirs, expectedMetadataName) {
-    let lastErr = null;
-    for (let i = 0; i < candidateDirs.length; i += 1) {
-      const dir = candidateDirs[i];
-      try {
-        const metaRes = await withTimeout(fetch(`${dir}/metadata.json`, { cache: 'default' }), LOAD_TIMEOUT_MS);
-        if (!metaRes.ok) throw new Error(`metadata-http-${metaRes.status}`);
-        const metadata = await metaRes.json();
-        const model = await withTimeout(window.tf.loadGraphModel(`${dir}/model.json`), LOAD_TIMEOUT_MS);
-        return { dir, metadata, model, name: expectedMetadataName };
-      } catch (err) {
-        lastErr = err;
-      }
+  function normalizeKeras3WeightName(rawName, layerClassMap) {
+    const slashIdx = typeof rawName === 'string' ? rawName.lastIndexOf('/') : -1;
+    if (slashIdx <= 0) return rawName;
+    const layerName = rawName.slice(0, slashIdx);
+    const slot = rawName.slice(slashIdx + 1);
+    const layerClass = layerClassMap.get(layerName);
+    if (layerClass === 'Dense') {
+      if (slot === 'w_0') return `${layerName}/kernel`;
+      if (slot === 'w_1') return `${layerName}/bias`;
+    } else if (layerClass === 'BatchNormalization') {
+      if (slot === 'w_0') return `${layerName}/gamma`;
+      if (slot === 'w_1') return `${layerName}/beta`;
+      if (slot === 'w_2') return `${layerName}/moving_mean`;
+      if (slot === 'w_3') return `${layerName}/moving_variance`;
     }
-    throw lastErr || new Error(`graph-model-load-failed:${expectedMetadataName}`);
+    return rawName;
+  }
+
+  function normalizeKeras3Dtype(dtypeVal) {
+    if (typeof dtypeVal === 'string') return dtypeVal;
+    if (dtypeVal && typeof dtypeVal === 'object' && dtypeVal.config && typeof dtypeVal.config.name === 'string') {
+      return dtypeVal.config.name;
+    }
+    return 'float32';
+  }
+
+  function normalizeKeras3LayersTopology(topo) {
+    const normalizeRefList = (refs) => {
+      if (!Array.isArray(refs) || refs.length === 0) return refs;
+      return typeof refs[0] === 'string' ? [refs] : refs;
+    };
+    const layers = Array.isArray(topo.layers)
+      ? topo.layers.map((layer) => {
+          const cfg = { ...(layer.config || {}) };
+          if (Object.prototype.hasOwnProperty.call(cfg, 'dtype')) {
+            cfg.dtype = normalizeKeras3Dtype(cfg.dtype);
+          }
+          if (layer.class_name === 'InputLayer' && Array.isArray(cfg.batch_shape)) {
+            cfg.batch_input_shape = cfg.batch_shape;
+            delete cfg.batch_shape;
+          }
+          const inboundNodes = Array.isArray(layer.inbound_nodes)
+            ? layer.inbound_nodes.map((node) => {
+                if (Array.isArray(node)) return node;
+                const args = node && Array.isArray(node.args) ? node.args : [];
+                const kwargs = node && node.kwargs && typeof node.kwargs === 'object' ? node.kwargs : {};
+                return args
+                  .filter((arg) => arg && arg.config && Array.isArray(arg.config.keras_history))
+                  .map((arg) => {
+                    const h = arg.config.keras_history;
+                    return [h[0], h[1] || 0, h[2] || 0, kwargs];
+                  });
+              })
+            : [];
+          return {
+            class_name: layer.class_name,
+            name: layer.name || cfg.name,
+            config: cfg,
+            inbound_nodes: inboundNodes
+          };
+        })
+      : [];
+
+    return {
+      class_name: 'Model',
+      config: {
+        name: topo.name || 'layers_model',
+        layers,
+        input_layers: normalizeRefList(topo.input_layers),
+        output_layers: normalizeRefList(topo.output_layers)
+      },
+      keras_version: '2.15.0',
+      backend: 'tensorflow'
+    };
+  }
+
+  function createKeras3LayersIOHandler(dir, modelJson) {
+    return {
+      async load() {
+        const topo = modelJson.modelTopology || {};
+        const layerClassMap = new Map();
+        if (Array.isArray(topo.layers)) {
+          topo.layers.forEach((layer) => {
+            if (layer && layer.name) layerClassMap.set(layer.name, layer.class_name);
+          });
+        }
+
+        const manifests = Array.isArray(modelJson.weightsManifest) ? modelJson.weightsManifest : [];
+        const weightSpecs = [];
+        const shardBuffers = [];
+        let totalBytes = 0;
+
+        for (let g = 0; g < manifests.length; g += 1) {
+          const group = manifests[g];
+          const groupWeights = Array.isArray(group.weights) ? group.weights : [];
+          groupWeights.forEach((w) => {
+            weightSpecs.push({
+              ...w,
+              name: normalizeKeras3WeightName(w.name, layerClassMap)
+            });
+          });
+          const paths = Array.isArray(group.paths) ? group.paths : [];
+          for (let p = 0; p < paths.length; p += 1) {
+            const shardRes = await withTimeout(fetch(`${dir}/${paths[p]}`, { cache: 'default' }), LOAD_TIMEOUT_MS);
+            if (!shardRes.ok) throw new Error(`weights-http-${shardRes.status}`);
+            const ab = await shardRes.arrayBuffer();
+            shardBuffers.push(new Uint8Array(ab));
+            totalBytes += ab.byteLength;
+          }
+        }
+
+        const merged = new Uint8Array(totalBytes);
+        let byteOffset = 0;
+        for (let i = 0; i < shardBuffers.length; i += 1) {
+          merged.set(shardBuffers[i], byteOffset);
+          byteOffset += shardBuffers[i].byteLength;
+        }
+
+        return {
+          modelTopology: normalizeKeras3LayersTopology(topo),
+          format: 'layers-model',
+          generatedBy: modelJson.generatedBy,
+          convertedBy: modelJson.convertedBy,
+          weightSpecs,
+          weightData: merged.buffer
+        };
+      }
+    };
+  }
+
+  async function loadGraphModelAtDir(dir, expectedMetadataName) {
+    const metaRes = await withTimeout(fetch(`${dir}/metadata.json`, { cache: 'default' }), LOAD_TIMEOUT_MS);
+    if (!metaRes.ok) throw new Error(`metadata-http-${metaRes.status}`);
+    const metadata = await metaRes.json();
+    const model = await withTimeout(window.tf.loadGraphModel(`${dir}/model.json`), LOAD_TIMEOUT_MS);
+    return { dir, metadata, model, modelFormat: 'graph-model', name: expectedMetadataName };
+  }
+
+  async function loadAdaptiveStaticModel(dir, expectedMetadataName) {
+    const [metaRes, modelRes] = await Promise.all([
+      withTimeout(fetch(`${dir}/metadata.json`, { cache: 'default' }), LOAD_TIMEOUT_MS),
+      withTimeout(fetch(`${dir}/model.json`, { cache: 'default' }), LOAD_TIMEOUT_MS)
+    ]);
+    if (!metaRes.ok) throw new Error(`metadata-http-${metaRes.status}`);
+    if (!modelRes.ok) throw new Error(`model-http-${modelRes.status}`);
+
+    const [metadata, modelJson] = await Promise.all([metaRes.json(), modelRes.json()]);
+    const declaredFormat = modelJson && typeof modelJson.format === 'string'
+      ? modelJson.format.toLowerCase()
+      : 'graph-model';
+
+    let model = null;
+    if (declaredFormat === 'layers-model') {
+      if (typeof window.tf.loadLayersModel !== 'function') {
+        throw new Error('tfjs-layers-loader-unavailable');
+      }
+      const topo = modelJson.modelTopology;
+      if (topo && !topo.class_name && Array.isArray(topo.layers)) {
+        model = await withTimeout(
+          window.tf.loadLayersModel(createKeras3LayersIOHandler(dir, modelJson)),
+          LOAD_TIMEOUT_MS
+        );
+      } else {
+        model = await withTimeout(window.tf.loadLayersModel(`${dir}/model.json`), LOAD_TIMEOUT_MS);
+      }
+    } else {
+      model = await withTimeout(window.tf.loadGraphModel(`${dir}/model.json`), LOAD_TIMEOUT_MS);
+    }
+
+    return { dir, metadata, model, modelFormat: declaredFormat, name: expectedMetadataName };
   }
 
   function warmupTfModel(entry, shape) {
     if (!entry || !entry.model || !window.tf) return;
-    window.tf.tidy(() => {
-      const dummy = window.tf.zeros(shape, 'float32');
-      const out = entry.model.predict(dummy);
-      if (Array.isArray(out)) out.forEach((t) => t.dataSync());
-      else if (out && typeof out.dataSync === 'function') out.dataSync();
-    });
+    const dummy = window.tf.zeros(shape, 'float32');
+    try {
+      const out = window.tf.tidy(() => entry.model.predict(dummy));
+      if (Array.isArray(out)) {
+        out.forEach((t) => {
+          if (t && typeof t.dataSync === 'function') t.dataSync();
+          if (t && typeof t.dispose === 'function') t.dispose();
+        });
+      } else if (out) {
+        if (typeof out.dataSync === 'function') out.dataSync();
+        if (typeof out.dispose === 'function') out.dispose();
+      }
+    } finally {
+      if (dummy && typeof dummy.dispose === 'function') dummy.dispose();
+    }
   }
 
   function loadTfModels({ onProgress } = {}) {
@@ -280,9 +444,9 @@
         const root = resolveRelativeModelsRoot();
         report('Descargando modelos IA LSP (vocabulario, alfabeto 3D y trayectorias)…');
         const [dynamic, alphabet, trajectory] = await Promise.all([
-          loadGraphModelWithFallback([`${root}/senas_dinamicas`, `${root}/model_senas_3enlaces`], 'senas_dinamicas'),
-          loadGraphModelWithFallback([`${root}/model_alfabeto_lsp_3d`, `${root}/alfabeto_lsp_3d`], 'alfabeto_lsp_3d'),
-          loadGraphModelWithFallback([`${root}/model_alfabeto_dinamico_3d`, `${root}/alfabeto_dinamico_3d`], 'alfabeto_dinamico_3d')
+          loadGraphModelAtDir(`${root}/model_palabras_lsp_pucp118`, 'model_palabras_lsp_pucp118'),
+          loadAdaptiveStaticModel(`${root}/model_alfabeto_estatico_lsp`, 'model_alfabeto_estatico_lsp'),
+          loadGraphModelAtDir(`${root}/model_alfabeto_lsp_dinamico`, 'model_alfabeto_lsp_dinamico')
         ]);
 
         if ((alphabet.metadata.numFeatures || HAND_FEATURES_90) !== HAND_FEATURES_90) {
@@ -1933,16 +2097,29 @@
 
       let matchedDyn = null;
       const lastPalmNow = trajHistory.length ? (trajHistory[trajHistory.length - 1].palm || 0.08) : 0.08;
+      const alphaLabels =
+        tfModels &&
+        tfModels.alphabet &&
+        tfModels.alphabet.metadata &&
+        Array.isArray(tfModels.alphabet.metadata.labels)
+          ? tfModels.alphabet.metadata.labels
+          : [];
+      const staticHasFullAlphabet = alphaLabels.length >= 15;
+      const staticHasNM = alphaLabels.includes('N') || alphaLabels.includes('M');
 
       const activeIncompatible =
         latestStatic &&
         evalNow - latestStatic.at <= 500 &&
+        (staticHasFullAlphabet || latestStatic.refinedByGeom) &&
         ENIE_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
         latestStatic.top1Prob >= 0.48;
       const foldedNMPosture = Boolean(postures && postures.enieFoldedPosture);
-      const compatibleEnieHistory =
-        hasStaticCandidate(ENIE_COMPATIBLE_LABELS, 0.28) ||
-        (ENIE_COMPATIBLE_LABELS.has(lastStaticConfirmed.label) && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS);
+      const compatibleEnieHistory = !staticHasNM
+        ? !postures || !postures.lspUHornsPosture
+        : (
+            hasStaticCandidate(ENIE_COMPATIBLE_LABELS, 0.28) ||
+            (ENIE_COMPATIBLE_LABELS.has(lastStaticConfirmed.label) && evalNow - lastStaticConfirmed.at <= DYNAMIC_REPLACE_WINDOW_MS)
+          );
       const eniePostureOk = foldedNMPosture && compatibleEnieHistory && !activeIncompatible;
       const enieGruStrong = pEnie >= ENIE_GRU_MIN_CONF && motion.spanX >= 0.18 * lastPalmNow;
       const enieHybridConsensus = motion.enieMotionOk && pEnie >= 0.32;
@@ -1961,6 +2138,7 @@
         const zActiveIncompatible = Boolean(
           latestStatic &&
           evalNow - latestStatic.at <= 500 &&
+          (staticHasFullAlphabet || latestStatic.refinedByGeom) &&
           Z_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
           latestStatic.top1Prob >= 0.45
         );
@@ -1982,11 +2160,13 @@
         const jActiveIncompatible = Boolean(
           latestStatic &&
           evalNow - latestStatic.at <= 500 &&
+          (staticHasFullAlphabet || latestStatic.refinedByGeom) &&
           J_INCOMPATIBLE_LABELS.has(latestStatic.top1) &&
           latestStatic.top1Prob >= 0.48
         );
         const jPostureOk = Boolean(
           !postures.indexExt &&
+          !postures.lspUHornsPosture &&
           !jActiveIncompatible &&
           (postures.pinkyOnlyExtended ||
             (hasStaticCandidate(new Set(['I']), 0.30) && !postures.middleExt && !postures.ringExt) ||
@@ -2089,7 +2269,7 @@
         });
     }
 
-    function evaluateAlphabetTf(raw90, pts, quickSteady, now) {
+    function evaluateAlphabetTf(raw90, pts, quickSteady, now, singleHandCtx = null, aspect = 4 / 3) {
       const alphaEntry = tfModels && tfModels.alphabet;
       if (!alphaEntry || !alphaEntry.model || !window.tf || isAlphabetInferring) return;
 
@@ -2101,19 +2281,38 @@
       const epochAtCall = trajEpoch;
       const ptsSnapshot = Array.isArray(pts) ? pts.map((p) => ({ x: p.x, y: p.y, z: p.z })) : null;
       const posturesSnapshot = detectCanonicalHandPostures(ptsSnapshot);
+      const geometricId = singleHandCtx
+        ? classifyHand(singleHandCtx.primaryHand, aspect, singleHandCtx.worldFor90, { handedness: singleHandCtx.rawMpSide }).id
+        : null;
       const steadyAtCall = Boolean(quickSteady);
       isAlphabetInferring = true;
 
+      let inputTensor = null;
       let outTensor = null;
       try {
+        inputTensor = window.tf.tensor2d(features, [1, HAND_FEATURES_90], 'float32');
         outTensor = window.tf.tidy(() => {
-          const input = window.tf.tensor2d(features, [1, HAND_FEATURES_90], 'float32');
-          const out = alphaEntry.model.predict(input);
-          return Array.isArray(out) ? out[0] : out;
+          const out = alphaEntry.model.predict(inputTensor);
+          if (Array.isArray(out)) {
+            for (let i = 1; i < out.length; i += 1) {
+              if (out[i] && typeof out[i].dispose === 'function') out[i].dispose();
+            }
+            return out[0];
+          }
+          return out;
         });
       } catch (err) {
         isAlphabetInferring = false;
         console.warn('[Cámara IA · Alfabeto 3D]', err);
+        return;
+      } finally {
+        if (inputTensor && typeof inputTensor.dispose === 'function') {
+          inputTensor.dispose();
+        }
+      }
+
+      if (!outTensor || typeof outTensor.data !== 'function') {
+        isAlphabetInferring = false;
         return;
       }
 
@@ -2129,7 +2328,10 @@
           }
           ranked.sort((a, b) => b.score - a.score);
           const top3 = ranked.slice(0, 3);
-          const refined = refineStatic3DLabel(top3, ptsSnapshot, posturesSnapshot);
+          const refined = refineStatic3DLabel(top3, ptsSnapshot, posturesSnapshot, {
+            knownLabels: labels,
+            geometricId
+          });
 
           const rawLabel = refined ? refined.label : (top3[0] ? top3[0].label : '');
           const bestProb = refined ? refined.score : (top3[0] ? top3[0].score : 0);
@@ -2142,7 +2344,8 @@
             top1: rawLabel,
             top1Prob: bestProb,
             top3,
-            postures: posturesSnapshot
+            postures: posturesSnapshot,
+            refinedByGeom: Boolean(refined && refined.refined)
           });
           while (
             recentStaticHistory.length > 0 &&
@@ -2460,7 +2663,7 @@
           evaluateTrajectoryGru(rawMpSide, aspect, curPostures, now);
         }
         if (activeTf.alphabet) {
-          evaluateAlphabetTf(raw90, pts3d, quickSteady, now);
+          evaluateAlphabetTf(raw90, pts3d, quickSteady, now, singleHandCtx, aspect);
         }
       }
     }

@@ -1,0 +1,50 @@
+{
+  "modelType": "alfabeto_lsp_dinamico_micro_gru",
+  "version": "1.0.0",
+  "sequenceLength": 16,
+  "numFeatures": 12,
+  "featureOrder": [
+    "v_wrist_xyz",
+    "v_index_tip_xyz",
+    "v_pinky_tip_xyz",
+    "palm_normal_xyz"
+  ],
+  "scalerMean": [
+    -0.000354,
+    0.024305,
+    -7.8e-05,
+    0.00179,
+    0.023572,
+    -9e-05,
+    0.001007,
+    0.024887,
+    -9.2e-05,
+    0.313586,
+    0.291734,
+    -0.465724
+  ],
+  "scalerStd": [
+    0.127831,
+    0.045143,
+    0.022959,
+    0.109181,
+    0.063962,
+    0.022855,
+    0.117154,
+    0.05266,
+    0.022961,
+    0.449042,
+    0.449381,
+    0.442798
+  ],
+  "confidenceThreshold": 0.78,
+  "validationAccuracy": 1.0,
+  "validationMacroF1": 1.0,
+  "numClasses": 4,
+  "labels": [
+    "ESTATICA",
+    "J",
+    "Ñ",
+    "Z"
+  ]
+}

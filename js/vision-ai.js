@@ -38,18 +38,24 @@
   const CONFIRM_FAST_MS = 210; // saludo activo / emergencia inmediata
   const CONFIRM_INDEX_MS = 520; // espera breve para distinguir quieto vs trayectoria
   const CONFIRM_SPELL_MS = 500; // estabilización de letra estática (~0.5 s)
-  const CONFIRM_SPELL_DYN_MS = 240; // confirmación rápida tras completar trazo dinámico J, Ñ, Z
   const COOLDOWN_MS = 1200; // pausa antes de aceptar nuevamente la misma seña (~1.2 s)
   const SPELL_COOLDOWN_MS = 750; // pausa breve tras confirmar una letra
   const GRACE_MS = 180; // tolerancia a micro-parpadeos
   const HAND_DROPOUT_GRACE_FRAMES = 5; // tolerancia ~160 ms sin vaciar ventana deslizante
   const HAND_EMA_ALPHA = 0.55; // suavizado ligero EMA de landmarks de manos
   const POSE_EMA_ALPHA = 0.45; // suavizado ligero EMA de landmarks de torso
-  const ALPHA_FEATURE_EMA = 0.48; // EMA ligero (~3 frames) para el vector [16] antes de estandarizar
+  const HAND_FEATURES_90 = 90; // Modelo Estático 3D: 63 coords + 15 ángulos + 3 normal + 9 desambiguación
+  const TRAJ_SEQ_LEN = 16; // Micro-GRU dinámica [1, 16, 12]
+  const TRAJ_NUM_FEATURES = 12; // v_muñeca(3) + v_índice(3) + v_meñique(3) + normal de palma(3)
+  const TRAJ_DYNAMIC_LABELS = new Set(['J', 'Ñ', 'Z']);
+  const TRAJ_STATIC_LABEL = 'ESTATICA';
+  const TRAJ_STATE_MAX_AGE_MS = 300; // vigencia de la última predicción de la Micro-GRU
+  const DYNAMIC_EMIT_LOCK_MS = 900; // evita re-disparar la letra dinámica o confirmar la postura base tras emitirla
+  const STATIC_SPACE_LABEL = 'ESPACIO';
   const SPELL_SESSION_HOLD_MS = 2800; // protege sesión de deletreo activa frente al motor de 118 señas
   const MAX_TRAIL_POINTS = 14; // estela visual de trazos J, Ñ, Z y señas dinámicas
   const HUD_TOP2_THROTTLE_MS = 140; // lectura fluida del Top-2 sin parpadeo excesivo
-  const MIN_FRAME_INTERVAL_MS = 33; // ~30 fps máx.
+  const MIN_FRAME_INTERVAL_MS = 16; // ~60 fps máx. (omite frames repetidos por video.currentTime)
   const AUX_DETECT_STRIDE = 3; // Face auxiliar solo en modo geométrico
   const MOTION_WINDOW = 24; // ventana deslizante para trayectorias J / Ñ / Z
   const DYNAMIC_SEQ_LEN = 30; // [1, 30, 159] para Motor 1
@@ -71,12 +77,6 @@
     [0, 13, 14], [13, 14, 15], [14, 15, 16],
     [0, 17, 18], [17, 18, 19], [18, 19, 20]
   ];
-
-  const DEFAULT_DYNAMIC_ALPHABET_RULES = {
-    J: { baseStaticLabel: 'I', trackedLandmark: 20, trajectory: 'down_then_inward_hook', windowFrames: 20 },
-    Ñ: { baseStaticLabel: 'N', trackedLandmark: 0, trajectory: 'horizontal_oscillation', windowFrames: 20 },
-    Z: { baseStaticLabel: 'D', trackedLandmark: 8, trajectory: 'zigzag_right_diagdownleft_right', windowFrames: 24 }
-  };
 
   const GLOSS_SPANISH_MAP = {
     ahi: 'ahí',
@@ -1221,53 +1221,93 @@
   }
 
   /**
-   * Suavizado EMA (alpha ~0.5, equivalente a ventana de 3 frames) sobre el vector crudo de 16
-   * características antes de estandarizar, respetando la discontinuidad circular de `angulo` (0..360°).
+   * Canonicaliza los 21 puntos 3D métricos de una mano (Modelo Estático 90D):
+   * resta la muñeca P0, divide entre ||P9 - P0|| y, si la mano es izquierda, invierte el eje X (x = -x).
+   * Toda mano queda así en forma canónica (palma hacia la cámara con el pulgar en +x), igual que en el entrenamiento.
+   * @returns {Array<{x:number,y:number,z:number}>|null}
    */
-  function smoothAlphabetRawFeatures(prevRaw16, currentRaw16, alpha = ALPHA_FEATURE_EMA) {
-    const out = new Float32Array(16);
-    if (!currentRaw16 || currentRaw16.length < 16) return out;
-    if (!prevRaw16 || prevRaw16.length < 16) {
-      out.set(currentRaw16.subarray ? currentRaw16.subarray(0, 16) : currentRaw16.slice(0, 16));
-      return out;
+  function canonicalizeHand3D(points, handedness = 'Right') {
+    if (!Array.isArray(points) || points.length < 21 || !points[0] || !points[9]) return null;
+    const w = points[0];
+    const wz = typeof w.z === 'number' ? w.z : 0;
+    const scale = Math.hypot(
+      points[9].x - w.x,
+      points[9].y - w.y,
+      (typeof points[9].z === 'number' ? points[9].z : 0) - wz
+    );
+    if (!(scale > 1e-6)) return null;
+    const flip = normalizeHandedness(handedness) === 'Left' ? -1 : 1;
+    const out = new Array(21);
+    for (let i = 0; i < 21; i += 1) {
+      const p = points[i];
+      out[i] = {
+        x: (flip * (p.x - w.x)) / scale,
+        y: (p.y - w.y) / scale,
+        z: ((typeof p.z === 'number' ? p.z : 0) - wz) / scale
+      };
     }
-    for (let i = 0; i < 15; i += 1) {
-      out[i] = prevRaw16[i] + alpha * (currentRaw16[i] - prevRaw16[i]);
-    }
-    const angularDelta = ((currentRaw16[15] - prevRaw16[15] + 540) % 360) - 180;
-    out[15] = (((prevRaw16[15] + alpha * angularDelta) % 360) + 360) % 360;
     return out;
   }
 
+  /** Normal unitaria de la palma: (P5 - P0) × (P17 - P0) sobre puntos canónicos. */
+  function computePalmNormalUnit(pts) {
+    const a = { x: pts[5].x - pts[0].x, y: pts[5].y - pts[0].y, z: pts[5].z - pts[0].z };
+    const b = { x: pts[17].x - pts[0].x, y: pts[17].y - pts[0].y, z: pts[17].z - pts[0].z };
+    const nx = a.y * b.z - a.z * b.y;
+    const ny = a.z * b.x - a.x * b.z;
+    const nz = a.x * b.y - a.y * b.x;
+    const norm = Math.hypot(nx, ny, nz) || 1e-6;
+    return { x: nx / norm, y: ny / norm, z: nz / norm };
+  }
+
   /**
-   * Extrae las 16 características crudas (sin estandarizar) de Motor 2 usando landmarks normalizados
-   * con proporción horizontal `x * aspect` y `z` proporcional (coherente con `mp.solutions.hands`),
-   * además de `angulo` consistente con la orientación real en cámara espejada.
+   * Extractor 90D Zero-Ambiguity (Modelo Estático · ./models/alfabeto_lsp_3d/):
+   *   63 coordenadas canónicas (21 × 3) + 15 ángulos de falanges (/180°) + 3 de la normal de la palma
+   *   + 9 métricas de desambiguación: distancias pulgar(P4)→puntas 8, 12, 16, 20; distancias entre puntas
+   *   consecutivas 8-12, 12-16, 16-20; proyección escalar del pulgar sobre el eje de nudillos P5→P17 y ΔZ índice-medio.
+   * @param {Array<{x:number,y:number,z?:number}>} worldLandmarks 21 puntos métricos 3D (hand_world_landmarks)
+   * @param {string|object} handedness lado anatómico de la mano ('Left' invierte el eje X)
+   * @returns {Float32Array} vector crudo de 90 valores (sin estandarizar)
    */
-  function extractAlphabetRawFeatures(landmarks, aspect = 1, mirroredInput = false) {
-    const out = new Float32Array(16);
-    if (!Array.isArray(landmarks) || landmarks.length < 21) return out;
+  function extractHand90Features(worldLandmarks, handedness = 'Right') {
+    const out = new Float32Array(HAND_FEATURES_90);
+    const pts = canonicalizeHand3D(worldLandmarks, handedness);
+    if (!pts) return out;
 
-    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
-    const pts = landmarks.map((p) => ({
-      x: p.x * safeAspect,
-      y: p.y,
-      z: typeof p.z === 'number' ? p.z * safeAspect : 0
-    }));
-
+    let o = 0;
+    for (let i = 0; i < 21; i += 1) {
+      out[o] = pts[i].x;
+      out[o + 1] = pts[i].y;
+      out[o + 2] = pts[i].z;
+      o += 3;
+    }
     for (let i = 0; i < ALPHABET_JOINT_TRIPLETS.length; i += 1) {
       const [a, b, c] = ALPHABET_JOINT_TRIPLETS[i];
-      out[i] = angleDeg(pts[a], pts[b], pts[c]);
+      out[o] = angleDeg(pts[a], pts[b], pts[c]) / 180;
+      o += 1;
     }
+    const normal = computePalmNormalUnit(pts);
+    out[o] = normal.x;
+    out[o + 1] = normal.y;
+    out[o + 2] = normal.z;
+    o += 3;
 
-    // En stream crudo de cámara web, la vista está espejada al usuario: invertimos dx salvo que ya venga espejada
-    const dx = mirroredInput
-      ? (landmarks[9].x - landmarks[0].x) * safeAspect
-      : (landmarks[0].x - landmarks[9].x) * safeAspect;
-    const dy = landmarks[0].y - landmarks[9].y;
-    let angulo = (Math.atan2(dy, dx) * 180) / Math.PI;
-    if (angulo < 0) angulo += 360;
-    out[15] = angulo;
+    [8, 12, 16, 20].forEach((tip) => {
+      out[o] = dist3(pts[4], pts[tip]);
+      o += 1;
+    });
+    [[8, 12], [12, 16], [16, 20]].forEach(([a, b]) => {
+      out[o] = dist3(pts[a], pts[b]);
+      o += 1;
+    });
+    const ax = pts[17].x - pts[5].x;
+    const ay = pts[17].y - pts[5].y;
+    const az = pts[17].z - pts[5].z;
+    const axisLenSq = ax * ax + ay * ay + az * az || 1e-6;
+    out[o] =
+      ((pts[4].x - pts[5].x) * ax + (pts[4].y - pts[5].y) * ay + (pts[4].z - pts[5].z) * az) / axisLenSq;
+    o += 1;
+    out[o] = pts[8].z - pts[12].z;
 
     for (let k = 0; k < out.length; k += 1) {
       if (!Number.isFinite(out[k])) out[k] = 0;
@@ -1275,41 +1315,62 @@
     return out;
   }
 
-  /**
-   * Motor 2 (Alfabeto A–Z + Ñ · ./models/alfabeto_lsp/):
-   * Estandariza las 16 características crudas con suavizado EMA opcional (3 frames) antes de
-   * aplicar (x - scalerMean[i]) / scalerStd[i].
-   */
-  function extractAlphabetFeatures(
-    landmarks,
-    scalerMean = null,
-    scalerStd = null,
-    optionsOrWorld = null,
-    aspectArg = 1
-  ) {
-    if (!Array.isArray(landmarks) || landmarks.length < 21) return new Float32Array(16);
-
-    const opts = optionsOrWorld && !Array.isArray(optionsOrWorld) && typeof optionsOrWorld === 'object'
-      ? optionsOrWorld
-      : { aspect: aspectArg };
-    const safeAspect = Number.isFinite(opts.aspect) && opts.aspect > 0 ? opts.aspect : 1;
-    const raw = extractAlphabetRawFeatures(landmarks, safeAspect, Boolean(opts.mirroredInput));
-    const smoothed = opts.prevRaw
-      ? smoothAlphabetRawFeatures(opts.prevRaw, raw, typeof opts.emaAlpha === 'number' ? opts.emaAlpha : ALPHA_FEATURE_EMA)
-      : raw;
-
-    const out = new Float32Array(16);
-    if (Array.isArray(scalerMean) && Array.isArray(scalerStd) && scalerMean.length >= 16 && scalerStd.length >= 16) {
-      for (let i = 0; i < 16; i += 1) {
-        const std = scalerStd[i] || 1;
-        out[i] = (smoothed[i] - scalerMean[i]) / std;
-      }
-    } else {
-      out.set(smoothed);
+  /** Estandariza un vector crudo con (x - scalerMean[i]) / scalerStd[i] (metadata.json del modelo). */
+  function standardizeFeatures(raw, scalerMean, scalerStd) {
+    const out = new Float32Array(raw.length);
+    const hasScaler =
+      Array.isArray(scalerMean) && Array.isArray(scalerStd) &&
+      scalerMean.length >= raw.length && scalerStd.length >= raw.length;
+    for (let i = 0; i < raw.length; i += 1) {
+      const std = hasScaler ? scalerStd[i] || 1 : 1;
+      const mean = hasScaler ? scalerMean[i] : 0;
+      const v = (raw[i] - mean) / std;
+      out[i] = Number.isFinite(v) ? v : 0;
     }
+    return out;
+  }
 
-    for (let k = 0; k < out.length; k += 1) {
-      if (!Number.isFinite(out[k])) out[k] = 0;
+  /**
+   * Un frame de 12 valores para la Micro-GRU dinámica: velocidades relativas (dx, dy, dz) de la muñeca [0],
+   * punta de índice [8] y punta de meñique [20] entre dos frames consecutivos (normalizadas por ||P9 - P0||,
+   * x invertido en manos izquierdas) más los 3 valores de la normal unitaria de la palma.
+   * Con `prevLandmarks` nulo devuelve velocidades 0 (primer frame de la mano).
+   */
+  function extractTrajectoryFrame(prevLandmarks, curLandmarks, handedness = 'Right', aspect = 1, palmNormal = null) {
+    if (!Array.isArray(curLandmarks) || curLandmarks.length < 21) return null;
+    const prev = Array.isArray(prevLandmarks) && prevLandmarks.length >= 21 ? prevLandmarks : curLandmarks;
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+    const flip = normalizeHandedness(handedness) === 'Left' ? -1 : 1;
+    const palm = Math.hypot(
+      (curLandmarks[9].x - curLandmarks[0].x) * safeAspect,
+      curLandmarks[9].y - curLandmarks[0].y,
+      ((curLandmarks[9].z || 0) - (curLandmarks[0].z || 0)) * safeAspect
+    );
+    if (!(palm > 1e-6)) return null;
+
+    const out = new Float32Array(TRAJ_NUM_FEATURES);
+    [0, 8, 20].forEach((lm, k) => {
+      out[k * 3] = (flip * (curLandmarks[lm].x - prev[lm].x) * safeAspect) / palm;
+      out[k * 3 + 1] = (curLandmarks[lm].y - prev[lm].y) / palm;
+      out[k * 3 + 2] = (((curLandmarks[lm].z || 0) - (prev[lm].z || 0)) * safeAspect) / palm;
+    });
+    if (palmNormal && palmNormal.length >= 3) {
+      out[9] = palmNormal[0];
+      out[10] = palmNormal[1];
+      out[11] = palmNormal[2];
+    }
+    for (let i = 0; i < out.length; i += 1) {
+      if (!Number.isFinite(out[i])) out[i] = 0;
+    }
+    return out;
+  }
+
+  /** Aplana y estandariza la secuencia [16, 12] de la Micro-GRU con scalerMean / scalerStd (12 valores por frame). */
+  function standardizeTrajectorySequence(frames, scalerMean, scalerStd) {
+    const out = new Float32Array(frames.length * TRAJ_NUM_FEATURES);
+    for (let t = 0; t < frames.length; t += 1) {
+      const std = standardizeFeatures(frames[t], scalerMean, scalerStd);
+      out.set(std, t * TRAJ_NUM_FEATURES);
     }
     return out;
   }
@@ -1467,67 +1528,6 @@
   }
 
   /**
-   * Detecta si el índice está claramente extendido y los dedos medio, anular y meñique están recogidos
-   * (base postural compartida por D estática y el inicio/recorrido de Z).
-   */
-  function isIndexClearlyExtended(landmarks, aspect = 1) {
-    if (!Array.isArray(landmarks) || landmarks.length < 21) return false;
-    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
-    const pts = landmarks.map((p) => ({
-      x: p.x * safeAspect,
-      y: p.y,
-      z: typeof p.z === 'number' ? p.z * safeAspect : 0
-    }));
-
-    const indexExtended =
-      angleDeg(pts[5], pts[6], pts[7]) >= 136 &&
-      angleDeg(pts[6], pts[7], pts[8]) >= 128 &&
-      dist3(pts[0], pts[8]) > dist3(pts[0], pts[6]) * 1.16;
-    if (!indexExtended) return false;
-
-    const idxReach = dist3(pts[0], pts[8]) || 1e-6;
-    return (
-      dist3(pts[0], pts[12]) < idxReach * 0.85 &&
-      dist3(pts[0], pts[16]) < idxReach * 0.83 &&
-      dist3(pts[0], pts[20]) < idxReach * 0.83
-    );
-  }
-
-  /**
-   * Desempate geométrico auxiliar ligero cuando el Top-2 neuronal duda entre M y N (diferencia < 0.18).
-   * Cuenta si 3 dedos (M) o 2 dedos (N) cubren al pulgar proyectado sobre la línea de nudillos [5..17].
-   */
-  function disambiguateMN(landmarks, aspect = 1, rawLabel, bestProb, secondLabel, secondProb, threshold = 0.75) {
-    const isMNPair =
-      (rawLabel === 'M' && secondLabel === 'N') || (rawLabel === 'N' && secondLabel === 'M');
-    if (!isMNPair || Math.abs((bestProb || 0) - (secondProb || 0)) >= 0.18) return null;
-    if (!Array.isArray(landmarks) || landmarks.length < 21) return null;
-
-    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
-    const pts = landmarks.map((p) => ({
-      x: p.x * safeAspect,
-      y: p.y,
-      z: typeof p.z === 'number' ? p.z * safeAspect : 0
-    }));
-    const palm = dist3(pts[0], pts[9]) || 1e-6;
-    const vx = pts[17].x - pts[5].x;
-    const vy = pts[17].y - pts[5].y;
-    const axisLen2 = vx * vx + vy * vy || 1e-6;
-    const tThumb = ((pts[4].x - pts[5].x) * vx + (pts[4].y - pts[5].y) * vy) / axisLen2;
-    const ringAligned =
-      Math.abs(pts[16].y - pts[12].y) / palm <= 0.24 && dist3(pts[14], pts[10]) / palm <= 0.42;
-
-    const foldedOverThumb = tThumb >= 0.61 || (tThumb >= 0.54 && ringAligned) ? 3 : 2;
-    const winner = foldedOverThumb === 3 ? 'M' : 'N';
-    const combinedProb = (bestProb || 0) + (secondProb || 0);
-    const resolvedScore =
-      combinedProb >= threshold
-        ? Math.min(0.95, Math.max(bestProb || 0, (bestProb || 0) + (secondProb || 0) * 0.6))
-        : bestProb || 0;
-    return { label: winner, score: resolvedScore, foldedOverThumb };
-  }
-
-  /**
    * Detecta movimiento amplio de brazo/codo propio de una seña dinámica (118 señas),
    * diferenciándolo de los micro-ajustes o trazos cortos J/Ñ/Z de una sesión de deletreo.
    */
@@ -1560,218 +1560,6 @@
     const wristDispPalms = wristDispNorm / avgPalm;
     const elbowDelta = minElbow !== Infinity && maxElbow !== -Infinity ? maxElbow - minElbow : 0;
     return wristDispPalms >= 0.90 || wristDispNorm >= 0.24 || elbowDelta >= 28;
-  }
-
-  /**
-   * Detector de trayectorias dinámicas para letras J, Ñ y Z del Alfabeto LSP usando metadata.dynamicLettersRules.
-   * @param {Array<{t:number,palmSize:number,landmarks:Array,staticLabel:string|null,prob:number,indexExtended?:boolean}>} trackBuffer
-   * @param {object} [dynamicRules]
-   * @returns {{label:string,score:number}|null}
-   */
-  function detectDynamicAlphabetLetter(trackBuffer, dynamicRules = null) {
-    if (!Array.isArray(trackBuffer) || trackBuffer.length < 7) return null;
-    const rules = dynamicRules || DEFAULT_DYNAMIC_ALPHABET_RULES;
-
-    const getSlice = (winFrames) => {
-      const n = Math.max(7, Number(winFrames) || 20);
-      return trackBuffer.length > n ? trackBuffer.slice(trackBuffer.length - n) : trackBuffer;
-    };
-
-    const measureLandmarkStats = (frames, lmIdx, revStepRatio = 0.03) => {
-      let minX = Infinity;
-      let maxX = -Infinity;
-      let minY = Infinity;
-      let maxY = -Infinity;
-      let palmSum = 0;
-      let valid = 0;
-      let reversals = 0;
-      let dir = 0;
-      let anchorX = null;
-
-      for (let i = 0; i < frames.length; i += 1) {
-        const f = frames[i];
-        const pt = f && Array.isArray(f.landmarks) ? f.landmarks[lmIdx] : null;
-        if (!pt) continue;
-        palmSum += f.palmSize || 0.1;
-        valid += 1;
-        if (pt.x < minX) minX = pt.x;
-        if (pt.x > maxX) maxX = pt.x;
-        if (pt.y < minY) minY = pt.y;
-        if (pt.y > maxY) maxY = pt.y;
-        if (anchorX === null) {
-          anchorX = pt.x;
-        } else {
-          const avgP = palmSum / valid || 0.1;
-          const dx = pt.x - anchorX;
-          if (Math.abs(dx) >= revStepRatio * avgP) {
-            const nextDir = dx > 0 ? 1 : -1;
-            if (dir !== 0 && nextDir !== dir) reversals += 1;
-            dir = nextDir;
-            anchorX = pt.x;
-          }
-        }
-      }
-      if (valid < 6) return null;
-      const avgPalm = palmSum / valid || 0.1;
-      return {
-        avgPalm,
-        spanX: (maxX - minX) / avgPalm,
-        spanY: (maxY - minY) / avgPalm,
-        reversals
-      };
-    };
-
-    const measureFingerRotationalStats = (frames) => {
-      let minRelX = Infinity;
-      let maxRelX = -Infinity;
-      let valid = 0;
-      let reversals = 0;
-      let dir = 0;
-      let anchor = null;
-      for (let i = 0; i < frames.length; i += 1) {
-        const lm = frames[i] && frames[i].landmarks;
-        if (!Array.isArray(lm) || lm.length < 13 || !lm[0] || !lm[5] || !lm[8] || !lm[9] || !lm[12]) continue;
-        const palm = frames[i].palmSize || 0.1;
-        const centerX = (lm[5].x + lm[8].x + lm[9].x + lm[12].x) / 4;
-        const relX = (centerX - lm[0].x) / palm;
-        valid += 1;
-        if (relX < minRelX) minRelX = relX;
-        if (relX > maxRelX) maxRelX = relX;
-        if (anchor === null) {
-          anchor = relX;
-        } else {
-          const d = relX - anchor;
-          if (Math.abs(d) >= 0.022) {
-            const nextDir = d > 0 ? 1 : -1;
-            if (dir !== 0 && nextDir !== dir) reversals += 1;
-            dir = nextDir;
-            anchor = relX;
-          }
-        }
-      }
-      if (valid < 6) return null;
-      return { spanX: maxRelX - minRelX, reversals };
-    };
-
-    const countMatchingStatic = (frames, acceptedLabels, minProb = 0) => {
-      let count = 0;
-      let maxProb = 0;
-      for (let i = 0; i < frames.length; i += 1) {
-        const lbl = frames[i].staticLabel;
-        const p = frames[i].prob || 0;
-        if (lbl && acceptedLabels.includes(lbl) && p >= minProb) {
-          count += 1;
-          if (p > maxProb) maxProb = p;
-        }
-      }
-      return { count, maxProb };
-    };
-
-    // 1. Letra Z: base estática D o índice claramente extendido (>= 0.38 en movimiento), trazo zig-zag tolerante
-    const zRule = rules.Z || DEFAULT_DYNAMIC_ALPHABET_RULES.Z;
-    const zSlice = getSlice(zRule.windowFrames || 24);
-    let zBaseCount = 0;
-    let zMaxProb = 0;
-    for (let i = 0; i < zSlice.length; i += 1) {
-      const f = zSlice[i];
-      const p = f.prob || 0;
-      const idxOk =
-        typeof f.indexExtended === 'boolean'
-          ? f.indexExtended
-          : Array.isArray(f.landmarks) && isIndexClearlyExtended(f.landmarks, 1);
-      if (f.staticLabel === (zRule.baseStaticLabel || 'D') || (idxOk && p >= 0.38)) {
-        zBaseCount += 1;
-        if (p > zMaxProb) zMaxProb = p;
-      }
-    }
-    if (zSlice.length >= 9 && zBaseCount >= 2) {
-      const lmIdx = typeof zRule.trackedLandmark === 'number' ? zRule.trackedLandmark : 8;
-      const zStats = measureLandmarkStats(zSlice, lmIdx, 0.028);
-      if (zStats && zStats.spanX >= 0.25 && zStats.spanY >= 0.17 && zStats.reversals >= 2) {
-        const checkZigzag = (sign) => {
-          let s1 = false;
-          let s2 = false;
-          let s3 = false;
-          for (let i = 2; i < zSlice.length; i += 1) {
-            const p0 = zSlice[i - 2].landmarks && zSlice[i - 2].landmarks[lmIdx];
-            const p1 = zSlice[i].landmarks && zSlice[i].landmarks[lmIdx];
-            if (!p0 || !p1) continue;
-            const dx = ((p1.x - p0.x) / zStats.avgPalm) * sign;
-            const dy = (p1.y - p0.y) / zStats.avgPalm;
-            if (!s1 && dx > 0.045 && Math.abs(dy) <= Math.max(0.11, dx * 0.85)) {
-              s1 = true;
-            } else if (s1 && !s2 && dx < -0.045 && dy > 0.04) {
-              s2 = true;
-            } else if (s2 && !s3 && dx > 0.045 && Math.abs(dy) <= Math.max(0.11, dx * 0.85)) {
-              s3 = true;
-            }
-          }
-          return s1 && s2 && s3;
-        };
-        if (checkZigzag(1) || checkZigzag(-1)) {
-          return { label: 'Z', score: Math.max(0.86, zMaxProb) };
-        }
-      }
-    }
-
-    // 2. Letra Ñ: base N (o M/U/V/H en giro rápido), oscilación en muñeca [0] o puntas/nudillos [8, 12, 5, 9]
-    const enieRule = rules['Ñ'] || DEFAULT_DYNAMIC_ALPHABET_RULES['Ñ'];
-    const enieSlice = getSlice(enieRule.windowFrames || 20);
-    const enieBase = countMatchingStatic(enieSlice, [enieRule.baseStaticLabel || 'N', 'M', 'U', 'V', 'H'], 0.35);
-    if (enieSlice.length >= 7 && enieBase.count >= 2) {
-      const idxStats = measureLandmarkStats(enieSlice, 8, 0.022);
-      const lastLm = enieSlice[enieSlice.length - 1] && enieSlice[enieSlice.length - 1].landmarks;
-      const looksLikeZ = Boolean(idxStats && idxStats.spanY >= 0.32 && isIndexClearlyExtended(lastLm, 1));
-      if (!looksLikeZ) {
-        const wristIdx = typeof enieRule.trackedLandmark === 'number' ? enieRule.trackedLandmark : 0;
-        const wristStats = measureLandmarkStats(enieSlice, wristIdx, 0.022);
-        const wristTriggered = Boolean(
-          wristStats && wristStats.spanX >= 0.14 && wristStats.spanX > wristStats.spanY * 0.65 && wristStats.reversals >= 2
-        );
-        const fingerTriggered = [8, 12, 5, 9].some((idx) => {
-          const st = measureLandmarkStats(enieSlice, idx, 0.022);
-          return Boolean(st && st.spanX >= 0.13 && st.spanX > st.spanY * 0.62 && st.reversals >= 2);
-        });
-        const rotStats = measureFingerRotationalStats(enieSlice);
-        const rotTriggered = Boolean(rotStats && rotStats.spanX >= 0.10 && rotStats.reversals >= 2);
-        if (wristTriggered || fingerTriggered || rotTriggered) {
-          return { label: 'Ñ', score: Math.max(0.86, enieBase.maxProb) };
-        }
-      }
-    }
-
-    // 3. Letra J: base estática I, meñique [20] bajando y girando en gancho
-    const jRule = rules.J || DEFAULT_DYNAMIC_ALPHABET_RULES.J;
-    const jSlice = getSlice(jRule.windowFrames || 20);
-    const jBase = countMatchingStatic(jSlice, [jRule.baseStaticLabel || 'I']);
-    if (jSlice.length >= 8 && jBase.count >= 2) {
-      const lmIdx = typeof jRule.trackedLandmark === 'number' ? jRule.trackedLandmark : 20;
-      const avgPalm =
-        jSlice.reduce((acc, f) => acc + (f.palmSize || 0.1), 0) / jSlice.length || 0.1;
-      const pFirst = jSlice[0].landmarks && jSlice[0].landmarks[lmIdx];
-      let pMid = null;
-      let maxY = -Infinity;
-      const lo = Math.floor(jSlice.length * 0.25);
-      const hi = Math.ceil(jSlice.length * 0.90);
-      for (let i = lo; i < hi; i += 1) {
-        const pt = jSlice[i].landmarks && jSlice[i].landmarks[lmIdx];
-        if (pt && pt.y > maxY) {
-          maxY = pt.y;
-          pMid = pt;
-        }
-      }
-      const pLast = jSlice[jSlice.length - 1].landmarks && jSlice[jSlice.length - 1].landmarks[lmIdx];
-      if (pFirst && pMid && pLast) {
-        const dropY = (pMid.y - pFirst.y) / avgPalm;
-        const hookDx = Math.abs(pLast.x - pMid.x) / avgPalm;
-        const hookUpY = (pMid.y - pLast.y) / avgPalm;
-        if (dropY >= 0.20 && hookDx >= 0.12 && hookUpY >= -0.08) {
-          return { label: 'J', score: Math.max(0.86, jBase.maxProb) };
-        }
-      }
-    }
-
-    return null;
   }
 
   /**
@@ -1823,7 +1611,15 @@
   }
 
   let latestDescriptorSnapshot = null;
-  let activeTfStatusSnapshot = { ready: false, loading: false, dynamicReady: false, alphabetReady: false, error: null };
+  const TF_STATUS_IDLE = Object.freeze({
+    ready: false,
+    loading: false,
+    dynamicReady: false,
+    alphabetReady: false,
+    trajectoryReady: false,
+    error: null
+  });
+  let activeTfStatusSnapshot = { ...TF_STATUS_IDLE };
 
   function getLastDescriptor() {
     return latestDescriptorSnapshot;
@@ -1844,15 +1640,14 @@
     analyzeNonManualExpressions,
     analyzeTrajectory3D,
     extractDynamicFrameFeatures,
-    extractAlphabetRawFeatures,
-    extractAlphabetFeatures,
-    smoothAlphabetRawFeatures,
+    canonicalizeHand3D,
+    extractHand90Features,
+    standardizeFeatures,
+    extractTrajectoryFrame,
+    standardizeTrajectorySequence,
     smoothLandmarksEMA,
     analyzeBiomechanics,
-    isIndexClearlyExtended,
-    disambiguateMN,
     detectWideArmMotion,
-    detectDynamicAlphabetLetter,
     detectIlyEmergency,
     isWristSteady,
     humanizeGloss,
@@ -1917,11 +1712,11 @@
     if (tfModelsPromise) return tfModelsPromise;
     if (window.location.protocol === 'file:') {
       const err = new Error('file-protocol');
-      activeTfStatusSnapshot = { ready: false, loading: false, dynamicReady: false, alphabetReady: false, error: err.message };
+      activeTfStatusSnapshot = { ...TF_STATUS_IDLE, error: err.message };
       return Promise.reject(err);
     }
 
-    activeTfStatusSnapshot = { ready: false, loading: true, dynamicReady: false, alphabetReady: false, error: null };
+    activeTfStatusSnapshot = { ...TF_STATUS_IDLE, loading: true };
     const report = (msg) => {
       if (typeof tfProgressCallback === 'function') tfProgressCallback(msg);
     };
@@ -1936,32 +1731,43 @@
         await window.tf.ready();
 
         const root = resolveRelativeModelsRoot();
-        report('Descargando modelos IA LSP (vocabulario y alfabeto)…');
-        const [dynamic, alphabet] = await Promise.all([
+        report('Descargando modelos IA LSP (vocabulario, alfabeto 3D y trayectorias)…');
+        // Carpetas reales del repositorio primero (sin 404 en consola); la ruta documentada queda como alternativa.
+        const [dynamic, alphabet, trajectory] = await Promise.all([
           loadGraphModelWithFallback([`${root}/senas_dinamicas`, `${root}/model_senas_3enlaces`], 'senas_dinamicas'),
-          loadGraphModelWithFallback([`${root}/alfabeto_lsp`, `${root}/model_alfabeto_lsp`], 'alfabeto_lsp')
+          loadGraphModelWithFallback([`${root}/model_alfabeto_lsp_3d`, `${root}/alfabeto_lsp_3d`], 'alfabeto_lsp_3d'),
+          loadGraphModelWithFallback([`${root}/model_alfabeto_dinamico_3d`, `${root}/alfabeto_dinamico_3d`], 'alfabeto_dinamico_3d')
         ]);
+
+        if ((alphabet.metadata.numFeatures || HAND_FEATURES_90) !== HAND_FEATURES_90) {
+          throw new Error('alfabeto-3d-features-mismatch');
+        }
+        if (
+          (trajectory.metadata.sequenceLength || TRAJ_SEQ_LEN) !== TRAJ_SEQ_LEN ||
+          (trajectory.metadata.numFeatures || TRAJ_NUM_FEATURES) !== TRAJ_NUM_FEATURES
+        ) {
+          throw new Error('trayectoria-3d-shape-mismatch');
+        }
 
         report('Preparando redes neuronales en tu navegador…');
         warmupTfModel(dynamic, [1, dynamic.metadata.sequenceLength || DYNAMIC_SEQ_LEN, dynamic.metadata.numFeatures || DYNAMIC_NUM_FEATURES]);
-        warmupTfModel(alphabet, [1, alphabet.metadata.numFeatures || 16]);
+        warmupTfModel(alphabet, [1, HAND_FEATURES_90]);
+        warmupTfModel(trajectory, [1, TRAJ_SEQ_LEN, TRAJ_NUM_FEATURES]);
 
-        loadedTfModels = { dynamic, alphabet };
+        loadedTfModels = { dynamic, alphabet, trajectory };
         activeTfStatusSnapshot = {
           ready: true,
           loading: false,
           dynamicReady: Boolean(dynamic && dynamic.model),
           alphabetReady: Boolean(alphabet && alphabet.model),
+          trajectoryReady: Boolean(trajectory && trajectory.model),
           error: null
         };
         return loadedTfModels;
       } catch (err) {
         tfModelsPromise = null;
         activeTfStatusSnapshot = {
-          ready: false,
-          loading: false,
-          dynamicReady: false,
-          alphabetReady: false,
+          ...TF_STATUS_IDLE,
           error: err ? String(err.message || err) : 'tfjs-load-error'
         };
         throw err;
@@ -2142,11 +1948,17 @@
     let dynamicEvalCounter = 0;
     let isDynamicInferring = false;
     let isAlphabetInferring = false;
-    let alphaFeatureRawEma = null;
+    let isTrajectoryInferring = false;
+    let prevTrajLandmarks = null;
+    let trajEpoch = 0;
+    let lastDynamicEmitAt = 0;
     let lastHudTop2At = 0;
     let lastHudTop2Text = '';
     const dynamicFlatInput = new Float32Array(DYNAMIC_SEQ_LEN * DYNAMIC_NUM_FEATURES);
     const smoothedHandSlots = { Left: null, Right: null };
+    const smoothedWorldSlots = { Left: null, Right: null };
+    const trajectoryBuffer = [];
+    const trajectoryState = { label: null, prob: 0, at: 0 };
     const trailPoints = [];
     const wristMacroBuffer = [];
     const MAX_WRIST_MACRO = 10;
@@ -2157,7 +1969,7 @@
     const spellTrackBuffer = [];
     const detection = { id: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, meta: null };
     const dynCandidate = { id: null, streak: 0, lastProb: 0, since: 0 };
-    const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0, isDynamic: false };
+    const spellCandidate = { label: null, since: 0, lastSeen: 0, confirmed: false, scoreSum: 0, scoreN: 0 };
 
     function setAiReadyState(state) {
       if (!aiReadyEl) return;
@@ -2215,7 +2027,16 @@
       spellCandidate.confirmed = false;
       spellCandidate.scoreSum = 0;
       spellCandidate.scoreN = 0;
-      spellCandidate.isDynamic = false;
+    }
+
+    /** Reinicia el buffer de la Micro-GRU (se re-cebará con velocidades 0 al reaparecer la mano). */
+    function resetTrajectory() {
+      trajEpoch += 1;
+      trajectoryBuffer.length = 0;
+      prevTrajLandmarks = null;
+      trajectoryState.label = null;
+      trajectoryState.prob = 0;
+      trajectoryState.at = 0;
     }
 
     function resetDynamicCandidate() {
@@ -2318,11 +2139,15 @@
       dynamicEvalCounter = 0;
       isDynamicInferring = false;
       isAlphabetInferring = false;
+      isTrajectoryInferring = false;
+      lastDynamicEmitAt = 0;
+      resetTrajectory();
       missingHandFrames = 0;
       lastLetterConfirmedAt = 0;
-      alphaFeatureRawEma = null;
       smoothedHandSlots.Left = null;
       smoothedHandSlots.Right = null;
+      smoothedWorldSlots.Left = null;
+      smoothedWorldSlots.Right = null;
       trailPoints.length = 0;
       wristMacroBuffer.length = 0;
       lastHudTop2At = 0;
@@ -3211,6 +3036,7 @@
             dynamicSeqBuffer.splice(0, 12);
             resetDynamicCandidate();
             resetSpellCandidate();
+            resetTrajectory();
             spellTrackBuffer.length = 0;
           }
         })
@@ -3225,12 +3051,11 @@
         });
     }
 
-    function feedSpellLetter(label, score, now, { isDynamic = false } = {}) {
+    function feedSpellLetter(label, score, now) {
       if (label && label === spellCandidate.label) {
         spellCandidate.lastSeen = now;
         spellCandidate.scoreSum += score;
         spellCandidate.scoreN += 1;
-        spellCandidate.isDynamic = spellCandidate.isDynamic || isDynamic;
       } else if (spellCandidate.label && now - spellCandidate.lastSeen < GRACE_MS) {
         // Mantiene progreso ante micro-parpadeos
       } else {
@@ -3240,7 +3065,6 @@
         spellCandidate.confirmed = false;
         spellCandidate.scoreSum = label ? score : 0;
         spellCandidate.scoreN = label ? 1 : 0;
-        spellCandidate.isDynamic = Boolean(isDynamic);
       }
 
       if (!spellCandidate.label) {
@@ -3252,11 +3076,10 @@
       const displayChar = spellCandidate.label === SPACE_TOKEN_LABEL ? 'Espacio' : `Letra ${spellCandidate.label}`;
       const avgProb = spellCandidate.scoreN ? spellCandidate.scoreSum / spellCandidate.scoreN : score;
       const pct = Math.round(avgProb * 100);
-      const targetMs = spellCandidate.isDynamic ? CONFIRM_SPELL_DYN_MS : CONFIRM_SPELL_MS;
-      const progress = Math.min(1, (now - spellCandidate.since) / targetMs);
+      const progress = Math.min(1, (now - spellCandidate.since) / CONFIRM_SPELL_MS);
       setProgress(progress);
 
-      if (progressLabel) progressLabel.textContent = `Estabilizando: ${displayChar} (${targetMs} ms)`;
+      if (progressLabel) progressLabel.textContent = `Estabilizando: ${displayChar} (${CONFIRM_SPELL_MS} ms)`;
       lastDetectEl.textContent = `Deletreo en vivo: ${displayChar} · Confianza: ${pct}%`;
 
       if (progress >= 1 && !spellCandidate.confirmed) {
@@ -3283,62 +3106,169 @@
           sentNote.textContent = 'Letra confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
           sentNote.hidden = false;
           resetDynamicCandidate();
-          if (spellCandidate.isDynamic) {
-            spellTrackBuffer.length = 0;
-          }
         }
       }
     }
 
+    /** Etiqueta del modelo -> texto legible para el HUD (ESPACIO -> Espacio). */
+    function displaySpellLabel(label) {
+      return label === STATIC_SPACE_LABEL || label === '' ? 'Espacio' : label;
+    }
+
     /**
-     * Prioridad 3 · Alfabeto LSP (A–Z + Ñ · ./models/alfabeto_lsp/).
-     * Usa landmarks normalizados con proporción `x * aspect` + EMA de 3 frames antes de estandarizar,
-     * orientación consistente en cámara espejada y recalibración D/Z, M/N y Ñ con Top-2 en el HUD.
+     * Cebado del buffer de la Micro-GRU y avance de un frame: mantiene 16 frames [dx, dy, dz de muñeca,
+     * índice y meñique + normal de palma]. Al aparecer la mano se rellena con velocidades 0.
      */
-    function evaluateAlphabetTf(primaryHand, aspect, bio, now) {
-      const alphaEntry = tfModels && tfModels.alphabet;
-      if (!alphaEntry || !alphaEntry.model || !window.tf || isAlphabetInferring) return;
+    function pushTrajectoryFrame(rawHand, side, aspect, palmNormal) {
+      const cur = rawHand.map((p) => ({ x: p.x, y: p.y, z: p.z || 0 }));
+      if (!prevTrajLandmarks) {
+        const zeroFrame = extractTrajectoryFrame(null, cur, side, aspect, palmNormal);
+        if (!zeroFrame) return;
+        trajectoryBuffer.length = 0;
+        for (let i = 0; i < TRAJ_SEQ_LEN - 1; i += 1) trajectoryBuffer.push(zeroFrame);
+        prevTrajLandmarks = cur;
+      }
+      const frame = extractTrajectoryFrame(prevTrajLandmarks, cur, side, aspect, palmNormal);
+      prevTrajLandmarks = cur;
+      if (!frame) return;
+      if (trajectoryBuffer.length >= TRAJ_SEQ_LEN) trajectoryBuffer.shift();
+      trajectoryBuffer.push(frame);
+    }
 
-      const meta = alphaEntry.metadata || {};
-      const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.75;
-      const labels = Array.isArray(meta.labels) ? meta.labels : [];
-      const tokenAtCall = sessionToken;
-      isAlphabetInferring = true;
+    /** Emite al instante una letra dinámica (J, Ñ, Z) predicha por la Micro-GRU y reinicia el buffer de deletreo. */
+    function emitDynamicLetter(label, score, now) {
+      const pct = Math.round(score * 100);
+      const tokenId = `spell:${label}`;
+      lastDynamicEmitAt = now;
+      lastLetterConfirmedAt = now;
+      lastAddedAt[tokenId] = now;
 
-      const aspectLandmarks = primaryHand.map((p) => ({ x: p.x * aspect, y: p.y }));
-      const palmSize =
-        Math.hypot(aspectLandmarks[9].x - aspectLandmarks[0].x, aspectLandmarks[9].y - aspectLandmarks[0].y) || 0.1;
+      lastConfirmed = { id: tokenId, kind: 'letter', text: label, label: `Letra ${label}` };
+      sentenceTokens.push({ id: tokenId, kind: 'letter', text: label });
+      renderSentence();
+      lastDetectEl.textContent = `Última letra: Letra ${label} · Confianza: ${pct}%`;
+      sentNote.textContent = 'Letra con trazo confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
+      sentNote.hidden = false;
+      updateHud({ top2Text: formatTop2Text(label, score) }, now);
 
-      const prevRaw = alphaFeatureRawEma;
-      const rawNow = extractAlphabetRawFeatures(primaryHand, aspect, !mirrorEnabled);
-      alphaFeatureRawEma = smoothAlphabetRawFeatures(prevRaw, rawNow, ALPHA_FEATURE_EMA);
-
-      const features = extractAlphabetFeatures(primaryHand, meta.scalerMean, meta.scalerStd, {
-        aspect,
-        mirroredInput: !mirrorEnabled,
-        prevRaw,
-        emaAlpha: ALPHA_FEATURE_EMA
+      latestDescriptorSnapshot = Object.freeze({
+        level: visionEngine ? visionEngine.level : 2,
+        source: 'alphabet_trajectory_gru',
+        gestureId: tokenId,
+        confidence: score,
+        timestamp: now
       });
 
-      const idxExtendedNow = isIndexClearlyExtended(primaryHand, aspect);
+      resetDynamicCandidate();
+      resetSpellCandidate();
+      spellTrackBuffer.length = 0;
+      dynamicSeqBuffer.length = 0;
+      resetTrajectory();
+      setProgress(0);
+      if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
+    }
+
+    /**
+     * Micro-GRU dinámica (./models/alfabeto_dinamico_3d/): secuencia estandarizada [1, 16, 12].
+     * Si predice J, Ñ o Z con confianza >= umbral (0.78) emite esa letra; si predice ESTATICA,
+     * el modelo estático 90D puede confirmar la letra sostenida.
+     */
+    function evaluateTrajectoryGru() {
+      const entry = tfModels && tfModels.trajectory;
+      if (!entry || !entry.model || !window.tf || isTrajectoryInferring) return;
+      if (trajectoryBuffer.length < TRAJ_SEQ_LEN) return;
+
+      const meta = entry.metadata || {};
+      const labels = Array.isArray(meta.labels) ? meta.labels : [];
+      const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.78;
+      const flat = standardizeTrajectorySequence(trajectoryBuffer, meta.scalerMean, meta.scalerStd);
+      const tokenAtCall = sessionToken;
+      const epochAtCall = trajEpoch;
+      isTrajectoryInferring = true;
 
       let outTensor = null;
       try {
         outTensor = window.tf.tidy(() => {
-          const input = window.tf.tensor2d(features, [1, 16], 'float32');
-          const out = alphaEntry.model.predict(input);
+          const input = window.tf.tensor3d(flat, [1, TRAJ_SEQ_LEN, TRAJ_NUM_FEATURES], 'float32');
+          const out = entry.model.predict(input);
           return Array.isArray(out) ? out[0] : out;
         });
       } catch (err) {
-        isAlphabetInferring = false;
-        console.warn('[Cámara IA · Alfabeto]', err);
+        isTrajectoryInferring = false;
+        console.warn('[Cámara IA · Trayectorias]', err);
         return;
       }
 
       outTensor
         .data()
         .then((probs) => {
-          if (tokenAtCall !== sessionToken || !running || dynCandidate.streak > 0) return;
+          if (tokenAtCall !== sessionToken || epochAtCall !== trajEpoch || !running) return;
+          let bestIdx = 0;
+          let bestProb = -1;
+          for (let i = 0; i < probs.length; i += 1) {
+            if (probs[i] > bestProb) {
+              bestProb = probs[i];
+              bestIdx = i;
+            }
+          }
+          const label = bestIdx < labels.length ? labels[bestIdx] : TRAJ_STATIC_LABEL;
+          const evalNow = performance.now();
+          trajectoryState.label = label;
+          trajectoryState.prob = bestProb;
+          trajectoryState.at = evalNow;
+
+          if (
+            TRAJ_DYNAMIC_LABELS.has(label) &&
+            bestProb >= threshold &&
+            evalNow - lastDynamicEmitAt >= DYNAMIC_EMIT_LOCK_MS
+          ) {
+            emitDynamicLetter(label, bestProb, evalNow);
+          }
+        })
+        .catch((err) => {
+          console.warn('[Cámara IA · Trayectorias]', err);
+        })
+        .finally(() => {
+          isTrajectoryInferring = false;
+          if (outTensor && typeof outTensor.dispose === 'function') {
+            outTensor.dispose();
+          }
+        });
+    }
+
+    /**
+     * Prioridad 3 · Alfabeto estático 3D (./models/alfabeto_lsp_3d/): MLP sobre el vector 90D canónico
+     * estandarizado [1, 90]. Solo confirma la letra sostenida cuando la Micro-GRU reporta ESTATICA.
+     */
+    function evaluateAlphabetTf(raw90, now) {
+      const alphaEntry = tfModels && tfModels.alphabet;
+      if (!alphaEntry || !alphaEntry.model || !window.tf || isAlphabetInferring) return;
+
+      const meta = alphaEntry.metadata || {};
+      const threshold = typeof meta.confidenceThreshold === 'number' ? meta.confidenceThreshold : 0.72;
+      const labels = Array.isArray(meta.labels) ? meta.labels : [];
+      const features = standardizeFeatures(raw90, meta.scalerMean, meta.scalerStd);
+      const tokenAtCall = sessionToken;
+      const epochAtCall = trajEpoch;
+      isAlphabetInferring = true;
+
+      let outTensor = null;
+      try {
+        outTensor = window.tf.tidy(() => {
+          const input = window.tf.tensor2d(features, [1, HAND_FEATURES_90], 'float32');
+          const out = alphaEntry.model.predict(input);
+          return Array.isArray(out) ? out[0] : out;
+        });
+      } catch (err) {
+        isAlphabetInferring = false;
+        console.warn('[Cámara IA · Alfabeto 3D]', err);
+        return;
+      }
+
+      outTensor
+        .data()
+        .then((probs) => {
+          if (tokenAtCall !== sessionToken || epochAtCall !== trajEpoch || !running || dynCandidate.streak > 0) return;
           const evalNow = performance.now();
 
           let bestIdx = 0;
@@ -3361,85 +3291,55 @@
           const rawLabel = bestIdx < labels.length ? labels[bestIdx] : '';
           const secondLabelRaw = secondIdx >= 0 && secondIdx < labels.length ? labels[secondIdx] : '';
 
-          if (spellTrackBuffer.length >= MOTION_WINDOW) spellTrackBuffer.shift();
-          spellTrackBuffer.push({
-            t: evalNow || now,
-            palmSize,
-            landmarks: aspectLandmarks,
-            staticLabel: bestProb >= 0.38 ? rawLabel : null,
-            prob: bestProb,
-            indexExtended: idxExtendedNow
-          });
+          const gruModelLoaded = Boolean(tfModels && tfModels.trajectory);
+          const gruFresh = trajectoryState.at > 0 && evalNow - trajectoryState.at <= TRAJ_STATE_MAX_AGE_MS;
+          const staticAllowed =
+            !gruModelLoaded ||
+            (gruFresh &&
+              trajectoryState.label === TRAJ_STATIC_LABEL &&
+              evalNow - lastDynamicEmitAt >= DYNAMIC_EMIT_LOCK_MS);
 
-          const dynLetter = detectDynamicAlphabetLetter(spellTrackBuffer, meta.dynamicLettersRules);
-          const mnResolved = !dynLetter
-            ? disambiguateMN(primaryHand, aspect, rawLabel, bestProb, secondLabelRaw, secondProb, threshold)
-            : null;
-          const effectiveLabel = mnResolved ? mnResolved.label : rawLabel;
-          const effectiveProb = mnResolved ? mnResolved.score : bestProb;
-
-          const handIsQuiet = bio.activity === 'estatico' && isWristSteady(spellTrackBuffer, 5);
           let resolvedLabel = null;
           let resolvedScore = 0;
-          let isDynamic = false;
-
-          if (dynLetter) {
-            resolvedLabel = dynLetter.label;
-            resolvedScore = dynLetter.score;
-            isDynamic = true;
-          } else if (handIsQuiet) {
-            const dInTop2 = rawLabel === 'D' ? bestProb : (secondLabelRaw === 'D' ? secondProb : 0);
-            const thumbCircleDist =
-              Math.min(
-                Math.hypot(aspectLandmarks[4].x - aspectLandmarks[12].x, aspectLandmarks[4].y - aspectLandmarks[12].y),
-                Math.hypot(aspectLandmarks[4].x - aspectLandmarks[11].x, aspectLandmarks[4].y - aspectLandmarks[11].y)
-              ) / palmSize;
-
-            if (effectiveProb >= threshold) {
-              if (effectiveLabel === '') {
-                const canInsertSpace =
-                  sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind !== 'space';
-                if (canInsertSpace) {
-                  resolvedLabel = SPACE_TOKEN_LABEL;
-                  resolvedScore = effectiveProb;
-                }
-              } else {
-                resolvedLabel = effectiveLabel;
-                resolvedScore = effectiveProb;
+          if (staticAllowed && bestProb >= threshold) {
+            if (rawLabel === STATIC_SPACE_LABEL || rawLabel === '') {
+              const canInsertSpace =
+                sentenceTokens.length > 0 && sentenceTokens[sentenceTokens.length - 1].kind !== 'space';
+              if (canInsertSpace) {
+                resolvedLabel = SPACE_TOKEN_LABEL;
+                resolvedScore = bestProb;
               }
-            } else if (idxExtendedNow && dInTop2 >= 0.48 && thumbCircleDist < 0.46) {
-              resolvedLabel = 'D';
-              resolvedScore = Math.max(threshold, dInTop2);
+            } else {
+              resolvedLabel = rawLabel;
+              resolvedScore = bestProb;
             }
           }
 
-          const hudLbl1 = dynLetter
-            ? dynLetter.label
-            : resolvedLabel === 'D'
-              ? 'D'
-              : effectiveLabel === ''
-                ? 'Espacio'
-                : effectiveLabel;
-          const hudProb1 = dynLetter ? dynLetter.score : (resolvedScore || effectiveProb);
-          const hudLbl2 = secondLabelRaw === '' ? 'Espacio' : secondLabelRaw;
           updateHud(
-            { top2Text: formatTop2Text(hudLbl1, hudProb1, hudLbl2, secondProb) },
+            {
+              top2Text: formatTop2Text(
+                displaySpellLabel(rawLabel),
+                bestProb,
+                displaySpellLabel(secondLabelRaw),
+                secondProb
+              )
+            },
             evalNow
           );
 
           latestDescriptorSnapshot = Object.freeze({
             level: visionEngine ? visionEngine.level : 2,
-            source: 'alphabet_lsp',
+            source: 'alphabet_lsp_3d',
             gestureId: resolvedLabel ? `spell:${resolvedLabel}` : null,
-            wristSteady: handIsQuiet,
-            confidence: resolvedScore || effectiveProb,
+            trajectory: trajectoryState.label,
+            confidence: resolvedScore || bestProb,
             timestamp: evalNow
           });
 
-          feedSpellLetter(resolvedLabel, resolvedScore, evalNow, { isDynamic });
+          feedSpellLetter(resolvedLabel, resolvedScore, evalNow);
         })
         .catch((err) => {
-          console.warn('[Cámara IA · Alfabeto]', err);
+          console.warn('[Cámara IA · Alfabeto 3D]', err);
         })
         .finally(() => {
           isAlphabetInferring = false;
@@ -3482,7 +3382,8 @@
 
         smoothedHandSlots.Left = null;
         smoothedHandSlots.Right = null;
-        alphaFeatureRawEma = null;
+        smoothedWorldSlots.Left = null;
+        smoothedWorldSlots.Right = null;
         trailPoints.length = 0;
         wristMacroBuffer.length = 0;
         motionBuffer.length = 0;
@@ -3491,6 +3392,7 @@
         spellTrackBuffer.length = 0;
         resetDynamicCandidate();
         resetSpellCandidate();
+        resetTrajectory();
         prevPalmOrientation = null;
         feedGesture(null, 0, now);
         if (sentenceTokens.length > 0) {
@@ -3531,6 +3433,21 @@
         ? smoothLandmarksEMA(smoothedHandSlots.Right, assigned.Right, HAND_EMA_ALPHA)
         : null;
 
+      if (rawLandmarks.length === 1 && Array.isArray(allWorldLandmarks[0]) && allWorldLandmarks[0].length >= 21) {
+        const primaryWorldSide = assigned.Right ? 'Right' : 'Left';
+        const otherSide = primaryWorldSide === 'Right' ? 'Left' : 'Right';
+        smoothedWorldSlots[primaryWorldSide] = smoothLandmarksEMA(
+          smoothedWorldSlots[primaryWorldSide],
+          allWorldLandmarks[0],
+          HAND_EMA_ALPHA,
+          0.5
+        );
+        smoothedWorldSlots[otherSide] = null;
+      } else {
+        smoothedWorldSlots.Left = null;
+        smoothedWorldSlots.Right = null;
+      }
+
       const smoothedHands = [];
       const smoothedHandedness = [];
       ['Right', 'Left'].forEach((side) => {
@@ -3542,6 +3459,13 @@
       });
 
       const handsForFrame = smoothedHands.length ? smoothedHands : rawLandmarks;
+      if (handsForFrame.length === 1) {
+        const h0 = handsForFrame[0];
+        const h0Aspect = h0.map((p) => ({ x: p.x * aspect, y: p.y }));
+        const palm0 = Math.hypot(h0Aspect[9].x - h0Aspect[0].x, h0Aspect[9].y - h0Aspect[0].y) || 0.1;
+        if (spellTrackBuffer.length >= 6) spellTrackBuffer.shift();
+        spellTrackBuffer.push({ palmSize: palm0, landmarks: h0Aspect });
+      }
       const quickSteady = isWristSteady(spellTrackBuffer, 5);
       const bio = analyzeBiomechanics(poseForFrame, handsForFrame, quickSteady, aspect);
 
@@ -3559,7 +3483,7 @@
       });
 
       const activeTf = tfModels || loadedTfModels;
-      if (activeTf && (activeTf.dynamic || activeTf.alphabet)) {
+      if (activeTf && (activeTf.dynamic || activeTf.alphabet || activeTf.trajectory)) {
         tfModels = activeTf;
 
         // Prioridad 1 (Emergencia): detección ILY ligera sin ejecutar el clasificador geométrico completo
@@ -3592,6 +3516,7 @@
         if (bio.activity === 'reposo') {
           resetDynamicCandidate();
           resetSpellCandidate();
+          resetTrajectory();
           setProgress(0);
           if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
           updateHud(
@@ -3611,6 +3536,7 @@
         if (handsForFrame.length >= 2) {
           lastLetterConfirmedAt = 0;
           wristMacroBuffer.length = 0;
+          resetTrajectory();
           if (spellCandidate.label || spellTrackBuffer.length > 0) {
             resetSpellCandidate();
             spellTrackBuffer.length = 0;
@@ -3647,12 +3573,24 @@
         );
 
         const smoothedResults = { landmarks: handsForFrame, handedness: smoothedHandedness };
-        // Prioridad 2 (Vocabulario dinámico · 118 señas, pausada en deletreo activo) + Prioridad 3 (Alfabeto A–Z + Ñ)
+        // Prioridad 2 (Vocabulario dinámico · 118 señas) + Prioridad 3 (Micro-GRU trayectorias + MLP 90D)
         evaluateDynamicWordsTf(smoothedResults, now, handsForFrame.length, bio, {
           pauseWordDispatch: spellingSessionActive
         });
-        if (handsForFrame.length === 1 && dynCandidate.streak === 0 && activeTf.alphabet) {
-          evaluateAlphabetTf(handsForFrame[0], aspect, bio, now);
+        if (handsForFrame.length === 1 && dynCandidate.streak === 0 && (activeTf.alphabet || activeTf.trajectory)) {
+          const primarySide = smoothedHandSlots.Right ? 'Right' : 'Left';
+          const worldFor90 =
+            smoothedWorldSlots[primarySide] ||
+            handsForFrame[0].map((p) => ({ x: p.x * aspect, y: p.y, z: (p.z || 0) * aspect }));
+          const raw90 = extractHand90Features(worldFor90, primarySide);
+          const palmNormal3d = [raw90[78], raw90[79], raw90[80]];
+          if (activeTf.trajectory) {
+            pushTrajectoryFrame(handsForFrame[0], primarySide, aspect, palmNormal3d);
+            evaluateTrajectoryGru();
+          }
+          if (activeTf.alphabet) {
+            evaluateAlphabetTf(raw90, now);
+          }
         }
         return;
       }
@@ -3896,6 +3834,7 @@
       sentenceTokens.push({ id: `spell:${SPACE_TOKEN_LABEL}`, kind: 'space', text: ' ' });
       lastLetterConfirmedAt = performance.now();
       resetSpellCandidate();
+      resetTrajectory();
       renderSentence();
       sentNote.textContent = 'Espacio insertado. Continúa deletreando la siguiente palabra.';
       sentNote.hidden = false;
@@ -3921,6 +3860,7 @@
       spellTrackBuffer.length = 0;
       resetDynamicCandidate();
       resetSpellCandidate();
+      resetTrajectory();
       sentNote.textContent = 'Texto borrado. Listo para una nueva seña o deletreo.';
       sentNote.hidden = false;
     }
@@ -4108,7 +4048,6 @@
         btnMirror.classList.toggle('is-active', mirrorEnabled);
         btnMirror.setAttribute('aria-pressed', String(mirrorEnabled));
         stage.classList.toggle('is-unmirrored', !mirrorEnabled);
-        alphaFeatureRawEma = null;
       });
     }
 
@@ -4173,7 +4112,7 @@
       visionEngine = null;
       enginePromise = null;
       if (loadedTfModels) {
-        [loadedTfModels.dynamic, loadedTfModels.alphabet].forEach((entry) => {
+        [loadedTfModels.dynamic, loadedTfModels.alphabet, loadedTfModels.trajectory].forEach((entry) => {
           if (entry && entry.model && typeof entry.model.dispose === 'function') {
             try {
               entry.model.dispose();

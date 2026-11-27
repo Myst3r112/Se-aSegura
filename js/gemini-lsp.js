@@ -235,7 +235,7 @@
   async function refineLspSentence({ tokens = [], rawText = '', sector = '', procedure = '', timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     const fallback = String(rawText || '').trim();
     const cfg = getConfig();
-    if (!fallback || !cfg.active) {
+    if (!fallback || !cfg.active || window.location.protocol === 'file:' || navigator.onLine === false) {
       return { text: fallback, corrected: false, source: 'local' };
     }
 

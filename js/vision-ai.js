@@ -35,14 +35,14 @@
   const LEGACY_HANDS_SCRIPT_URL = `${LEGACY_HANDS_BASE_URL}hands.js`;
 
   const CONFIRM_MS = 320; // confirmación ágil tras voto por mayoría (respaldo geométrico)
-  const CONFIRM_FAST_MS = 210; // saludo activo / emergencia inmediata
+  const CONFIRM_FAST_MS = 210; // saludo activo
   const CONFIRM_INDEX_MS = 520; // espera breve para distinguir quieto vs trayectoria
-  const CONFIRM_SPELL_MS = 500; // estabilización de letra estática (~0.5 s)
-  const COOLDOWN_MS = 1200; // pausa antes de aceptar nuevamente la misma seña (~1.2 s)
-  const SPELL_COOLDOWN_MS = 750; // pausa breve tras confirmar una letra
+  const CONFIRM_SPELL_MS = 330; // estabilización ágil de letra estática (~0.35 s)
+  const COOLDOWN_MS = 900; // pausa antes de aceptar nuevamente la misma seña (~0.9 s)
+  const SPELL_COOLDOWN_MS = 500; // pausa breve tras confirmar una letra (~0.5 s)
   const GRACE_MS = 180; // tolerancia a micro-parpadeos
   const HAND_DROPOUT_GRACE_FRAMES = 5; // tolerancia ~160 ms sin vaciar ventana deslizante
-  const HAND_EMA_ALPHA = 0.55; // suavizado ligero EMA de landmarks de manos
+  const HAND_EMA_ALPHA = 0.65; // suavizado ligero EMA (baja inercia al cambiar entre letras)
   const POSE_EMA_ALPHA = 0.45; // suavizado ligero EMA de landmarks de torso
   const HAND_FEATURES_90 = 90; // Modelo Estático 3D: 63 coords + 15 ángulos + 3 normal + 9 desambiguación
   const TRAJ_SEQ_LEN = 16; // Micro-GRU dinámica [1, 16, 12]
@@ -82,7 +82,8 @@
   const DYNAMIC_NUM_FEATURES = 159;
   const DYNAMIC_STREAK_REQUIRED = 2; // 2 ventanas consecutivas (>= threshold) antes de confirmar
   const VOTE_WINDOW = 6; // suavizado temporal por mayoría
-  const AUTO_SEND_PAUSE_MS = 6500; // pausa larga (>=6 s) solo para señas de palabra; deletreo espera envío manual
+  const AUTO_SEND_PAUSE_MS = 3200; // pausa sin manos (~3.2 s) solo para señas de palabra; deletreo espera envío manual
+  const AUTO_POLISH_DEBOUNCE_MS = 800; // pulido gramatical automático LSP en segundo plano (~800 ms)
   const LOAD_TIMEOUT_MS = 30000;
   const SCRIPT_TIMEOUT_MS = 15000;
 
@@ -125,14 +126,12 @@
   const STATUS_TEXT = {
     idle: 'Cámara inactiva',
     loading: 'Cargando modelo…',
-    live: 'En vivo',
-    simulation: 'Modo prueba'
+    live: 'En vivo'
   };
 
   const PLACEHOLDER_TEXT = {
     idle: 'Pulsa “Activar Cámara” y muestra una o ambas manos. El video se procesa en tu dispositivo: no se graba ni se envía.',
-    loading: 'Cargando percepción 3D de señas, orientación y expresión... Permite el acceso a la cámara si el navegador lo solicita.',
-    simulation: 'Modo prueba: la cámara no está en uso. Elige una seña rápida o letra LSP para probar la traducción.'
+    loading: 'Cargando percepción 3D de señas, orientación y expresión... Permite el acceso a la cámara si el navegador lo solicita.'
   };
 
   const PALM_LABEL = {
@@ -205,14 +204,6 @@
       label: 'Dolor / Malestar médico',
       phrase: 'siento dolor, necesito atención médica',
       hands: 'Pecho + expresión'
-    },
-    {
-      id: 'auxilio',
-      emoji: '\u{1F91F}',
-      label: 'Seña de auxilio (ILY / mano-mano)',
-      phrase: 'necesito ayuda urgente',
-      hands: '1 o 2 manos',
-      urgent: true
     },
     { id: 'letra_a', kind: 'letter', letter: 'A', emoji: 'A', label: 'Letra A', hands: '1 mano', hint: 'puño cerrado con pulgar recto al costado del índice' },
     { id: 'letra_b', kind: 'letter', letter: 'B', emoji: 'B', label: 'Letra B', hands: '1 mano', hint: 'cuatro dedos rectos unidos y pulgar cruzado en la palma' },
@@ -768,8 +759,6 @@
         thumbToMiddleMcp < 0.60 ||
         thumbToIndexMcp < 0.56;
       id = thumbAcrossPalm && avgGap < 0.30 ? 'letra_b' : 'palma';
-    } else if (I && !M && !R && K) {
-      id = 'auxilio';
     } else if (I && M && R && !K) {
       id = 'letra_w';
     } else if (I && M && !R && !K) {
@@ -866,26 +855,10 @@
     const valid = handEntries.filter((entry) => entry && entry.id);
     if (valid.length === 0) return null;
 
-    // 1. Seguridad prioritaria: ILY en cualquier mano O contacto mano-mano (puño sobre palma)
-    const auxHands = valid.filter((entry) => entry.id === 'auxilio');
-    if (auxHands.length > 0) {
-      const bestAux = auxHands.reduce((best, cur) => ((cur.score || 0) > (best.score || 0) ? cur : best));
-      return { id: 'auxilio', score: typeof bestAux.score === 'number' ? bestAux.score : 0.9 };
-    }
-
+    // 1. Señas de dos manos (palmas, pulgares, DNI)
     if (valid.length >= 2) {
       const [h0, h1] = valid;
       const avgScore = ((h0.score || 0.9) + (h1.score || 0.9)) / 2;
-      const isFist = (id) => id === 'puno' || id === 'letra_s' || id === 'letra_a';
-      const isFlatPalm = (id) => id === 'palma' || id === 'letra_b';
-      if (
-        spatial &&
-        spatial.contact &&
-        spatial.contact.manoMano &&
-        ((isFist(h0.id) && isFlatPalm(h1.id)) || (isFlatPalm(h0.id) && isFist(h1.id)))
-      ) {
-        return { id: 'auxilio', score: avgScore };
-      }
       if (h0.id === 'palma' && h1.id === 'palma') {
         return { id: 'dos_palmas', score: avgScore };
       }
@@ -1159,51 +1132,10 @@
   }
 
   /**
-   * Atajo ligero de emergencia (Prioridad 1): detecta la seña ILY ('auxilio': índice y meñique
-   * extendidos, medio y anular cerrados) sin ejecutar el clasificador geométrico completo.
-   */
-  function detectIlyEmergency(landmarks, worldLandmarks = null, aspect = 1) {
-    const hasWorld = Array.isArray(worldLandmarks) && worldLandmarks.length >= 21;
-    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
-    let pts = null;
-    if (hasWorld) {
-      pts = worldLandmarks;
-    } else if (Array.isArray(landmarks) && landmarks.length >= 21) {
-      pts = landmarks.map((p) => ({
-        x: p.x * safeAspect,
-        y: p.y,
-        z: typeof p.z === 'number' ? p.z * safeAspect : 0
-      }));
-    } else {
-      return false;
-    }
-
-    const palm = dist3(pts[0], pts[9]) || 1e-6;
-    const indexExtended =
-      angleDeg(pts[5], pts[6], pts[7]) >= 142 &&
-      angleDeg(pts[6], pts[7], pts[8]) >= 130 &&
-      dist3(pts[0], pts[8]) > dist3(pts[0], pts[6]) + 0.12 * palm;
-    const pinkyExtended =
-      angleDeg(pts[17], pts[18], pts[19]) >= 138 &&
-      angleDeg(pts[18], pts[19], pts[20]) >= 128 &&
-      dist3(pts[0], pts[20]) > dist3(pts[0], pts[18]) + 0.10 * palm;
-    if (!indexExtended || !pinkyExtended) return false;
-
-    const middleCurled =
-      angleDeg(pts[9], pts[10], pts[11]) <= 122 ||
-      dist3(pts[0], pts[12]) < dist3(pts[0], pts[10]) + 0.05 * palm;
-    const ringCurled =
-      angleDeg(pts[13], pts[14], pts[15]) <= 122 ||
-      dist3(pts[0], pts[16]) < dist3(pts[0], pts[14]) + 0.05 * palm;
-
-    return middleCurled && ringCurled && dist3(pts[8], pts[12]) > 0.25 * palm;
-  }
-
-  /**
-   * Suavizado exponencial ligero (EMA) sobre landmarks de MediaPipe (manos ~0.55, torso ~0.45)
+   * Suavizado exponencial ligero (EMA) sobre landmarks de MediaPipe (manos ~0.65, torso ~0.45)
    * reduciendo el temblor de cámara web sin añadir latencia y reseteando en entradas nuevas.
    */
-  function smoothLandmarksEMA(prevPts, nextPts, alpha = 0.55, jumpResetDist = 0.35) {
+  function smoothLandmarksEMA(prevPts, nextPts, alpha = HAND_EMA_ALPHA, jumpResetDist = 0.35) {
     if (!Array.isArray(nextPts) || nextPts.length === 0) return null;
     const clonePts = (pts) =>
       pts.map((p) => ({
@@ -1534,6 +1466,7 @@
         indexOnlyExtended: false,
         pinkyOnlyExtended: false,
         ringPinkyCurled: false,
+        middleStrictCurled: false,
         pointingDownTwoFingers: false,
         pointingDownIndexThumb: false,
         enieFoldedPosture: false,
@@ -1559,6 +1492,7 @@
     const ringCurled = ringAng <= 125 && dist3(pts[16], pts[0]) <= dist3(pts[14], pts[0]) * 1.08;
     const pinkyCurled = pinkyAng <= 125 && dist3(pts[20], pts[0]) <= dist3(pts[18], pts[0]) * 1.08;
     const middleCurled = midAng <= 125 && dist3(pts[12], pts[0]) <= dist3(pts[10], pts[0]) * 1.08;
+    const middleStrictCurled = midAng <= 108 && dist3(pts[12], pts[0]) <= dist3(pts[10], pts[0]) * 1.07;
     const indexCurled = idxAng <= 125 && dist3(pts[8], pts[0]) <= dist3(pts[6], pts[0]) * 1.08;
     const indexOnlyExtended = (
       idxAng >= 145 &&
@@ -1573,18 +1507,24 @@
     const twoFingerSpan = dist3(pts[8], pts[12]);
     const latDot = (pts[12].x - pts[8].x) * (pts[9].x - pts[5].x) + (pts[12].y - pts[8].y) * (pts[9].y - pts[5].y);
 
+    // P: en cámara web/LSP el índice puede ir horizontal o diagonal mientras el medio apunta hacia abajo y supera claramente a anular/meñique cerrados
     const pointingDownTwoFingers = (
-      idxAng >= 120 && midAng >= 120 &&
-      ringAng <= 130 && pinkyAng <= 130 &&
-      pts[8].y > pts[5].y + 0.08 &&
-      pts[12].y > pts[9].y + 0.08
+      idxAng >= 118 &&
+      midAng >= 115 &&
+      dist3(pts[12], pts[0]) > dist3(pts[10], pts[0]) * 1.08 &&
+      pts[12].y > pts[9].y + 0.08 &&
+      pts[8].y >= pts[5].y - 0.12 &&
+      ringAng <= 128 &&
+      pinkyAng <= 128 &&
+      dist3(pts[12], pts[0]) > Math.max(dist3(pts[16], pts[0]), dist3(pts[20], pts[0]))
     );
 
+    // Q: exige dedo medio estrictamente doblado contra la palma (no extendido como en P)
     const pointingDownIndexThumb = (
       idxAng >= 122 &&
       pts[8].y > pts[5].y + 0.08 &&
       pts[4].y > pts[2].y + 0.03 &&
-      midAng <= 130 &&
+      middleStrictCurled &&
       ringAng <= 130 &&
       pinkyAng <= 130
     );
@@ -1599,6 +1539,7 @@
       indexOnlyExtended,
       pinkyOnlyExtended: pinkyExt && indexCurled && middleCurled && ringCurled,
       ringPinkyCurled: ringCurled && pinkyCurled,
+      middleStrictCurled,
       pointingDownTwoFingers,
       pointingDownIndexThumb,
       enieFoldedPosture,
@@ -1614,7 +1555,9 @@
    */
   function refineStatic3DLabel(topCandidates, pts, postures = null) {
     if (!Array.isArray(topCandidates) || !topCandidates.length || !Array.isArray(pts) || pts.length < 21) {
-      return topCandidates && topCandidates[0] ? { label: topCandidates[0].label, score: topCandidates[0].score, refined: false } : null;
+      return topCandidates && topCandidates[0]
+        ? { label: topCandidates[0].label, score: Math.min(0.99, topCandidates[0].score), refined: false }
+        : null;
     }
     const probMap = Object.create(null);
     topCandidates.forEach((item) => {
@@ -1632,42 +1575,59 @@
       const tipDist = geom.twoFingerSpan;
       const uLimit = Math.max(0.36, geom.knuckleSpan * 1.48);
       if (geom.latDot > 0.0 && tipDist <= uLimit) {
-        return { label: 'U', score: Math.max(best.score, pU + 0.20, sumUVR * 0.88, 0.74), refined: best.label !== 'U' };
+        return {
+          label: 'U',
+          score: Math.min(0.99, Math.max(best.score, pU + 0.20, sumUVR * 0.88, 0.74)),
+          refined: best.label !== 'U'
+        };
       }
       if (best.label === 'U' || best.label === 'V' || best.label === 'R') {
         if (geom.latDot <= 0.0) {
-          return { label: 'R', score: Math.max(best.score, pR + 0.15, sumUVR * 0.85, 0.74), refined: best.label !== 'R' };
+          return {
+            label: 'R',
+            score: Math.min(0.99, Math.max(best.score, pR + 0.15, sumUVR * 0.85, 0.74)),
+            refined: best.label !== 'R'
+          };
         }
         if (tipDist > 0.38) {
-          return { label: 'V', score: Math.max(best.score, pV + 0.12, sumUVR * 0.82), refined: best.label !== 'V' };
+          return {
+            label: 'V',
+            score: Math.min(0.99, Math.max(best.score, pV + 0.12, sumUVR * 0.82)),
+            refined: best.label !== 'V'
+          };
         }
       }
     }
 
-    // 2. Desambiguación de P (dedos índice y medio apuntando hacia abajo, anular y meñique cerrados)
+    // 2. Desambiguación de P (dedo medio hacia abajo más extendido que anular/meñique cerrados)
     const pCluster = ['P', 'K', 'Q', 'H', 'G'];
     const sumPKQHG = pCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
     if (geom.pointingDownTwoFingers && sumPKQHG >= 0.45) {
       return {
         label: 'P',
-        score: Math.max(best.score, (probMap.P || 0) + 0.24, sumPKQHG * 0.88, 0.74),
+        score: Math.min(0.99, Math.max(best.score, (probMap.P || 0) + 0.24, sumPKQHG * 0.88, 0.74)),
         refined: best.label !== 'P'
       };
     }
 
-    // 3. Desambiguación de Q (índice y pulgar apuntando hacia abajo, medio/anular/meñique cerrados)
+    // 3. Desambiguación de Q (índice y pulgar hacia abajo; jamás sobreescribe P si el dedo medio no está recogido)
     const qCluster = ['Q', 'G', 'P', 'D', 'X'];
     const qInTop3 = topCandidates.slice(0, 3).some((c) => c && c.label === 'Q');
     const sumQGPDX = qCluster.reduce((acc, lbl) => acc + (probMap[lbl] || 0), 0);
-    if (!geom.pointingDownTwoFingers && geom.pointingDownIndexThumb && (qInTop3 || sumQGPDX >= 0.45)) {
+    if (
+      !geom.pointingDownTwoFingers &&
+      geom.middleStrictCurled !== false &&
+      geom.pointingDownIndexThumb &&
+      (qInTop3 || sumQGPDX >= 0.45)
+    ) {
       return {
         label: 'Q',
-        score: Math.max(best.score, (probMap.Q || 0) + 0.24, sumQGPDX * 0.88, 0.74),
+        score: Math.min(0.99, Math.max(best.score, (probMap.Q || 0) + 0.24, sumQGPDX * 0.88, 0.74)),
         refined: best.label !== 'Q'
       };
     }
 
-    return { label: best.label, score: best.score, refined: false };
+    return { label: best.label, score: Math.min(0.99, best.score), refined: false };
   }
 
   /** Evalúa firmas geométricas 3D/2D de movimiento para `Ñ`, `Z` y `J` sobre `trajHistory` escalando X por aspect. */
@@ -2165,7 +2125,6 @@
     smoothLandmarksEMA,
     analyzeBiomechanics,
     detectWideArmMotion,
-    detectIlyEmergency,
     isWristSteady,
     humanizeGloss,
     composeSentence,
@@ -2393,30 +2352,22 @@
     const placeholder = $('vision-placeholder');
     const placeholderText = $('vision-placeholder-text');
     const btnStart = $('btn-vision-start');
-    const btnSimulate = $('btn-vision-simulate');
     const btnSpeak = $('btn-vision-speak');
     const btnSpace = $('btn-vision-space');
     const btnUndo = $('btn-vision-undo');
     const btnClear = $('btn-vision-clear');
-    const btnPolish = $('btn-vision-polish');
-    const btnEscalate = $('btn-vision-escalate');
-    const geminiBadgeEl = $('vision-gemini-badge');
-    const simBox = $('vision-simulation');
-    const simGrid = $('vision-gesture-grid');
-    const lettersBar = $('vision-letters-bar');
     const guideList = $('vision-guide-list');
     const letterRefBox = $('vision-letter-ref');
     const sentenceEl = $('vision-sentence');
     const lastDetectEl = $('vision-last-detect');
     const sentNote = $('vision-sent-note');
-    const urgentHint = $('vision-urgent-hint');
     const progressBar = $('vision-progress');
     const progressFill = $('vision-progress-fill');
     const progressLabel = $('vision-progress-label');
     const progressValue = $('vision-progress-value');
 
     if (
-      !panel || !video || !canvas || !btnStart || !btnSimulate || !btnSpeak || !btnUndo || !btnEscalate ||
+      !panel || !video || !canvas || !btnStart || !btnSpeak || !btnUndo ||
       !sentenceEl || !lastDetectEl
     ) {
       return;
@@ -2424,14 +2375,13 @@
 
     const ctx = canvas.getContext('2d');
     const btnStartLabel = btnStart.querySelector('span') || btnStart;
-    const btnSimulateLabel = btnSimulate.querySelector('span') || btnSimulate;
     const DEFAULT_SENTENCE = 'Muestra una seña y mantenla un instante para empezar la oración.';
     const DEFAULT_LAST_DETECT = 'Última seña: — · Confianza: —';
     const DEFAULT_PROGRESS_LABEL = 'Reconocimiento unificado LSP (118 señas + alfabeto)';
     const lowPowerDevice =
       window.matchMedia('(max-width: 767px)').matches || (navigator.hardwareConcurrency || 4) <= 2;
 
-    let mode = 'idle'; // idle | loading | live | simulation
+    let mode = 'idle'; // idle | loading | live
     let sessionToken = 0;
     let stream = null;
     // visionEngine: { type: 'tasks', level: 1|2, handLandmarker, poseLandmarker, faceLandmarker } | { type: 'legacy', level: 3, hands }
@@ -2463,9 +2413,11 @@
     let lastLetterConfirmedAt = 0;
     let missingHandFrames = 0;
     let speechTimer = null;
+    let autoPolishTimer = 0;
+    let polishRequestId = 0;
     let sentenceTokens = [];
     let polishedSentenceText = '';
-    let isRefiningLsp = false;
+    let polishedTokensSignature = '';
     let dynamicEvalCounter = 0;
     let isDynamicInferring = false;
     let isAlphabetInferring = false;
@@ -2528,7 +2480,7 @@
         hudActivityEl.setAttribute('data-tone', activityTone || 'idle');
       }
       if (hudTop2El && typeof top2Text === 'string' && top2Text !== lastHudTop2Text) {
-        if (now - lastHudTop2At >= HUD_TOP2_THROTTLE_MS || top2Text === 'Enfoque: esperando seña…' || top2Text.includes('Emergencia')) {
+        if (now - lastHudTop2At >= HUD_TOP2_THROTTLE_MS || top2Text === 'Enfoque: esperando seña…') {
           lastHudTop2Text = top2Text;
           lastHudTop2At = now;
           hudTop2El.textContent = top2Text;
@@ -2600,19 +2552,45 @@
       }
       const cameraOn = nextMode === 'loading' || nextMode === 'live';
       btnStartLabel.textContent = cameraOn ? 'Detener Cámara' : 'Activar Cámara';
-      btnSimulateLabel.textContent = nextMode === 'simulation' ? 'Salir de simulación' : 'Probar sin cámara';
-      simBox.hidden = nextMode !== 'simulation';
       syncHudVisibility();
     }
 
-    function showNotice(message) {
+    function showNotice(message, { showFallbackAction = false } = {}) {
+      if (!notice) return;
       if (!message) {
         notice.hidden = true;
-        notice.textContent = '';
+        notice.replaceChildren();
         return;
       }
-      notice.textContent = message;
+      if (!showFallbackAction) {
+        notice.textContent = message;
+        notice.hidden = false;
+        return;
+      }
+      const textSpan = document.createElement('span');
+      textSpan.className = 'vision-notice-text';
+      textSpan.textContent = message;
+
+      const switchBtn = document.createElement('button');
+      switchBtn.type = 'button';
+      switchBtn.className = 'btn btn-secondary btn-sm vision-notice-action';
+      switchBtn.textContent = 'Cambiar a Texto / Lectura';
+      switchBtn.addEventListener('click', () => {
+        showNotice('');
+        stopCamera();
+        if (window.SenaSegura && typeof window.SenaSegura.setChannel === 'function') {
+          window.SenaSegura.setChannel('texto');
+        }
+      });
+
+      notice.replaceChildren(textSpan, switchBtn);
       notice.hidden = false;
+    }
+
+    function failCameraToNotice(message) {
+      stopCamera({ keepStatus: true });
+      setStatus('idle');
+      showNotice(message || 'No se pudo acceder a la cámara.', { showFallbackAction: true });
     }
 
     function setProgress(fraction) {
@@ -2624,21 +2602,70 @@
       progressBar.setAttribute('aria-valuenow', String(pct));
     }
 
-    function setUrgent(isUrgent) {
-      btnEscalate.classList.toggle('is-highlighted', isUrgent);
-      urgentHint.hidden = !isUrgent;
+    function getTokensSignature(tokens) {
+      if (!Array.isArray(tokens) || !tokens.length) return '';
+      return tokens.map((token) => `${token.kind}:${token.text || ''}:${token.wordKey || ''}`).join('|');
     }
 
-    function syncGeminiUi() {
-      const geminiApi = window.SenaSeguraGemini;
-      const active = Boolean(geminiApi && typeof geminiApi.isConfigured === 'function' && geminiApi.isConfigured());
-      if (geminiBadgeEl) geminiBadgeEl.hidden = !active;
-
-      const hasTokens = sentenceTokens.length > 0;
-      if (btnPolish) {
-        btnPolish.hidden = !active;
-        btnPolish.disabled = !active || !hasTokens || isRefiningLsp;
+    function countTrailingSpelledLetters(tokens) {
+      if (!Array.isArray(tokens) || !tokens.length) return 0;
+      let count = 0;
+      for (let i = tokens.length - 1; i >= 0; i -= 1) {
+        if (tokens[i].kind !== 'letter') break;
+        count += 1;
       }
+      return count;
+    }
+
+    function cancelAutoPolish() {
+      if (autoPolishTimer) {
+        clearTimeout(autoPolishTimer);
+        autoPolishTimer = 0;
+      }
+      polishRequestId += 1;
+    }
+
+    function runAutoPolish(reason) {
+      autoPolishTimer = 0;
+      const geminiApi = window.SenaSeguraGemini;
+      if (!geminiApi || typeof geminiApi.isConfigured !== 'function' || !geminiApi.isConfigured()) return;
+      if (sentenceTokens.length < 2) return;
+      if (reason === 'spell' && countTrailingSpelledLetters(sentenceTokens) < 3) return;
+      const snapshotTokens = sentenceTokens.slice();
+      const targetSignature = getTokensSignature(snapshotTokens);
+      if (!targetSignature || polishedTokensSignature === targetSignature) return;
+      const baseText = composeSentence(snapshotTokens, activeSentenceExpression);
+      if (!baseText) return;
+      const reqId = ++polishRequestId;
+      const sessionAtCall = sessionToken;
+      const bridge = window.SenaSegura;
+      const ctxInfo = bridge && typeof bridge.getContext === 'function' ? bridge.getContext() : {};
+      geminiApi.refineLspSentence({
+        tokens: snapshotTokens,
+        rawText: baseText,
+        sector: ctxInfo.sector || '',
+        procedure: ctxInfo.procedure || '',
+        timeoutMs: 2200
+      }).then((result) => {
+        if (reqId !== polishRequestId || sessionAtCall !== sessionToken) return;
+        if (getTokensSignature(sentenceTokens) !== targetSignature) return;
+        if (result && result.text && result.text.trim()) {
+          polishedSentenceText = result.text.trim();
+          polishedTokensSignature = targetSignature;
+          renderSentence();
+        }
+      }).catch(() => {});
+    }
+
+    function scheduleAutoPolish(reason) {
+      cancelAutoPolish();
+      const geminiApi = window.SenaSeguraGemini;
+      if (!geminiApi || typeof geminiApi.isConfigured !== 'function' || !geminiApi.isConfigured()) return;
+      if (sentenceTokens.length < 2) return;
+      if (reason === 'spell' && countTrailingSpelledLetters(sentenceTokens) < 3) return;
+      autoPolishTimer = setTimeout(() => {
+        runAutoPolish(reason);
+      }, AUTO_POLISH_DEBOUNCE_MS);
     }
 
     function renderSentence() {
@@ -2653,14 +2680,14 @@
       if (btnSpace) btnSpace.disabled = !hasTokens || hasTrailingSpace;
       btnUndo.disabled = !canReset;
       if (btnClear) btnClear.disabled = !canReset;
-      syncGeminiUi();
     }
 
     function resetOutput() {
+      cancelAutoPolish();
       lastConfirmed = null;
       sentenceTokens = [];
       polishedSentenceText = '';
-      isRefiningLsp = false;
+      polishedTokensSignature = '';
       activeSentenceExpression = 'neutro';
       latestDescriptorSnapshot = null;
       lastStaticConfirmed.label = null;
@@ -2669,7 +2696,6 @@
       lastDetectEl.textContent = DEFAULT_LAST_DETECT;
       sentNote.hidden = true;
       sentNote.textContent = '';
-      setUrgent(false);
       setProgress(0);
       if (progressLabel) progressLabel.textContent = DEFAULT_PROGRESS_LABEL;
       renderSentence();
@@ -2754,7 +2780,6 @@
       if (stage) stage.style.removeProperty('aspect-ratio');
       updateHandsCount(0);
       resetDetection();
-      setUrgent(false);
       if (!keepStatus) setStatus('idle');
     }
 
@@ -3014,13 +3039,6 @@
       });
     }
 
-    function enterSimulation(message) {
-      stopCamera({ keepStatus: true });
-      resetOutput();
-      showNotice(message || '');
-      setStatus('simulation');
-    }
-
     async function startCamera() {
       if (mode === 'loading' || mode === 'live') return;
       stopCamera({ keepStatus: true });
@@ -3062,14 +3080,14 @@
 
       if (camResult.status === 'rejected') {
         console.warn('[Cámara IA]', camResult.reason);
-        enterSimulation(`${cameraErrorMessage(camResult.reason)} Usa la prueba sin cámara para continuar.`);
+        failCameraToNotice(cameraErrorMessage(camResult.reason));
         return;
       }
       stream = camResult.value;
 
       if (libResult.status === 'rejected') {
         console.warn('[Cámara IA]', libResult.reason);
-        enterSimulation(`${modelErrorMessage(libResult.reason)} Usa la prueba sin cámara para continuar.`);
+        failCameraToNotice(modelErrorMessage(libResult.reason));
         return;
       }
       visionEngine = libResult.value;
@@ -3112,7 +3130,7 @@
       } catch (err) {
         console.warn('[Cámara IA]', err);
         if (token !== sessionToken) return;
-        enterSimulation('No se pudo mostrar el video de la cámara. Usa la prueba sin cámara para continuar.');
+        failCameraToNotice('No se pudo mostrar el video de la cámara.');
       }
     }
 
@@ -3190,12 +3208,12 @@
               })
               .catch(() => {
                 if (tokenAtFail !== sessionToken) return;
-                enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+                failCameraToNotice('Ocurrió un error al analizar la cámara.');
               });
             return;
           }
           if (running) {
-            enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+            failCameraToNotice('Ocurrió un error al analizar la cámara.');
           }
         }
       } else if (visionEngine.type === 'legacy' && !isLegacyProcessing) {
@@ -3205,7 +3223,7 @@
           .catch((err) => {
             console.warn('[Cámara IA]', err);
             if (running) {
-              enterSimulation('Ocurrió un error al analizar la cámara. Usa la prueba sin cámara para continuar.');
+              failCameraToNotice('Ocurrió un error al analizar la cámara.');
             }
           })
           .then(() => {
@@ -3468,7 +3486,7 @@
 
       if (isDynamicInferring) return;
       dynamicEvalCounter += 1;
-      const evalStride = dynCandidate.streak > 0 ? 2 : 3;
+      const evalStride = dynCandidate.streak > 0 ? 1 : 2;
       if (dynamicEvalCounter % evalStride !== 0) return;
 
       const tokenAtCall = sessionToken;
@@ -3583,12 +3601,15 @@
               if (secondWord && secondWord !== word && secondProb >= 0.08) {
                 wordAlts.push({ label: secondWord, score: Number(secondProb.toFixed(3)) });
               }
+              cancelAutoPolish();
               polishedSentenceText = '';
+              polishedTokensSignature = '';
               sentenceTokens.push({ id: tokenId, kind: 'word', text: word, alts: wordAlts });
               lastDetectEl.textContent = `Última seña: ${word} · Confianza: ${pct}%`;
               renderSentence();
-              sentNote.textContent = 'Pausa ~6 s sin manos para enviar o pulsa “Enviar y leer al funcionario”.';
+              sentNote.textContent = 'Pausa ~3 s sin manos para enviar o pulsa “Enviar y leer al funcionario”.';
               sentNote.hidden = false;
+              scheduleAutoPolish('word');
             }
             dynamicSeqBuffer.splice(0, 12);
             resetDynamicCandidate();
@@ -3665,8 +3686,10 @@
             text: isSpace ? ' ' : spellCandidate.label,
             label: displayChar
           };
+          cancelAutoPolish();
           lastConfirmed = token;
           polishedSentenceText = '';
+          polishedTokensSignature = '';
           const pushedToken = { id: token.id, kind: token.kind, text: token.text };
           if (!isSpace && Array.isArray(spellCandidate.alts) && spellCandidate.alts.length > 0) {
             pushedToken.alts = spellCandidate.alts.slice(0, 3);
@@ -3676,6 +3699,7 @@
           lastDetectEl.textContent = `Última letra: ${displayChar} · Confianza: ${pct}%`;
           sentNote.textContent = 'Letra confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
           sentNote.hidden = false;
+          scheduleAutoPolish(isSpace ? 'space' : 'spell');
           resetDynamicCandidate();
         }
       }
@@ -3778,7 +3802,9 @@
           alts: [{ label, score: Number(score.toFixed(3)) }]
         });
       }
+      cancelAutoPolish();
       polishedSentenceText = '';
+      polishedTokensSignature = '';
       lastStaticConfirmed.label = null;
       lastStaticConfirmed.at = 0;
 
@@ -3790,6 +3816,7 @@
         : 'Letra con trazo confirmada. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.';
       sentNote.hidden = false;
       updateHud({ top2Text: formatTop2Text(label, score) }, now);
+      scheduleAutoPolish('spell');
 
       latestDescriptorSnapshot = Object.freeze({
         level: visionEngine ? visionEngine.level : 2,
@@ -4268,32 +4295,6 @@
       if (activeTf && (activeTf.dynamic || activeTf.alphabet || activeTf.trajectory)) {
         tfModels = activeTf;
 
-        // Prioridad 1 (Emergencia): detección ILY ligera sin ejecutar el clasificador geométrico completo
-        let ilyDetected = false;
-        for (let i = 0; i < rawLandmarks.length; i += 1) {
-          if (detectIlyEmergency(handsForFrame[i] || rawLandmarks[i], allWorldLandmarks[i] || null, aspect)) {
-            ilyDetected = true;
-            break;
-          }
-        }
-        if (ilyDetected) {
-          updateHud(
-            {
-              framingText: bio.framingLabel,
-              framingTone: bio.framingTone,
-              activityText: 'Prioridad urgente',
-              activityTone: 'urgent',
-              top2Text: 'Enfoque: “Auxilio (Emergencia)”'
-            },
-            now
-          );
-          feedGesture('auxilio', 0.94, now, { fastConfirm: true, meta: null });
-          return;
-        }
-        if (detection.id === 'auxilio') {
-          feedGesture(null, 0, now);
-        }
-
         // Smart Gating biomecánico: ignora manos descansando abajo fuera de zona de señado
         if (bio.activity === 'reposo') {
           resetDynamicCandidate();
@@ -4434,11 +4435,6 @@
         trajectory
       };
 
-      if (resolved && resolved.id === 'auxilio') {
-        feedGesture('auxilio', resolved.score, now, { fastConfirm: true, meta: frameMeta });
-        return;
-      }
-
       if (voteBuffer.length >= VOTE_WINDOW) voteBuffer.shift();
       voteBuffer.push(resolved ? { id: resolved.id, score: resolved.score } : { id: null, score: 0 });
       const smoothed = majorityVoteGesture(voteBuffer);
@@ -4501,7 +4497,7 @@
       }
 
       let targetMs = CONFIRM_MS;
-      if (fastConfirm || detection.id === 'auxilio') targetMs = CONFIRM_FAST_MS;
+      if (fastConfirm) targetMs = CONFIRM_FAST_MS;
       else if (detection.id === 'indice') targetMs = CONFIRM_INDEX_MS;
       const progress = Math.min(1, (now - detection.since) / targetMs);
       setProgress(progress);
@@ -4514,9 +4510,8 @@
     }
 
     function formatLastDetectLine(gesture, confidencePct, source, meta) {
-      const isSimulated = source === 'simulation';
-      if (isSimulated || !meta) {
-        return `Última seña: ${gesture.label} · Confianza: ${confidencePct}%${isSimulated ? ' (simulada)' : ''}`;
+      if (!meta) {
+        return `Última seña: ${gesture.label} · Confianza: ${confidencePct}%`;
       }
       const zoneText = (meta.spatial && ZONE_LABEL[meta.spatial.zone]) || 'Neutro';
       const exprCode = meta.nonManual ? meta.nonManual.expression : 'neutro';
@@ -4524,41 +4519,39 @@
       return `Última seña: ${gesture.label} · Palma: ${meta.palmText} · Zona: ${zoneText} · Confianza: ${confidencePct}%${exprTag}`;
     }
 
-    /** Flujo único (cámara y prueba): encadena la seña e integra expresión no manual en la oración. */
+    /** Flujo único de cámara: encadena la seña e integra expresión no manual en la oración. */
     function confirmGesture(id, confidencePct, source, meta = null) {
       const gesture = GESTURE_BY_ID[id];
       if (!gesture) return;
       lastConfirmed = gesture;
 
-      const isSimulated = source === 'simulation';
       if (meta && meta.nonManual && meta.nonManual.expression && meta.nonManual.expression !== 'neutro') {
         activeSentenceExpression = meta.nonManual.expression;
       }
 
       lastDetectEl.textContent = formatLastDetectLine(gesture, confidencePct, source, meta);
-      setUrgent(Boolean(gesture.urgent));
 
       const now = performance.now();
       const last = lastAddedAt[id];
-      const canAdd = isSimulated || typeof last !== 'number' || now - last >= COOLDOWN_MS;
+      const canAdd = typeof last !== 'number' || now - last >= COOLDOWN_MS;
       if (canAdd) {
         lastAddedAt[id] = now;
         const isLetter = gesture.kind === 'letter';
         const isSpace = gesture.kind === 'space';
+        cancelAutoPolish();
         polishedSentenceText = '';
+        polishedTokensSignature = '';
         sentenceTokens.push({
           id,
           kind: isSpace ? 'space' : (isLetter ? 'letter' : 'word'),
           text: isSpace ? ' ' : (isLetter ? gesture.letter : gesture.phrase)
         });
         renderSentence();
-        sentNote.textContent = isSimulated
-          ? 'Pulsa “Enviar y leer al funcionario” cuando la oración esté lista.'
-          : (isLetter || isSpace)
-            ? 'Letra añadida. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.'
-            : 'Baja las manos ~6 s para enviar o pulsa “Enviar y leer al funcionario”.';
+        sentNote.textContent = (isLetter || isSpace)
+          ? 'Letra añadida. Sigue deletreando, pulsa “Espacio” o “Enviar y leer al funcionario”.'
+          : 'Baja las manos ~3 s para enviar o pulsa “Enviar y leer al funcionario”.';
         sentNote.hidden = false;
-        if (gesture.urgent) sendSentence({ auto: true });
+        scheduleAutoPolish(isSpace ? 'space' : (isLetter ? 'spell' : 'word'));
       } else {
         renderSentence();
       }
@@ -4621,70 +4614,27 @@
       sentNote.hidden = false;
     }
 
-    async function polishSentenceNow() {
-      const geminiApi = window.SenaSeguraGemini;
-      if (!geminiApi || !geminiApi.isConfigured() || sentenceTokens.length === 0 || isRefiningLsp) return;
-      const baseText = composeSentence(sentenceTokens, activeSentenceExpression);
-      if (!baseText) return;
-      const tokensSnapshot = sentenceTokens.slice();
-      const lenAtCall = sentenceTokens.length;
-      const tokenAtCall = sessionToken;
-      const bridge = window.SenaSegura;
-      const ctxInfo = bridge && typeof bridge.getContext === 'function' ? bridge.getContext() : {};
-
-      isRefiningLsp = true;
-      renderSentence();
-      sentNote.textContent = 'Puliendo oración en LSP con Gemini…';
-      sentNote.hidden = false;
-
-      try {
-        const result = await geminiApi.refineLspSentence({
-          tokens: tokensSnapshot,
-          rawText: baseText,
-          sector: ctxInfo.sector || '',
-          procedure: ctxInfo.procedure || '',
-          timeoutMs: 4500
-        });
-        if (tokenAtCall !== sessionToken || sentenceTokens.length !== lenAtCall) return;
-        const refinedText = result && result.text ? result.text : baseText;
-        if (result && result.source === geminiApi.DEFAULT_MODEL) {
-          polishedSentenceText = refinedText;
-          sentNote.textContent = result.corrected
-            ? `Oración pulida en LSP (${result.source}). Revisa o pulsa “Enviar y leer al funcionario”.`
-            : `Oración validada en LSP (${result.source}).`;
-        } else {
-          polishedSentenceText = '';
-          sentNote.textContent = 'No se pudo conectar con Gemini; se mantiene el texto local exacto.';
-        }
-        sentNote.hidden = false;
-      } catch (_) {
-        if (tokenAtCall === sessionToken) {
-          sentNote.textContent = 'Sin conexión a Gemini; se mantiene el texto local exacto.';
-          sentNote.hidden = false;
-        }
-      } finally {
-        isRefiningLsp = false;
-        renderSentence();
-      }
-    }
-
     async function sendSentence({ auto = false } = {}) {
       if (sentenceTokens.length === 0) return;
       const tokensSnapshot = sentenceTokens.slice();
       const baseText = composeSentence(tokensSnapshot, activeSentenceExpression);
-      const alreadyPolished = Boolean(polishedSentenceText);
-      const textBeforeSend = polishedSentenceText || baseText;
-      const wasUrgentAux = Boolean(lastConfirmed && lastConfirmed.id === 'auxilio');
+      const currentSignature = getTokensSignature(tokensSnapshot);
+      const alreadyPolished = Boolean(polishedSentenceText && polishedTokensSignature === currentSignature);
+      const textBeforeSend = alreadyPolished ? polishedSentenceText : baseText;
+      cancelAutoPolish();
 
       sentenceTokens = [];
       polishedSentenceText = '';
+      polishedTokensSignature = '';
       activeSentenceExpression = 'neutro';
       renderSentence();
 
+      const hasPolishableContent =
+        tokensSnapshot.length >= 2 || (tokensSnapshot.length === 1 && tokensSnapshot[0].kind === 'word');
       const geminiApi = window.SenaSeguraGemini;
       const canUseGemini =
         !alreadyPolished &&
-        !wasUrgentAux &&
+        hasPolishableContent &&
         geminiApi &&
         typeof geminiApi.isConfigured === 'function' &&
         geminiApi.isConfigured() &&
@@ -4720,7 +4670,9 @@
 
     function insertSpace() {
       if (sentenceTokens.length === 0 || sentenceTokens[sentenceTokens.length - 1].kind === 'space') return;
+      cancelAutoPolish();
       polishedSentenceText = '';
+      polishedTokensSignature = '';
       sentenceTokens.push({ id: `spell:${SPACE_TOKEN_LABEL}`, kind: 'space', text: ' ' });
       lastLetterConfirmedAt = performance.now();
       resetSpellCandidate();
@@ -4728,15 +4680,16 @@
       renderSentence();
       sentNote.textContent = 'Espacio insertado. Continúa deletreando la siguiente palabra.';
       sentNote.hidden = false;
+      scheduleAutoPolish('space');
     }
 
     function undoLast() {
       if (sentenceTokens.length > 0) {
+        cancelAutoPolish();
         polishedSentenceText = '';
+        polishedTokensSignature = '';
         const removed = sentenceTokens.pop();
         delete lastAddedAt[removed.id];
-        const removedGesture = GESTURE_BY_ID[removed.id];
-        if (removedGesture && removedGesture.urgent) setUrgent(false);
         renderSentence();
         sentNote.textContent = 'Última seña eliminada de la oración.';
         sentNote.hidden = false;
@@ -4757,31 +4710,8 @@
       sentNote.hidden = false;
     }
 
-    /* ---------- Escalar a intérprete humano ---------- */
-    function escalate() {
-      stopCamera();
-      cancelSpeech();
-      const bridge = window.SenaSegura;
-      if (bridge && typeof bridge.setChannel === 'function') {
-        const wasUrgentGesture = lastConfirmed && lastConfirmed.id === 'auxilio';
-        bridge.setChannel('lsp');
-        if (!wasUrgentGesture && typeof bridge.appendChatMessage === 'function') {
-          bridge.appendChatMessage(CHAT_SENDER, 'Solicito un intérprete humano (escalado desde Cámara IA).', 'user');
-        }
-        bridge.activateEmergency();
-      } else {
-        const emergencyBtn = document.getElementById('btn-emergency-mode');
-        if (emergencyBtn) emergencyBtn.click();
-      }
-    }
-
-    /* ---------- Cuadrícula de prueba sin cámara (A–Z + Ñ) y guía neuronal limpia ---------- */
+    /* ---------- Guía neuronal limpia ---------- */
     const NEURAL_GUIDE_ITEMS = [
-      {
-        emoji: '\u{1F91F}',
-        title: 'Emergencia inmediata (Auxilio):',
-        detail: ' muestra índice y meñique extendidos (seña ILY) para activar prioridad e intérprete humano en <30 s.'
-      },
       {
         emoji: '\u{1F590}\u{FE0F}',
         title: 'Vocabulario dinámico LSP (118 señas):',
@@ -4790,7 +4720,7 @@
       {
         emoji: '\u{1F524}',
         title: 'Deletreo estático (A–Y, 1 mano):',
-        detail: ' forma una letra con una sola mano y detén la muñeca ~0.5 s para confirmarla (incluye C, M, N, P, Q, T, X).'
+        detail: ' forma una letra con una sola mano y detén la muñeca ~0.35 s para confirmarla (incluye C, M, N, P, Q, T, X).'
       },
       {
         emoji: '\u{270D}\u{FE0F}',
@@ -4812,38 +4742,6 @@
       { letter: 'J', tip: 'Meñique extendido (como I) trazando una curva hacia abajo y adentro.' },
       { letter: 'Z', tip: 'Índice extendido (como D) dibujando un zig-zag: lado, diagonal y lado.' }
     ];
-
-    GESTURES.forEach((gesture) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.setAttribute('data-gesture', gesture.id);
-
-      if ((gesture.kind === 'letter' || gesture.kind === 'space') && lettersBar) {
-        btn.className = 'vision-gesture-btn vision-letter-chip';
-        btn.setAttribute('aria-label', gesture.label);
-        btn.title = `${gesture.label}: ${gesture.hint}`;
-        btn.textContent = gesture.letter;
-        lettersBar.appendChild(btn);
-      } else {
-        btn.className = `vision-gesture-btn${gesture.urgent ? ' is-urgent' : ''}`;
-
-        const emoji = document.createElement('span');
-        emoji.className = 'vision-gesture-emoji';
-        emoji.setAttribute('aria-hidden', 'true');
-        emoji.textContent = gesture.emoji;
-
-        const label = document.createElement('span');
-        label.className = 'vision-gesture-label';
-        label.textContent = gesture.label;
-
-        const text = document.createElement('span');
-        text.className = 'vision-gesture-text';
-        text.textContent = gesture.kind === 'letter' ? `Añade “${gesture.letter}”` : gesture.phrase;
-
-        btn.append(emoji, label, text);
-        simGrid.appendChild(btn);
-      }
-    });
 
     if (guideList) {
       NEURAL_GUIDE_ITEMS.forEach((item) => {
@@ -4890,14 +4788,6 @@
     }
 
     /* ---------- Eventos ---------- */
-    (simBox || simGrid).addEventListener('click', (e) => {
-      const btn = e.target.closest('.vision-gesture-btn[data-gesture]');
-      if (!btn) return;
-      const confidence = Math.round(90 + Math.random() * 8);
-      setProgress(1);
-      confirmGesture(btn.getAttribute('data-gesture'), confidence, 'simulation');
-    });
-
     btnStart.addEventListener('click', () => {
       if (mode === 'loading' || mode === 'live') {
         resetToIdle();
@@ -4907,27 +4797,10 @@
       startCamera();
     });
 
-    btnSimulate.addEventListener('click', () => {
-      if (mode === 'simulation') {
-        resetToIdle();
-        btnSimulate.focus();
-        return;
-      }
-      enterSimulation('');
-      const first = (simBox || simGrid).querySelector('.vision-gesture-btn');
-      if (first) first.focus();
-    });
-
     btnSpeak.addEventListener('click', () => sendSentence({ auto: false }));
-    if (btnPolish) btnPolish.addEventListener('click', polishSentenceNow);
     if (btnSpace) btnSpace.addEventListener('click', insertSpace);
     btnUndo.addEventListener('click', undoLast);
     if (btnClear) btnClear.addEventListener('click', clearAllOutput);
-    btnEscalate.addEventListener('click', escalate);
-
-    document.addEventListener('senasegura:geminichange', () => {
-      syncGeminiUi();
-    });
 
     if (btnOverlay) {
       btnOverlay.addEventListener('click', () => {
@@ -4973,7 +4846,6 @@
       setVisionExpanded(false);
       resetToIdle();
       cancelSpeech();
-      syncGeminiUi();
     });
 
     document.addEventListener('visibilitychange', () => {
@@ -4984,6 +4856,7 @@
     });
 
     const releaseOnExit = () => {
+      cancelAutoPolish();
       if (preloadHandle !== null) {
         if (preloadUsingIdle && typeof window.cancelIdleCallback === 'function') {
           window.cancelIdleCallback(preloadHandle);
@@ -5027,8 +4900,6 @@
     };
     window.addEventListener('beforeunload', releaseOnExit);
     window.addEventListener('pagehide', releaseOnExit);
-
-    syncGeminiUi();
 
     if ('speechSynthesis' in window && typeof window.speechSynthesis.getVoices === 'function') {
       window.speechSynthesis.getVoices();

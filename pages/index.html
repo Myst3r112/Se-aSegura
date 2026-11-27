@@ -9,10 +9,10 @@
   <link rel="icon" href="../favicon.ico" type="image/x-icon">
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/fonts/atkinson-hyperlegible-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../css/styles.css?v=20">
-  <script src="../js/main.js?v=20" defer></script>
-  <script src="../js/gemini-lsp.js?v=20" defer></script>
-  <script src="../js/vision-ai.js?v=20" defer></script>
+  <link rel="stylesheet" href="../css/styles.css?v=21">
+  <script src="../js/main.js?v=21" defer></script>
+  <script src="../js/gemini-lsp.js?v=21" defer></script>
+  <script src="../js/vision-ai.js?v=21" defer></script>
 </head>
 <body id="inicio">
   <a class="skip-link" href="#contenido-principal">Saltar al contenido principal</a>
@@ -546,7 +546,6 @@
                     <div class="vision-title-group">
                       <h4 class="vision-title" id="vision-title">Cámara IA (LSP)</h4>
                       <span class="vision-ai-ready" id="vision-ai-ready" data-ready="loading" role="status" aria-live="polite">Preparando IA…</span>
-                      <span class="vision-gemini-badge" id="vision-gemini-badge" hidden>Gemini LSP</span>
                     </div>
 
                     <div class="vision-status-group">
@@ -562,7 +561,6 @@
                             <g data-state-icon="idle"><circle cx="12" cy="12" r="8"/><path d="M8 8L16 16"/></g>
                             <g data-state-icon="loading"><path d="M12 3V7M12 17V21M3 12H7M17 12H21M5.6 5.6L8.4 8.4M15.6 15.6L18.4 18.4M5.6 18.4L8.4 15.6M15.6 8.4L18.4 5.6"/></g>
                             <g data-state-icon="live"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></g>
-                            <g data-state-icon="simulation"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9H15M9 12H15M9 15H12"/></g>
                           </svg>
                         </span>
                         <span class="vision-status-text" id="vision-status-text">Cámara inactiva</span>
@@ -570,7 +568,7 @@
                     </div>
                   </div>
 
-                  <p class="vision-notice" id="vision-notice" role="status" hidden></p>
+                  <div class="vision-notice" id="vision-notice" role="status" hidden></div>
 
                   <div class="vision-stage" id="vision-stage">
                     <video id="vision-video" class="vision-video" autoplay playsinline muted disablepictureinpicture aria-label="Vista previa de tu cámara"></video>
@@ -589,21 +587,11 @@
                     </div>
                   </div>
 
-                  <div class="vision-actions" role="group" aria-label="Controles de Cámara IA">
+                  <div class="vision-actions" role="group" aria-label="Control de Cámara IA">
                     <button type="button" class="btn btn-primary vision-btn" id="btn-vision-start">
                       <svg class="vision-btn-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5H14C15.1 5 16 5.9 16 7V17C16 18.1 15.1 19 14 19H4C2.9 19 2 18.1 2 17V7C2 5.9 2.9 5 4 5Z"/><path d="M16 10L22 6V18L16 14"/></svg>
                       <span>Activar Cámara</span>
                     </button>
-                    <button type="button" class="btn btn-secondary vision-btn" id="btn-vision-simulate">
-                      <span>Probar sin cámara</span>
-                    </button>
-                  </div>
-
-                  <div class="vision-simulation" id="vision-simulation" hidden>
-                    <p class="vision-simulation-title" id="vision-simulation-title">Señas rápidas de ventanilla (sin cámara)</p>
-                    <div class="vision-gesture-grid" id="vision-gesture-grid" role="group" aria-labelledby="vision-simulation-title"></div>
-                    <p class="vision-letters-subtitle vision-simulation-subtitle" id="vision-letters-title">Deletreo LSP (Alfabeto A–Z + Ñ)</p>
-                    <div class="vision-letters-bar" id="vision-letters-bar" role="group" aria-labelledby="vision-letters-title"></div>
                   </div>
 
                   <div class="vision-output" id="vision-output">
@@ -614,7 +602,6 @@
                       </div>
                       <p class="vision-sentence is-empty" id="vision-sentence">Muestra una seña y mantenla un instante para empezar la oración.</p>
                       <p class="vision-sent-note" id="vision-sent-note" hidden></p>
-                      <p class="vision-urgent-hint" id="vision-urgent-hint" hidden>Seña de auxilio detectada y enviada. Pulsa el botón rojo para conectar con un intérprete humano.</p>
                     </div>
 
                     <div class="vision-stability">
@@ -633,9 +620,6 @@
                           <img src="../assets/icons/mic.svg" alt="" width="24" height="24" class="icon-svg icon-primary vision-btn-icon">
                           <span>Enviar y leer al funcionario</span>
                         </button>
-                        <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-polish" hidden disabled title="Refina la oración en Lengua de Señas Peruana con Gemini">
-                          <span>Pulir LSP</span>
-                        </button>
                         <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-space" disabled aria-label="Insertar espacio entre palabras deletreadas">
                           <span>Espacio</span>
                         </button>
@@ -644,12 +628,6 @@
                         </button>
                         <button type="button" class="btn btn-outline-primary vision-btn vision-btn-compact" id="btn-vision-clear" disabled>
                           <span>Limpiar</span>
-                        </button>
-                      </div>
-                      <div class="vision-escalate-zone">
-                        <button type="button" class="btn btn-emergency vision-btn vision-escalate" id="btn-vision-escalate">
-                          <img src="../assets/icons/alert.svg" alt="" width="24" height="24" class="icon-svg icon-on-primary vision-btn-icon">
-                          <span>Escalar a Intérprete Humano (&lt;30 s)</span>
                         </button>
                       </div>
                     </div>

@@ -3657,30 +3657,6 @@ html[data-contrast="high"] .vision-toggle-btn[aria-pressed="true"] {
   border-color: var(--color-focus);
 }
 
-/* Insignia pasiva de solo lectura cuando Gemini LSP está activo por configuración Proxy */
-.vision-gemini-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 2px solid var(--color-primary);
-  background-color: var(--color-surface);
-  color: var(--color-primary);
-  font-size: 0.75rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.vision-gemini-badge[hidden] {
-  display: none;
-}
-
-html[data-contrast="high"] .vision-gemini-badge {
-  background-color: var(--color-bg);
-  border-color: var(--color-focus);
-  color: var(--color-focus);
-}
-
 .vision-hands-count {
   display: inline-flex;
   align-items: center;
@@ -3734,10 +3710,6 @@ html[data-contrast="high"] .vision-hands-count[data-count="2"] {
   --vs-color: var(--color-success);
 }
 
-.vision-status[data-state="simulation"] {
-  --vs-color: var(--color-primary);
-}
-
 html[data-contrast="high"] .vision-status {
   --vs-color: var(--color-border);
   background-color: var(--color-bg);
@@ -3759,8 +3731,7 @@ html[data-contrast="high"] .vision-status[data-state="idle"] {
 
 .vision-status[data-state="idle"] [data-state-icon="idle"],
 .vision-status[data-state="loading"] [data-state-icon="loading"],
-.vision-status[data-state="live"] [data-state-icon="live"],
-.vision-status[data-state="simulation"] [data-state-icon="simulation"] {
+.vision-status[data-state="live"] [data-state-icon="live"] {
   display: inline;
 }
 
@@ -3783,12 +3754,29 @@ html[data-contrast="high"] .vision-status[data-state="idle"] {
 .vision-notice {
   margin: 0;
   padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   border-radius: var(--radius-12);
   border: 2px solid var(--color-warning);
   background-color: #FEF3C7;
   color: #78350F;
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.vision-notice[hidden] {
+  display: none;
+}
+
+.vision-notice-text {
+  flex: 1 1 220px;
+}
+
+.vision-notice-action {
+  flex-shrink: 0;
 }
 
 html[data-contrast="high"] .vision-notice {
@@ -3964,6 +3952,10 @@ html[data-contrast="high"] .vision-placeholder {
   gap: 10px;
 }
 
+.vision-actions .vision-btn {
+  flex: 1 1 100%;
+}
+
 .vision-output-actions {
   display: flex;
   align-items: center;
@@ -3976,18 +3968,7 @@ html[data-contrast="high"] .vision-placeholder {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  flex: 2 1 300px;
-}
-
-.vision-escalate-zone {
-  display: flex;
-  flex: 0 1 auto;
-  padding-left: 12px;
-  border-left: 2px solid var(--color-border);
-}
-
-html[data-contrast="high"] .vision-escalate-zone {
-  border-left-color: var(--color-border);
+  flex: 1 1 100%;
 }
 
 .vision-btn {
@@ -4003,10 +3984,6 @@ html[data-contrast="high"] .vision-escalate-zone {
   min-width: 92px;
 }
 
-.vision-escalate-zone .vision-btn {
-  flex: 0 1 auto;
-}
-
 .vision-btn-icon {
   flex-shrink: 0;
 }
@@ -4018,128 +3995,6 @@ html[data-contrast="high"] .vision-escalate-zone {
 
 html[data-contrast="high"] .vision-btn:disabled {
   border-style: dashed;
-}
-
-html[data-contrast="high"] .vision-btn.btn-emergency {
-  background-color: #D92626;
-  color: var(--color-text);
-}
-
-/* Respaldo: señas rápidas compactas y teclado alfabético LSP en fila */
-.vision-simulation {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  background-color: var(--color-surface);
-  border: 2px dashed var(--color-primary);
-  border-radius: var(--radius-12);
-}
-
-html[data-contrast="high"] .vision-simulation {
-  border-color: var(--color-border);
-}
-
-.vision-simulation-title,
-.vision-simulation-subtitle {
-  margin: 0;
-  font-weight: 700;
-  font-size: 0.9375rem;
-}
-
-.vision-simulation-subtitle {
-  margin-top: 4px;
-  color: var(--color-muted);
-}
-
-html[data-contrast="high"] .vision-simulation-subtitle {
-  color: var(--color-text);
-}
-
-.vision-gesture-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 172px), 1fr));
-  gap: 8px;
-}
-
-.vision-gesture-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: 2px;
-  min-height: 46px;
-  padding: 8px 10px;
-  text-align: left;
-  border-radius: var(--radius-12);
-  border: 2px solid var(--color-primary);
-  background-color: var(--color-surface);
-  color: var(--color-text);
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-
-.vision-gesture-btn:hover {
-  background-color: var(--color-bg);
-}
-
-.vision-gesture-btn.is-urgent {
-  border-color: var(--color-emergency);
-}
-
-.vision-gesture-emoji {
-  font-size: 1.375rem;
-  line-height: 1.15;
-}
-
-.vision-gesture-label {
-  font-size: 0.875rem;
-  font-weight: 700;
-  color: var(--color-primary);
-}
-
-.vision-gesture-text {
-  font-size: 0.8125rem;
-  color: var(--color-muted);
-}
-
-.vision-letters-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.vision-letter-chip {
-  flex: 0 0 auto;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 6px 10px;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  font-size: 1rem;
-  font-weight: 700;
-  border-radius: var(--radius-8);
-}
-
-html[data-contrast="high"] .vision-gesture-btn {
-  background-color: var(--color-bg);
-  border-color: var(--color-border);
-  color: var(--color-text);
-}
-
-html[data-contrast="high"] .vision-gesture-label {
-  color: var(--color-focus);
-}
-
-html[data-contrast="high"] .vision-gesture-btn:hover {
-  background-color: var(--color-focus);
-}
-
-html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-label,
-html[data-contrast="high"] .vision-gesture-btn:hover .vision-gesture-text,
-html[data-contrast="high"] .vision-letter-chip:hover {
-  color: var(--color-bg);
 }
 
 /* Guía rápida desplegable de gestos (1 y 2 manos) */
@@ -4318,17 +4173,6 @@ html[data-contrast="high"] .vision-sentence.is-empty {
   color: var(--color-muted);
 }
 
-.vision-urgent-hint {
-  margin: 8px 0 0;
-  padding: 8px 12px;
-  border-left: 8px solid var(--color-emergency);
-  border-radius: var(--radius-8);
-  background-color: var(--color-emergency-bg);
-  color: var(--color-text);
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-
 .vision-stability {
   display: flex;
   flex-direction: column;
@@ -4369,24 +4213,7 @@ html[data-contrast="high"] .vision-progress-fill {
   background-color: var(--color-focus);
 }
 
-/* Botón de escalado resaltado ante la seña de auxilio */
-.vision-escalate.is-highlighted {
-  box-shadow: 0 0 0 4px var(--color-surface), 0 0 0 8px var(--color-emergency);
-  animation: vision-pulse 1.2s ease-in-out infinite;
-}
-
-html[data-contrast="high"] .vision-escalate.is-highlighted {
-  box-shadow: 0 0 0 4px var(--color-bg), 0 0 0 8px var(--color-border);
-}
-
-@keyframes vision-pulse {
-  50% {
-    transform: scale(1.03);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .vision-escalate.is-highlighted,
   .vision-status[data-state="loading"] [data-state-icon="loading"],
   .vision-status[data-state="live"] [data-state-icon="live"] circle:last-child {
     animation: none;
@@ -4767,18 +4594,6 @@ html[data-contrast="high"] .app-bottom-bar {
 
   .emergency-types-row {
     grid-template-columns: 1fr;
-  }
-
-  .vision-escalate-zone {
-    width: 100%;
-    padding-left: 0;
-    padding-top: 8px;
-    border-left: 0;
-    border-top: 2px solid var(--color-border);
-  }
-
-  .vision-escalate-zone .vision-btn {
-    width: 100%;
   }
 
   .app-welcome-actions .btn,
